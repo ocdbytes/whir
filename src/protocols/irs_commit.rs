@@ -128,6 +128,11 @@ pub struct Evaluations<F> {
 
     /// Matrix of codewords for each row.
     pub matrix: Vec<F>,
+
+    /// Row indices of the opened points (populated for in-domain openings).
+    /// Empty for out-of-domain evaluations.
+    #[serde(default)]
+    pub indices: Vec<usize>,
 }
 
 impl<F, G, M> Config<F, G, M>
@@ -154,6 +159,13 @@ where
 
     pub fn generator(&self) -> F {
         ntt::generator(self.num_rows()).expect("Subgroup of requested size not found")
+    }
+
+    /// Returns the generator of the original (un-interleaved) evaluation domain.
+    /// This is the root of unity for a domain of size `num_rows * interleaving_depth`.
+    pub fn original_domain_generator(&self) -> F {
+        ntt::generator(self.num_rows() * self.interleaving_depth)
+            .expect("Subgroup of requested size not found")
     }
 
     /// Commit to one or more polynomials.
@@ -224,6 +236,7 @@ where
             out_of_domain: Evaluations {
                 points: oods_points,
                 matrix: oods_matrix,
+                indices: Vec::new(),
             },
         }
     }
@@ -248,6 +261,7 @@ where
             out_of_domain: Evaluations {
                 points: oods_points,
                 matrix: oods_matrix,
+                indices: Vec::new(),
             },
         })
     }
@@ -306,7 +320,11 @@ where
             matrix_col_offset += self.num_cols();
         }
 
-        Evaluations { points, matrix }
+        Evaluations {
+            points,
+            matrix,
+            indices,
+        }
     }
 
     /// Verifies one or more openings and returns the in-domain evaluations.
@@ -359,7 +377,11 @@ where
             }
             matrix_col_offset += self.num_cols();
         }
-        Ok(Evaluations { points, matrix })
+        Ok(Evaluations {
+            points,
+            matrix,
+            indices,
+        })
     }
 
     fn in_domain_challenges<T>(&self, transcript: &mut T) -> (Vec<usize>, Vec<F>)

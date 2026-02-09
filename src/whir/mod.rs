@@ -5,6 +5,7 @@ pub mod prover;
 pub mod statement;
 pub mod utils;
 pub mod verifier;
+pub mod zk;
 
 pub use committer::{Commitment, Witness};
 
@@ -627,7 +628,7 @@ mod tests {
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
 
-        // Commit using commit_batch (stacks batch_size polynomials per witness)
+        // Commit using commit (stacks batch_size polynomials per witness)
         let mut witnesses = Vec::new();
         for witness_polys in &all_polynomials {
             let poly_refs: Vec<_> = witness_polys.iter().collect::<Vec<_>>();
@@ -687,4 +688,211 @@ mod tests {
             }
         }
     }
+
+    // ───────────────── Zero-Knowledge (prove_zk) Tests ─────────────────
+
+    /// Run a complete zkWHIR proof lifecycle: sample preprocessing, commit_zk, prove_zk.
+    ///
+    /// This function:
+    /// - builds a multilinear polynomial with the specified number of variables,
+    /// - samples ZK preprocessing polynomials (msk, g₀, ĝ₁..ĝμ, M),
+    /// - constructs a helper WhirConfig for the (ℓ+1)-variate helper WHIR,
+    /// - commits using commit_zk (producing f̂ = f + msk and helper commitments),
+    /// - generates a ZK proof using prove_zk.
+    fn make_whir_zk_things(
+        num_variables: usize,
+        folding_factor: FoldingFactor,
+        num_points: usize,
+        soundness_type: SoundnessType,
+        pow_bits: usize,
+    ) {
+        use ark_std::rand::{rngs::StdRng, SeedableRng};
+
+        use crate::whir::zk::{ZkParams, ZkPreprocessingPolynomials};
+
+        let num_coeffs = 1 << num_variables;
+        let mut rng = StdRng::seed_from_u64(12345);
+
+        // ── Main WHIR config ──
+        let mv_params = MultivariateParameters::new(num_variables);
+        let whir_params = ProtocolParameters {
+            initial_statement: true,
+            security_level: 32,
+            pow_bits,
+            folding_factor,
+            soundness_type,
+            starting_log_inv_rate: 1,
+            batch_size: 1,
+            hash_id: hash::SHA2,
+        };
+
+        let reed_solomon = Arc::new(RSDefault);
+        let basefield_reed_solomon = reed_solomon.clone();
+        let params = WhirConfig::<EF>::new(
+            reed_solomon,
+            basefield_reed_solomon,
+            mv_params,
+            &whir_params,
+        );
+        eprintln!("{params}");
+
+        // ── Compute ZK parameters (ℓ, μ) ──
+        let zk_params = ZkParams::from_whir_params(&params);
+        eprintln!("ZK params: ell={}, mu={}", zk_params.ell, zk_params.mu);
+
+        // ── Helper WHIR config for (ℓ+1)-variate helper polynomials ──
+        //    batch_size = μ+1 so all helper polys share one Merkle tree
+        let helper_mv_params = MultivariateParameters::new(zk_params.ell + 1);
+        let helper_whir_params = ProtocolParameters {
+            initial_statement: true,
+            security_level: 32,
+            pow_bits: 0,
+            folding_factor: FoldingFactor::Constant(1),
+            soundness_type: SoundnessType::ConjectureList,
+            starting_log_inv_rate: 1,
+            batch_size: zk_params.mu + 1,
+            hash_id: hash::SHA2,
+        };
+        let helper_rs = Arc::new(RSDefault);
+        let helper_basefield_rs = helper_rs.clone();
+        let helper_config = WhirConfig::<EF>::new(
+            helper_rs,
+            helper_basefield_rs,
+            helper_mv_params,
+            &helper_whir_params,
+        );
+
+        // ── Sample random preprocessing polynomials ──
+        let preprocessing = std::sync::Arc::new(
+            ZkPreprocessingPolynomials::<EF>::sample(&mut rng, zk_params.clone()),
+        );
+
+        // ── Define witness polynomial (constant 1 across all inputs) ──
+        let polynomial = CoefficientList::new(vec![F::ONE; num_coeffs]);
+
+        // ── Create statement with evaluation constraints ──
+        let mut statement = Statement::new(num_variables);
+        for _ in 0..num_points {
+            let point = MultilinearPoint::rand(&mut rng, num_variables);
+            let eval = polynomial.evaluate_at_extension(&point);
+            statement.add_constraint(Weights::evaluation(point), eval);
+        }
+
+        // ── Set up Fiat-Shamir transcript ──
+        let ds = DomainSeparator::protocol(&params)
+            .session(&format!("ZK Test at {}:{}", file!(), line!()))
+            .instance(&Empty);
+        let mut prover_state = ProverState::new_std(&ds);
+
+        // ── ZK commitment: commit to f̂ = f + msk, plus helper polynomials ──
+        let zk_witness = params.commit_zk(
+            &mut prover_state,
+            &polynomial,
+            &helper_config,
+            preprocessing,
+        );
+
+        // ── ZK proof: prove knowledge of f via blinded virtual oracle ──
+        let (_point, _evals) = params.prove_zk(
+            &mut prover_state,
+            &polynomial,
+            &zk_witness,
+            &helper_config,
+            &statement,
+        );
+        let proof = prover_state.proof();
+        let mut verifier_state = VerifierState::new_std(&ds, &proof);
+
+        // ── Receive commitments from transcript (mirrors commit_zk order) ──
+        let f_hat_commitment = params.receive_commitment(&mut verifier_state).unwrap();
+        // Single batch commitment for all μ+1 helper polynomials
+        let helper_commitment = helper_config
+            .receive_commitment(&mut verifier_state)
+            .unwrap();
+
+        // ── Verify ZK proof ──
+        let verify_result = params.verify_zk(
+            &mut verifier_state,
+            &f_hat_commitment,
+            &helper_commitment,
+            &helper_config,
+            &zk_params,
+            &statement,
+        );
+        assert!(
+            verify_result.is_ok(),
+            "ZK verification failed: {:?}",
+            verify_result.err()
+        );
+    }
+
+    #[test]
+    fn test_whir_zk_basic() {
+        // ZK requires ℓ ≤ μ. With security_level=32, the query count drives ℓ ≈ 8–10,
+        // so num_variables (= μ) must be large enough.
+        let configs: &[(usize, usize)] = &[
+            // (num_variables, folding_factor)
+            (10, 2),
+            (12, 2),
+            (12, 3),
+            (12, 4),
+        ];
+        let num_points = [0, 1, 2];
+
+        for &(num_variable, folding_factor) in configs {
+            for num_points in num_points {
+                eprintln!();
+                dbg!(num_variable, folding_factor, num_points);
+
+                make_whir_zk_things(
+                    num_variable,
+                    FoldingFactor::Constant(folding_factor),
+                    num_points,
+                    SoundnessType::ConjectureList,
+                    0,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_whir_zk_with_pow() {
+        // Test ZK with proof-of-work enabled
+        make_whir_zk_things(
+            12,
+            FoldingFactor::Constant(2),
+            2,
+            SoundnessType::ConjectureList,
+            5,
+        );
+    }
+
+    #[test]
+    fn test_whir_zk_soundness_types() {
+        // Test ZK across different soundness types
+        let soundness_types = [
+            SoundnessType::ConjectureList,
+            SoundnessType::ProvableList,
+            SoundnessType::UniqueDecoding,
+        ];
+
+        for soundness_type in soundness_types {
+            eprintln!();
+            dbg!(soundness_type);
+            make_whir_zk_things(12, FoldingFactor::Constant(2), 1, soundness_type, 0);
+        }
+    }
+
+    #[test]
+    fn test_whir_zk_mixed_folding() {
+        // Test ZK with mixed folding factors
+        make_whir_zk_things(
+            12,
+            FoldingFactor::ConstantFromSecondRound(3, 3),
+            1,
+            SoundnessType::ConjectureList,
+            0,
+        );
+    }
 }
+

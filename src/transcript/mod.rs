@@ -220,6 +220,33 @@ where
             .expect("Failed to serialize hint");
     }
 
+    /// Batch-send multiple logical prover messages from a pre-encoded byte buffer.
+    ///
+    /// Instead of calling [`prover_message`] once per field element (which encodes
+    /// each element twice — once for sponge absorption, once for NARG serialization),
+    /// this method sends all bytes in a **single** sponge + NARG operation.
+    ///
+    /// # Transcript compatibility
+    ///
+    /// The verifier can read these back using individual
+    /// [`VerifierState::prover_message::<T>()`] calls because:
+    /// 1. [`DuplexSpongeInterface::absorb`] is associative
+    /// 2. The NARG bytes are the concatenation of individual element encodings
+    ///
+    /// `count` is the number of logical messages (used only for debug-mode
+    /// pattern matching with the verifier).
+    #[cfg_attr(test, track_caller)]
+    pub fn prover_messages_bytes<T>(&mut self, _count: usize, encoded: Vec<u8>)
+    where
+        Vec<u8>: Encoding<[H::U]> + NargSerialize,
+    {
+        #[cfg(debug_assertions)]
+        for _ in 0.._count {
+            self.push(Interaction::ProverMessage(type_name::<T>().to_owned()));
+        }
+        self.inner.prover_message(&encoded);
+    }
+
     pub fn proof(self) -> Proof {
         Proof {
             narg_string: self.inner.narg_string().to_owned(),

@@ -350,7 +350,8 @@ fn hash_rows_serial<T: Encodable + Send + Sync>(
     if encoder.is_buffered() {
         // Buffered encoder, find some optimal size.
         let target = workload_size::<u8>() / 8;
-        let batch_size = (target / message_size).next_multiple_of(engine.preferred_batch_size());
+        let batch_size =
+            (target / message_size).max(1).next_multiple_of(engine.preferred_batch_size());
         assert!(batch_size >= 1);
         for (matrix, out) in matrix
             .chunks(batch_size * cols)

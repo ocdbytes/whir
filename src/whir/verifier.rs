@@ -1,4 +1,4 @@
-use ark_ff::FftField;
+use ark_ff::{FftField, Field};
 
 use super::{
     config::{RoundConfig, WhirConfig},
@@ -6,7 +6,9 @@ use super::{
 };
 use crate::{
     algebra::{
-        poly_utils::{coeffs::CoefficientList, multilinear::MultilinearPoint},
+        embedding::Embedding,
+        ntt,
+        poly_utils::{coeffs::CoefficientList, fold::compute_fold, multilinear::MultilinearPoint},
         tensor_product,
     },
     hash::Hash,
@@ -18,7 +20,11 @@ use crate::{
     type_info::Type,
     utils::expand_randomness,
     verify,
-    whir::{utils::get_challenge_stir_queries, Commitment},
+    whir::{
+        utils::get_challenge_stir_queries,
+        zk::{HelperEvaluations, ZkParams},
+        Commitment,
+    },
 };
 
 pub(crate) enum RoundCommitment<'a, F: FftField> {
@@ -339,6 +345,450 @@ impl<F: FftField> WhirConfig<F> {
         verify!(claimed_sum == evaluation_of_weights * final_value);
 
         Ok((folding_randomness, deferred))
+    }
+
+    /// Verify a ZK WHIR proof.
+    ///
+    /// This mirrors `prove_zk` step-by-step:
+    /// 1. Read the ZK transcript header (β, g evaluations, ρ)
+    /// 2. Build the modified statement for P = ρ·f + g
+    /// 3. Verify the initial sumcheck
+    /// 4. Verify WHIR rounds (round 0 opens [[f̂]] + helper proof; later rounds use STIR)
+    /// 5. Verify the final round
+    /// 6. Check the final sumcheck evaluation
+    #[allow(clippy::too_many_lines)]
+    pub fn verify_zk<H: DuplexSpongeInterface>(
+        &self,
+        verifier_state: &mut VerifierState<'_, H>,
+        f_hat_commitment: &irs_commit::Commitment<F>,
+        helper_commitment: &irs_commit::Commitment<F>,
+        helper_config: &WhirConfig<F>,
+        zk_params: &ZkParams,
+        statement: &Statement<F>,
+    ) -> VerificationResult<(MultilinearPoint<F>, Vec<F>)>
+    where
+        F: Codec<[H::U]>,
+        u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        // ====================================================================
+        // Phase 1: ZK transcript header (mirrors prove_zk steps 1–6)
+        // ====================================================================
+
+        // Step 1: Sample β (blinding challenge)
+        let beta: F = verifier_state.verifier_message();
+
+        // Step 2: Read g(āᵢ) evaluations from transcript
+        let g_evals: Vec<F> = statement
+            .constraints
+            .iter()
+            .map(|_| verifier_state.prover_message::<F>())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Step 3: Sample ρ (masking challenge)
+        let rho: F = verifier_state.verifier_message();
+
+        // Step 4: Build modified statement for P = ρ·f + g
+        //   new_sum_i = ρ · f(āᵢ) + g(āᵢ)
+        let mut modified_statement = Statement::new(statement.num_variables());
+        for (original_constraint, &g_eval) in statement.constraints.iter().zip(g_evals.iter()) {
+            let new_sum = rho * original_constraint.sum + g_eval;
+            modified_statement.add_constraint(original_constraint.weights.clone(), new_sum);
+        }
+
+        // ====================================================================
+        // Phase 2: Initial sumcheck (mirrors prove_zk steps 7–8)
+        // ====================================================================
+
+        let mut round_constraints = Vec::new();
+        let mut round_folding_randomness = Vec::new();
+        let mut claimed_sum = F::ZERO;
+
+        if self.initial_statement {
+            let combination_randomness = self.combine_constraints(
+                verifier_state,
+                &mut claimed_sum,
+                &modified_statement.constraints,
+            )?;
+            round_constraints.push((combination_randomness, modified_statement.constraints));
+
+            let config = sumcheck::Config {
+                field: Type::new(),
+                initial_size: 1 << self.folding_factor.at_round(0), // Not used by verify
+                rounds: vec![
+                    sumcheck::RoundConfig {
+                        pow: self.starting_folding_pow
+                    };
+                    self.folding_factor.at_round(0)
+                ],
+            };
+            let folding_randomness = config.verify(verifier_state, &mut claimed_sum)?;
+            round_folding_randomness.push(folding_randomness);
+        } else {
+            round_constraints.push((vec![], vec![]));
+
+            let mut folding_randomness = vec![F::ZERO; self.folding_factor.at_round(0)];
+            for randomness in &mut folding_randomness {
+                *randomness = verifier_state.verifier_message();
+            }
+            round_folding_randomness.push(MultilinearPoint(folding_randomness));
+
+            self.starting_folding_pow.verify(verifier_state)?;
+        }
+
+        // ====================================================================
+        // Phase 3: WHIR rounds (mirrors the prover's round() loop)
+        // ====================================================================
+
+        // Track whether we've processed the initial ZK opening.
+        // None = initial round (open [[f̂]] + helper proof)
+        // Some(mc) = subsequent rounds (use verify_stir_challenges)
+        let mut prev_round_matrix_commitment: Option<matrix_commit::Commitment> = None;
+
+        for round_index in 0..self.n_rounds() {
+            let round_params = &self.round_configs[round_index];
+
+            // 3a. Receive the round's folded oracle commitment
+            let matrix_commitment = round_params
+                .matrix_committer
+                .receive_commitment(verifier_state)?;
+
+            // 3b. OOD points + answers
+            let ood_points: Vec<F> = verifier_state.verifier_message_vec(round_params.ood_samples);
+            let ood_answers: Vec<F> = (0..round_params.ood_samples)
+                .map(|_| verifier_state.prover_message::<F>())
+                .collect::<Result<Vec<_>, _>>()?;
+            let oods_constraints =
+                ood_points
+                    .iter()
+                    .zip(ood_answers.iter())
+                    .map(|(point, answer)| Constraint {
+                        weights: Weights::univariate(*point, round_params.num_variables),
+                        sum: *answer,
+                        defer_evaluation: false,
+                    });
+
+            // 3c. PoW
+            round_params.pow.verify(verifier_state)?;
+
+            // 3d. Verify commitment opening
+            let in_domain_constraints = if let Some(ref mc) = prev_round_matrix_commitment {
+                // Rounds > 0: standard STIR challenge verification
+                self.verify_stir_challenges(
+                    round_index,
+                    verifier_state,
+                    round_params,
+                    &self.round_configs[round_index - 1].matrix_committer,
+                    mc,
+                    F::ZERO,
+                    round_folding_randomness.last().unwrap(),
+                )?
+            } else {
+                // Round 0: ZK initial opening (open [[f̂]] + helper proof)
+                self.verify_initial_zk_opening(
+                    verifier_state,
+                    f_hat_commitment,
+                    helper_commitment,
+                    helper_config,
+                    zk_params,
+                    rho,
+                    beta,
+                    round_folding_randomness.last().unwrap(),
+                    round_params.num_variables,
+                )?
+            };
+
+            // 3e. Combine OOD + in-domain constraints
+            let constraints: Vec<Constraint<F>> = oods_constraints
+                .into_iter()
+                .chain(in_domain_constraints.into_iter())
+                .collect();
+            let combination_randomness =
+                self.combine_constraints(verifier_state, &mut claimed_sum, &constraints)?;
+            round_constraints.push((combination_randomness.clone(), constraints));
+
+            // 3f. Sumcheck verify
+            let config = sumcheck::Config {
+                field: Type::new(),
+                initial_size: 1 << self.folding_factor.at_round(round_index + 1), // Not used
+                rounds: vec![
+                    sumcheck::RoundConfig {
+                        pow: round_params.folding_pow
+                    };
+                    self.folding_factor.at_round(round_index + 1)
+                ],
+            };
+            let folding_randomness = config.verify(verifier_state, &mut claimed_sum)?;
+            round_folding_randomness.push(folding_randomness);
+
+            prev_round_matrix_commitment = Some(matrix_commitment);
+        }
+
+        // ====================================================================
+        // Phase 4: Final round
+        // ====================================================================
+
+        // Read final polynomial coefficients
+        let mut final_coefficients = vec![F::ZERO; 1 << self.final_sumcheck_rounds];
+        for coeff in &mut final_coefficients {
+            *coeff = verifier_state.prover_message()?;
+        }
+        let final_coefficients = CoefficientList::new(final_coefficients);
+
+        // PoW
+        self.final_pow.verify(verifier_state)?;
+
+        // Final opening verification
+        let in_domain_constraints = if let Some(ref mc) = prev_round_matrix_commitment {
+            // Final round after ≥1 WHIR rounds: STIR challenge verification
+            self.verify_stir_challenges(
+                self.n_rounds(),
+                verifier_state,
+                &self.final_round_config(),
+                &self.round_configs.last().unwrap().matrix_committer,
+                mc,
+                F::ZERO,
+                round_folding_randomness.last().unwrap(),
+            )?
+        } else {
+            // Final round IS the initial round (0 WHIR rounds)
+            let num_variables = self.mv_parameters.num_variables - self.folding_factor.at_round(0);
+            self.verify_initial_zk_opening(
+                verifier_state,
+                f_hat_commitment,
+                helper_commitment,
+                helper_config,
+                zk_params,
+                rho,
+                beta,
+                round_folding_randomness.last().unwrap(),
+                num_variables,
+            )?
+        };
+
+        // Check that the final polynomial satisfies all in-domain constraints
+        verify!(in_domain_constraints
+            .iter()
+            .all(|c| c.verify(&final_coefficients)));
+
+        // Final sumcheck
+        let config = sumcheck::Config {
+            field: Type::new(),
+            initial_size: 1 << self.final_sumcheck_rounds, // Not used
+            rounds: vec![
+                sumcheck::RoundConfig {
+                    pow: self.final_folding_pow
+                };
+                self.final_sumcheck_rounds
+            ],
+        };
+        let final_sumcheck_randomness = config.verify(verifier_state, &mut claimed_sum)?;
+        round_folding_randomness.push(final_sumcheck_randomness.clone());
+
+        // ====================================================================
+        // Phase 5: Final consistency check
+        // ====================================================================
+
+        // Compute total folding randomness across all rounds
+        let folding_randomness = MultilinearPoint(
+            round_folding_randomness
+                .into_iter()
+                .rev()
+                .flat_map(|poly| poly.0.into_iter())
+                .collect(),
+        );
+
+        // Read deferred constraint evaluation hints
+        let deferred: Vec<F> = verifier_state.prover_hint_ark()?;
+        let evaluation_of_weights =
+            self.eval_constraints_poly(&round_constraints, &deferred, folding_randomness.clone());
+
+        // Check the final sumcheck evaluation
+        let final_value = final_coefficients.evaluate(&final_sumcheck_randomness);
+        verify!(claimed_sum == evaluation_of_weights * final_value);
+
+        Ok((folding_randomness, deferred))
+    }
+
+    /// Verify the ZK initial commitment opening: open [[f̂]], read + verify helper
+    /// evaluations, and construct virtual oracle constraints.
+    ///
+    /// This is used both in the round loop (round 0) and in the final round
+    /// when there are 0 WHIR rounds.
+    ///
+    /// The verifier locally computes the virtual oracle values from:
+    /// - The IRS opening of [[f̂]] (sub-polynomial evaluations per query)
+    /// - The verified helper evaluations at all k coset elements per query
+    /// This ensures the constraint sums are bound to the committed [[f̂]].
+    #[allow(clippy::too_many_arguments)]
+    fn verify_initial_zk_opening<H>(
+        &self,
+        verifier_state: &mut VerifierState<'_, H>,
+        f_hat_commitment: &irs_commit::Commitment<F>,
+        helper_commitment: &irs_commit::Commitment<F>,
+        helper_config: &WhirConfig<F>,
+        zk_params: &ZkParams,
+        rho: F,
+        beta: F,
+        folding_randomness: &MultilinearPoint<F>,
+        num_variables: usize,
+    ) -> VerificationResult<Vec<Constraint<F>>>
+    where
+        H: DuplexSpongeInterface,
+        F: Codec<[H::U]>,
+        u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        let embedding = self.embedding();
+
+        // 1. Open [[f̂]] via IRS verify — returns sub-polynomial evaluations per query
+        let in_domain = self
+            .initial_committer
+            .verify(verifier_state, &[f_hat_commitment])?;
+
+        // 2. Compute coset structure for verifying the virtual oracle.
+        //    The IRS commit uses interleaving depth k. Each query reveals k
+        //    sub-polynomial evaluations. The virtual oracle L = ρ·f̂ + h must be
+        //    evaluated at all k coset elements per query to fold correctly.
+        let k = self.initial_committer.interleaving_depth;
+        let num_rows = self.initial_committer.num_rows();
+        let omega: F::BasePrimeField =
+            ntt::generator(num_rows * k).expect("original domain generator not found");
+        let zeta = omega.pow([num_rows as u64]); // coset generator (primitive k-th root of unity)
+        let fold_factor = self.folding_factor.at_round(0);
+
+        // 3. Read helper evaluations from transcript — k evaluations per query
+        //    For each query q and each coset element j: m(γ_{q,j}, ρ) and ĝᵢ(pow(γ_{q,j}))
+        let mu = zk_params.mu;
+        let q = in_domain.points.len();
+        let mut helper_evals: Vec<HelperEvaluations<F>> = Vec::with_capacity(q * k);
+
+        for &idx in &in_domain.indices {
+            let coset_offset = omega.pow([idx as u64]);
+            for j in 0..k {
+                let gamma_base = coset_offset * zeta.pow([j as u64]);
+                let gamma: F = embedding.map(gamma_base);
+                let m_eval: F = verifier_state.prover_message()?;
+                let g_hat_evals: Vec<F> = (0..mu)
+                    .map(|_| verifier_state.prover_message::<F>())
+                    .collect::<Result<Vec<_>, _>>()?;
+                helper_evals.push(HelperEvaluations {
+                    gamma,
+                    m_eval,
+                    g_hat_evals,
+                });
+            }
+        }
+
+        // 4. Sample τ₂ (query-batching challenge)
+        let tau2: F = verifier_state.verifier_message();
+
+        // 5. Reconstruct per-polynomial claims and beq weights (now for k·q evaluation points)
+        let (m_claim, g_hat_claims) = self.compute_per_polynomial_claims(&helper_evals, tau2);
+        let beq_weights =
+            self.construct_batched_eq_weights(&helper_evals, rho, tau2, zk_params.ell);
+
+        // 6. Build per-polynomial statements
+        let mut m_statement = Statement::new(zk_params.ell + 1);
+        m_statement.add_constraint(beq_weights.clone(), m_claim);
+
+        let g_hat_statements: Vec<Statement<F>> = g_hat_claims
+            .iter()
+            .map(|&claim| {
+                let mut stmt = Statement::new(zk_params.ell + 1);
+                stmt.add_constraint(beq_weights.clone(), claim);
+                stmt
+            })
+            .collect();
+
+        // 7. Verify helper WHIR proof against the single batch commitment
+        //    (helper_config has batch_size = μ+1, so one commitment = all polys)
+        let helper_commitments = vec![helper_commitment];
+
+        let mut helper_statements: Vec<&Statement<F>> = Vec::with_capacity(1 + mu);
+        helper_statements.push(&m_statement);
+        for s in &g_hat_statements {
+            helper_statements.push(s);
+        }
+
+        helper_config.verify(verifier_state, &helper_commitments, &helper_statements)?;
+
+        // 8. Locally compute virtual oracle values from IRS opening + verified helper evals.
+        //
+        //    For each query q at sub-polynomial domain point α = g^{i_q}:
+        //    - The IRS row gives [f̂₀(α), ..., f̂_{k-1}(α)] (base field)
+        //    - The helper evals give h(γ_{q,j}) at k coset elements γ_{q,j} = ω^{i_q}·ζ^j
+        //    - We compute L(γ_{q,j}) = ρ·f̂(γ_{q,j}) + h(γ_{q,j}) at each coset element
+        //    - Then fold_k(L, r̄)(α) = compute_fold([L(γ_{q,0}), ..., L(γ_{q,k-1})], ...)
+        //
+        //    This binds the constraint sums to the committed [[f̂]], preventing a
+        //    malicious prover from decoupling the commitment from the proof.
+        let two_inv = F::from(2u64).inverse().expect("char ≠ 2");
+        let zeta_ext: F = embedding.map(zeta);
+        let zeta_ext_inv = zeta_ext.inverse().expect("coset generator invertible");
+        let folding_rand_slice: Vec<F> = folding_randomness.0.clone();
+
+        let num_cols = in_domain.num_columns();
+        let constraints: Vec<Constraint<F>> = in_domain
+            .indices
+            .iter()
+            .enumerate()
+            .map(|(qi, &idx)| {
+                let coset_offset = omega.pow([idx as u64]);
+                let coset_offset_ext: F = embedding.map(coset_offset);
+                let coset_offset_ext_inv = coset_offset_ext.inverse().unwrap_or(F::ZERO);
+
+                // Get the IRS row (sub-polynomial evaluations in base field)
+                let row = &in_domain.matrix[qi * num_cols..(qi + 1) * num_cols];
+
+                // Compute L(γ_{q,j}) for each coset element j
+                let l_coset_values: Vec<F> = (0..k)
+                    .map(|j| {
+                        let gamma_ext = coset_offset_ext * zeta_ext.pow([j as u64]);
+
+                        // f̂(γ_{q,j}) = Σ_l γ^l · embed(f̂_l(α))
+                        // where f̂_l(α) = row[l] and γ^k = α for all coset elements
+                        let mut f_hat_at_gamma = F::ZERO;
+                        let mut gamma_power = F::ONE;
+                        for l in 0..num_cols {
+                            f_hat_at_gamma += gamma_power * embedding.map(row[l]);
+                            gamma_power *= gamma_ext;
+                        }
+
+                        // h(γ_{q,j}) from the verified helper evaluations
+                        let h_at_gamma = helper_evals[qi * k + j].compute_h_value(beta);
+
+                        // L(γ_{q,j}) = ρ·f̂(γ_{q,j}) + h(γ_{q,j})
+                        rho * f_hat_at_gamma + h_at_gamma
+                    })
+                    .collect();
+
+                // fold_k(L, r̄)(α) via compute_fold
+                let virtual_value = compute_fold(
+                    &l_coset_values,
+                    &folding_rand_slice,
+                    coset_offset_ext_inv,
+                    zeta_ext_inv,
+                    two_inv,
+                    fold_factor,
+                );
+
+                Constraint {
+                    weights: Weights::univariate(
+                        embedding.map(in_domain.points[qi]),
+                        num_variables,
+                    ),
+                    sum: virtual_value,
+                    defer_evaluation: false,
+                }
+            })
+            .collect();
+
+        Ok(constraints)
     }
 
     /// Create a random linear combination of constraints and add it to the claim.

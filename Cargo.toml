@@ -88,6 +88,10 @@ harness = false
 name = "sumcheck"
 harness = false
 
+[[bench]]
+name = "whir_zk"
+harness = false
+
 [profile.dev]
 debug = 1
 opt-level = 1
