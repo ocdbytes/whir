@@ -5,12 +5,6 @@ pub static HASH_COUNTER: HashCounter = HashCounter::new();
 #[derive(Debug)]
 pub struct HashCounter(AtomicUsize);
 
-impl Default for HashCounter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl HashCounter {
     pub const fn new() -> Self {
         Self(AtomicUsize::new(0))

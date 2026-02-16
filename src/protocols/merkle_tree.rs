@@ -106,7 +106,7 @@ impl Config {
                 .expect("Hash Engine not found");
             #[cfg(feature = "tracing")]
             let _span = span!(
-                Level::DEBUG,
+                Level::INFO,
                 "layer",
                 engine = engine.name().as_ref(),
                 count = current.len()

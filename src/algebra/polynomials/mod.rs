@@ -9,6 +9,28 @@ use ark_ff::Field;
 
 pub use self::{coeffs::CoefficientList, evals::EvaluationsList, multilinear::MultilinearPoint};
 
+/// Compute evaluations of the eq polynomial at all hypercube points
+pub fn compute_eq_evals<F: Field>(point: &[F]) -> Vec<F> {
+    let n = 1 << point.len();
+    let mut result = vec![F::ONE; n];
+    
+    // After PR 217's variable reordering, we process from MSB to LSB
+    let num_vars = point.len();
+    for (i, &p) in point.iter().enumerate() {
+        // Use reversed bit indexing to match new variable order
+        let bit_pos = num_vars - 1 - i;
+        for j in 0..n {
+            if (j >> bit_pos) & 1 == 1 {
+                result[j] *= p;
+            } else {
+                result[j] *= F::ONE - p;
+            }
+        }
+    }
+    
+    result
+}
+
 /// Spot-check that an `EvaluationsList` matches a `CoefficientList` at a few
 /// deterministic boolean hypercube points, without cloning the full polynomial.
 ///

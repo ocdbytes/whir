@@ -1,13 +1,14 @@
 use ark_ff::{FftField, Field};
 
-use super::{
-    utils::{compute_per_polynomial_claims, construct_batched_eq_weights, BlindingEvaluations},
-    Config,
+use super::utils::{
+    compute_per_polynomial_claims, construct_batched_eq_weights, BlindingEvaluations,
 };
+use super::Config;
 use crate::{
     algebra::{
         dot,
         embedding::Embedding,
+        linear_form::LinearForm,
         polynomials::{CoefficientList, MultilinearPoint},
         Weights,
     },
@@ -42,7 +43,6 @@ impl<F: FftField> Config<F> {
     /// 2. Runs WHIR rounds, reconstructing virtual oracle values at each initial opening
     /// 3. Verifies blinding polynomial evaluations via a nested WHIR proof
     /// 4. Checks the final sumcheck equation
-    #[allow(clippy::too_many_lines)]
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<'_, H>,
@@ -182,21 +182,22 @@ impl<F: FftField> Config<F> {
             .verify(verifier_state, &mut the_sum)?;
         round_folding_randomness.push(final_sumcheck_randomness.clone());
 
-        self.verify_final_consistency(
+        let result = self.verify_final_consistency(
             verifier_state,
             &round_constraints,
             &round_folding_randomness,
             &final_coefficients,
             &final_sumcheck_randomness,
             the_sum,
-        )
+        );
+
+        result
     }
 
     /// Read the ZK transcript header: blinding challenge, g(āᵢ) evaluations, masking challenge.
     ///
     /// Returns `(blinding_challenge, masking_challenge, modified_evaluations)` where
     /// modified_evaluations[i] = masking_challenge · evaluations[i] + g_evals[i].
-    #[allow(clippy::unused_self)]
     fn read_header<H>(
         &self,
         verifier_state: &mut VerifierState<'_, H>,
@@ -266,7 +267,6 @@ impl<F: FftField> Config<F> {
     /// the polynomial RLC coefficients.
     ///
     /// Returns `(stir_weights, stir_values)`.
-    #[allow(clippy::too_many_arguments)]
     fn verify_initial_round<H>(
         &self,
         verifier_state: &mut VerifierState<'_, H>,
@@ -295,8 +295,9 @@ impl<F: FftField> Config<F> {
 
         let stir_weights: Vec<Weights<F>> = commitment
             .out_of_domain()
-            .weights(num_variables)
-            .chain(in_domain.weights(num_variables))
+            .evaluators(num_variables)
+            .chain(in_domain.evaluators(num_variables))
+            .map(Weights::from)
             .collect();
         let stir_values: Vec<F> = commitment
             .out_of_domain()
@@ -334,8 +335,9 @@ impl<F: FftField> Config<F> {
 
         let stir_weights: Vec<Weights<F>> = commitment
             .out_of_domain()
-            .weights(num_variables)
-            .chain(in_domain.weights(num_variables))
+            .evaluators(num_variables)
+            .chain(in_domain.evaluators(num_variables))
+            .map(Weights::from)
             .collect();
         let stir_values: Vec<F> = commitment
             .out_of_domain()
@@ -352,7 +354,6 @@ impl<F: FftField> Config<F> {
     /// rounds) and the case where it's the last WHIR round commitment.
     /// For the initial case with N polynomials, opens all N f̂ commitments and
     /// verifies the batched virtual oracle.
-    #[allow(clippy::too_many_arguments)]
     fn verify_final_opening<H>(
         &self,
         verifier_state: &mut VerifierState<'_, H>,
@@ -382,10 +383,11 @@ impl<F: FftField> Config<F> {
             )?;
 
             for (weights, value) in zip_strict(
-                in_domain.weights(final_coefficients.num_variables()),
+                in_domain.evaluators(final_coefficients.num_variables()),
                 virtual_oracle_values,
             ) {
-                verify!(weights.evaluate(final_coefficients) == value);
+                let w: Weights<F> = Weights::from(weights);
+                verify!(w.evaluate(final_coefficients) == value);
             }
         } else {
             let prev_round_config = self.blinded_commitment.round_configs.last().unwrap();
@@ -394,10 +396,11 @@ impl<F: FftField> Config<F> {
                 .verify(verifier_state, &[prev_round_commitment.unwrap()])?;
 
             for (weights, evals) in zip_strict(
-                in_domain.weights(final_coefficients.num_variables()),
+                in_domain.evaluators(final_coefficients.num_variables()),
                 in_domain.values(&round_folding_randomness.last().unwrap().coeff_weights(true)),
             ) {
-                verify!(weights.evaluate(final_coefficients) == evals);
+                let w: Weights<F> = Weights::from(weights);
+                verify!(w.evaluate(final_coefficients) == evals);
             }
         }
         Ok(())
@@ -412,7 +415,6 @@ impl<F: FftField> Config<F> {
     ///
     /// Returns the virtual oracle folded values for each query point (to use as
     /// STIR in-domain constraint values).
-    #[allow(clippy::too_many_lines)]
     fn verify_blinding_evaluations<H>(
         &self,
         verifier_state: &mut VerifierState<'_, H>,
@@ -435,7 +437,6 @@ impl<F: FftField> Config<F> {
         let embedding = self.blinded_commitment.embedding();
         let num_witness_vars = self.num_witness_variables();
         let interleaving_depth = self.interleaving_depth();
-        let fold_factor = interleaving_depth.trailing_zeros() as usize; // log2(interleaving_depth)
         let omega_full = self.omega_full();
         let omega_powers = self.omega_powers();
 
@@ -468,13 +469,13 @@ impl<F: FftField> Config<F> {
             let coset_gammas = self.coset_gammas(alpha_base, &omega_powers);
 
             for gamma in coset_gammas {
-                for blinding_evals in &mut blinding_evals_per_poly {
+                for poly_idx in 0..num_polys {
                     let m_eval = all_evals[eval_cursor];
                     eval_cursor += 1;
                     let g_hat_evals =
                         all_evals[eval_cursor..eval_cursor + num_witness_vars].to_vec();
                     eval_cursor += num_witness_vars;
-                    blinding_evals.push(BlindingEvaluations {
+                    blinding_evals_per_poly[poly_idx].push(BlindingEvaluations {
                         gamma,
                         m_eval,
                         g_hat_evals,
@@ -499,14 +500,16 @@ impl<F: FftField> Config<F> {
         // Compute per-polynomial claims and collect evaluations
         // Layout: [m₁_claim, ĝ₁₁_claim, ..., ĝ₁μ_claim, m₂_claim, ĝ₂₁_claim, ..., ĝ₂μ_claim, ...]
         let mut all_evaluations: Vec<F> = Vec::with_capacity(num_polys * (1 + num_witness_vars));
-        for blinding_evals in &blinding_evals_per_poly {
-            let (m_claim, g_hat_claims) =
-                compute_per_polynomial_claims(blinding_evals, query_batching_challenge);
+        for poly_idx in 0..num_polys {
+            let (m_claim, g_hat_claims) = compute_per_polynomial_claims(
+                &blinding_evals_per_poly[poly_idx],
+                query_batching_challenge,
+            );
             all_evaluations.push(m_claim);
             all_evaluations.extend_from_slice(&g_hat_claims);
         }
 
-        let weight_refs: Vec<&Weights<F>> = vec![&beq_weights];
+        let weight_refs: Vec<&dyn LinearForm<F>> = vec![&beq_weights];
 
         // Verify blinding WHIR proof (single batch commitment for all N×(μ+1) blinding polys)
         self.blinding_commitment.verify(
@@ -574,7 +577,6 @@ impl<F: FftField> Config<F> {
                     coset_offset_ext_inv,
                     zeta_ext_inv,
                     two_inv,
-                    fold_factor,
                 )
             })
             .collect();
@@ -601,7 +603,6 @@ impl<F: FftField> Config<F> {
         let folding_randomness = MultilinearPoint(
             round_folding_randomness
                 .iter()
-                .rev()
                 .flat_map(|poly| poly.0.iter().copied())
                 .collect(),
         );

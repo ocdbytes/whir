@@ -56,7 +56,7 @@ impl<F: Field> Config<F> {
     /// Runs the quadratic sumcheck protocol as configured.
     ///
     /// It reduces a claim of the form `dot(a, b) == sum` to an exponentially
-    /// smaller claim `dot(a', b') == sum'` where `a' = fold(a, randomness)`
+    /// smaller claim `dot(a', b') == sum'` where `a'` is `a` folded in place
     /// and similarly for `b`.
     ///
     /// This function:
@@ -98,13 +98,12 @@ impl<F: Field> Config<F> {
             let folding_randomness = prover_state.verifier_message::<F>();
             res.push(folding_randomness);
 
-            // Fold the inputs in-place (avoids allocating new Vecs each round)
+            // Fold the inputs
             a.fold_in_place(folding_randomness);
             b.fold_in_place(folding_randomness);
             *sum = (c2 * folding_randomness + c1) * folding_randomness + c0;
         }
 
-        res.reverse();
         MultilinearPoint(res)
     }
 
@@ -140,7 +139,6 @@ impl<F: Field> Config<F> {
             *sum = (c2 * folding_randomness + c1) * folding_randomness + c0;
         }
 
-        res.reverse();
         Ok(MultilinearPoint(res))
     }
 }
