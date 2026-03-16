@@ -9,14 +9,12 @@ use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, R
 use spongefish::{Decoding, VerificationResult};
 
 use crate::{
-    algebra::{
-        embedding::Identity,
-        linear_form::{Covector, Evaluate},
-    },
+    algebra::{dot, embedding::Identity, linear_form::Evaluate, multilinear_extend},
     hash::Hash,
-    protocols::irs_commit,
+    protocols::{irs_commit, sumcheck},
     transcript::{
-        Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerifierMessage, VerifierState,
+        codecs::U64, Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerifierMessage,
+        VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -24,23 +22,30 @@ use crate::{
 
 pub struct Config<F: FftField> {
     pub commit: irs_commit::Config<Identity<F>>,
+    pub sumcheck: sumcheck::Config<F>,
 }
 
 impl<F: FftField> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vector: &[F],
+        vector: Vec<F>,
         vector_witness: &irs_commit::Witness<F>,
-        covector: Covector<F>,
-    ) where
+        mut covector: Vec<F>,
+        sum: F,
+    ) -> (Vec<F>, F)
+    where
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
         F: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
         Standard: Distribution<F>,
     {
+        debug_assert_eq!(dot(&vector, &covector), sum);
+
         // Create masking vectors.
         let mask = (0..vector.len())
             .map(|_| prover_state.rng().gen())
@@ -50,12 +55,12 @@ impl<F: FftField> Config<F> {
         let mask_witness = self.commit.commit(prover_state, &[&mask]);
 
         // Compute and send linear form of mask (μ' in paper).
-        let mask_sum = covector.evaluate(&Identity::new(), &mask);
+        let mask_sum = dot(&mask, &covector);
         prover_state.prover_message(&mask_sum);
 
         // RLC the mask with the vector
         let mask_rlc = prover_state.verifier_message::<F>();
-        let masked_vector = zip_strict(vector.iter(), mask.iter())
+        let mut masked_vector = zip_strict(vector.iter(), mask.iter())
             .map(|(v, m)| *v + mask_rlc * *m)
             .collect::<Vec<F>>();
 
@@ -71,19 +76,40 @@ impl<F: FftField> Config<F> {
         let _ = self
             .commit
             .open(prover_state, &[&vector_witness, &mask_witness]);
+
+        // Run sumcheck to reduce linear form claim
+        let mut masked_sum = sum + mask_rlc * mask_sum;
+        let point = self.sumcheck.prove(
+            prover_state,
+            &mut masked_vector,
+            &mut covector,
+            &mut masked_sum,
+        );
+
+        // Compute implied MLE of the linear form
+        // f*(r) · l(r) = sum  =>  l(r) = sum / f*(r)
+        let masked_mle = multilinear_extend(&masked_vector, &point.0);
+        let linear_mle = sum / masked_mle;
+
+        // TODO: Isn't this just covector[0]?
+        assert_eq!(linear_mle, covector[0]);
+
+        // Return evaluation point and value of the covector.
+        (point.0, linear_mle)
     }
 
     pub fn verify<H, R>(
         &self,
         verifier_state: &mut VerifierState<H>,
         vector_commitment: irs_commit::Commitment<F>,
-        covector: Covector<F>,
         sum: F,
-    ) -> VerificationResult<()>
+    ) -> VerificationResult<(Vec<F>, F)>
     where
         H: DuplexSpongeInterface,
         F: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
         let mask_commitment = self.commit.receive_commitment(verifier_state)?;
@@ -97,10 +123,6 @@ impl<F: FftField> Config<F> {
             .commit
             .verify(verifier_state, &[&vector_commitment, &mask_commitment])?;
 
-        // Check linear form on the masked vector.
-        let masked_sum = covector.evaluate(&Identity::new(), &masked_vector);
-        verify!(masked_sum == sum + mask_rlc * mask_sum);
-
         // Spot check evaluations.
         for (point, value) in zip_strict(
             evals.evaluators(self.commit.vector_size),
@@ -108,6 +130,16 @@ impl<F: FftField> Config<F> {
         ) {
             verify!(point.evaluate(&Identity::new(), &masked_vector) == value);
         }
-        Ok(())
+
+        // Sumcheck on masked inner product
+        let mut masked_sum = sum + mask_rlc * mask_sum;
+        let point = self.sumcheck.verify(verifier_state, &mut masked_sum)?;
+
+        // Compute implied MLE of the linear form
+        // f*(r) · l(r) = sum  =>  l(r) = sum / f*(r)
+        let masked_mle = multilinear_extend(&masked_vector, &point.0);
+        let linear_mle = sum / masked_mle;
+
+        Ok((point.0, linear_mle))
     }
 }
