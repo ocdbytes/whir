@@ -3,6 +3,7 @@ use crate::algebra::embedding::Embedding;
 use ark_ff::FftField;
 
 mod commiter;
+mod prover;
 
 use crate::{
     algebra::embedding::Identity,
@@ -153,4 +154,9 @@ impl InstanceLeak {
 /// `q_ub ≤ leak(δ₁, k₁, μ, d) + leak(δ₂, k₂, μ, 3)`
 fn query_upper_bound(witness: &InstanceLeak, blinding: &InstanceLeak) -> usize {
     witness.leak() + blinding.leak()
+}
+
+#[cfg(test)]
+mod tests {
+    fn test_zk2() {}
 }

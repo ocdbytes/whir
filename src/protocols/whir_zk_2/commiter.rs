@@ -8,11 +8,11 @@ use spongefish::DuplexSpongeInterface;
 use super::Config;
 
 pub struct Witness<F: FftField> {
-    blinded_witness: irs_commit::Witness<F, F>,
-    blinding_witness: irs_commit::Witness<F, F>,
-    f_hat_poly: Vec<F>,
-    masking_poly: Vec<F>,
-    g_polys: Vec<Vec<F>>,
+    pub blinded_witness: irs_commit::Witness<F, F>,
+    pub blinding_witness: irs_commit::Witness<F, F>,
+    pub f_hat_poly: Vec<F>,
+    pub masking_poly: Vec<F>,
+    pub g_polys: Vec<Vec<F>>,
 }
 
 impl<F: FftField> Config<F> {
