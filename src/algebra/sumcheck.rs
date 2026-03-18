@@ -37,7 +37,9 @@ pub fn compute_sumcheck_polynomial<F: Field>(a: &[F], b: &[F]) -> (F, F) {
         (acc0, acc2)
     }
 
-    assert_eq!(a.len(), b.len());
+    let non_padded = a.len().min(b.len());
+    let a = &a[..non_padded];
+    let b = &b[..non_padded];
     if a.len() == 0 {
         return (F::ZERO, F::ZERO);
     }
@@ -129,28 +131,25 @@ pub fn mixed_eval<M: Embedding>(
 }
 
 #[cfg(test)]
-mod tests {
-    use ark_ff::AdditiveGroup;
+pub(crate) mod tests {
     use ark_std::rand::{rngs::StdRng, Rng, SeedableRng};
-    use proptest::{
-        prelude::{Just, Strategy},
-        proptest,
-    };
+    use proptest::proptest;
 
     use super::*;
     use crate::algebra::fields::Field64;
 
     type F = Field64;
 
+    /// Zero-pad to the next power of two.
+    pub fn zero_pad<F: Field>(values: &[F]) -> Vec<F> {
+        let mut vec = values.to_vec();
+        vec.resize(vec.len().next_power_of_two(), F::ZERO);
+        vec
+    }
+
     #[test]
     fn sumcheck_poly_zero_extend() {
-        let power_of_two = (0..16).prop_map(|n| 1_usize << n);
-        let size_zeros = power_of_two.prop_flat_map(|size: usize| {
-            let max_zeros = (size / 2).saturating_sub(1);
-            (Just(size), 0_usize..=max_zeros)
-        });
-        proptest!(|(seed:u64, (pow_two, zeros) in size_zeros)| {
-            let length = pow_two - zeros;
+        proptest!(|(seed:u64, length in 0_usize..(1 << 14))| {
             let mut rng = StdRng::seed_from_u64(seed);
             let vector = (0..length)
                 .map(|_| rng.gen::<F>())
@@ -158,30 +157,23 @@ mod tests {
             let covector = (0..length)
                 .map(|_| rng.gen::<F>())
                 .collect::<Vec<_>>();
-            let mut extended_vector = vector.clone();
-            let mut extended_covector = covector.clone();
-            extended_vector.resize(length + zeros, F::ZERO);
-            extended_covector.resize(length + zeros, F::ZERO);
-            assert_eq!(vector.len().next_power_of_two(), extended_vector.len().next_power_of_two());
-            assert_eq!(compute_sumcheck_polynomial(&vector, &covector), compute_sumcheck_polynomial(&extended_vector, &extended_covector));
+            let extended_vector = zero_pad(&vector);
+            let extended_covector = zero_pad(&covector);
+            let expected = compute_sumcheck_polynomial(&extended_vector, &extended_covector);
+            assert_eq!(compute_sumcheck_polynomial(&vector, &covector), expected);
+            assert_eq!(compute_sumcheck_polynomial(&extended_vector, &covector), expected);
+            assert_eq!(compute_sumcheck_polynomial(&vector, &extended_covector), expected);
         });
     }
 
     #[test]
     fn fold_zero_extend() {
-        let power_of_two = (0..16).prop_map(|n| 1_usize << n);
-        let size_zeros = power_of_two.prop_flat_map(|size: usize| {
-            let max_zeros = (size / 2).saturating_sub(1);
-            (Just(size), 0_usize..=max_zeros)
-        });
-        proptest!(|(seed:u64, (pow_two, zeros) in size_zeros)| {
-            let length = pow_two - zeros;
+        proptest!(|(seed:u64, length in 0_usize..(1 << 14))| {
             let mut rng = StdRng::seed_from_u64(seed);
             let mut vector = (0..length)
                 .map(|_| rng.gen::<F>())
                 .collect::<Vec<_>>();
-            let mut extended_vector = vector.clone();
-            extended_vector.resize(length + zeros, F::ZERO);
+            let mut extended_vector = zero_pad(&vector);
             let weight = rng.gen::<F>();
 
             fold(&mut vector, weight);
