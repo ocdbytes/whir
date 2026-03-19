@@ -1,11 +1,12 @@
-use crate::hash::Hash;
-use crate::protocols::irs_commit;
-use crate::transcript::{ProverMessage, ProverState};
 use ark_ff::FftField;
-use spongefish::Codec;
-use spongefish::DuplexSpongeInterface;
+use spongefish::{Codec, DuplexSpongeInterface};
 
 use super::Config;
+use crate::{
+    hash::Hash,
+    protocols::irs_commit,
+    transcript::{ProverMessage, ProverState},
+};
 
 pub struct Witness<F: FftField> {
     pub blinded_witness: irs_commit::Witness<F, F>,
@@ -17,7 +18,7 @@ pub struct Witness<F: FftField> {
 
 impl<F: FftField> Config<F> {
     // TODO : extend it for multiple polynomials
-    fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, polynomial: &[F]) -> Witness<F>
+    pub fn commit<H, R>(&self, prover_state: &mut ProverState<H, R>, polynomial: &[F]) -> Witness<F>
     where
         H: DuplexSpongeInterface,
         R: ark_std::rand::RngCore + ark_std::rand::CryptoRng,
@@ -32,11 +33,16 @@ impl<F: FftField> Config<F> {
             .map(|_| F::rand(prover_state.rng()))
             .collect::<Vec<_>>();
 
-        // Compute the masked polynomial f_cap_poly = f + masking_poly
+        // Compute the masked polynomial f̂ = f + msk(Φ_0).
+        // The masking polynomial depends on the first ℓ variables (Φ_0 projection).
+        // In big-endian index convention: msk index = b >> (μ - ℓ).
+        let mu = polynomial.len().trailing_zeros() as usize;
+        let ell = masking_poly_size - 1;
+        let shift = mu - ell;
         let f_hat_poly = polynomial
             .iter()
-            .zip(masking_poly.iter().cycle())
-            .map(|(&g, m)| g + m)
+            .enumerate()
+            .map(|(b, &f)| f + masking_poly[b >> shift])
             .collect::<Vec<_>>();
         // Commit to the masked polynomial
         let blinded_witness = self.blinded_polynomial.commit(prover_state, &[&f_hat_poly]);

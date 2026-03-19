@@ -1,9 +1,16 @@
 use std::borrow::Cow;
 
+use ark_ff::FftField;
+
 use super::Config;
 use crate::{
-    algebra::linear_form::{Covector, LinearForm, UnivariateEvaluation},
-    algebra::{dot, eval_eq, multilinear_extend},
+    algebra::{
+        dot,
+        embedding::Identity,
+        eval_eq,
+        linear_form::{Covector, Evaluate, LinearForm, UnivariateEvaluation},
+        multilinear_extend,
+    },
     hash::Hash,
     protocols::{geometric_challenge::geometric_challenge, whir_zk_2::commiter::Witness},
     transcript::{
@@ -11,10 +18,11 @@ use crate::{
         VerifierMessage,
     },
 };
-use ark_ff::FftField;
 
 // TODO: find some way to remove the reimplementation of rounds here.
 // This does not look clean and reimplements the same logic which is inside whir.
+//
+// TODO: extend the prove for multiple vectors as an input
 impl<F: FftField> Config<F> {
     /// zkWHIR 2.0 prover using Alternative Randomness Sampling (paper pages 16-24).
     ///
@@ -226,7 +234,7 @@ impl<F: FftField> Config<F> {
 
         // --- STIR constraint accumulation ---
         // Collect UnivariateEvaluation constraints from OOD and in-domain points.
-        // Compute virtual f_zk evaluations: stir_{ρ·f+g}(z_j) = ρ·fold(r̄,[[f̂]])(z_j) + blinding_adj.
+        // Evaluate f_zk at each STIR point via RS interpolation.
         // RLC all STIR constraints into the covector and the_sum.
 
         let stir_challenges: Vec<UnivariateEvaluation<F>> = folded_f_zk_commitment
@@ -235,43 +243,36 @@ impl<F: FftField> Config<F> {
             .chain(in_domain.evaluators(round_config.initial_size()))
             .collect();
 
-        // OOD evaluations use weight [1] (single vector, no RLC).
-        let ood_evals = folded_f_zk_commitment.out_of_domain().values(&[F::ONE]);
+        // STIR evaluations: compute directly from f_zk via RS interpolation.
+        // For OOD points, the commitment already gives the correct value.
+        // For in-domain points, we must evaluate directly on the folded f_zk vector
+        // (not via MLE decomposition, which disagrees with RS interpolation).
+        let one_weight = [F::ONE];
+        let ood_evals = folded_f_zk_commitment.out_of_domain().values(&one_weight);
+        let num_ood = folded_f_zk_commitment.out_of_domain().points.len();
+        let embedding = Identity::new();
 
-        // In-domain evaluations: ρ·fold(r̄,[[f̂]])(z_j) + blinding_adj(z_j).
-        let eq_weights = folding_randomness.eq_weights();
-        let f_hat_weighted: Vec<F> = in_domain.values(&eq_weights).collect();
-
-        let in_domain_evals: Vec<F> = in_domain
-            .points
+        let in_domain_evals: Vec<F> = stir_challenges[num_ood..]
             .iter()
-            .enumerate()
-            .map(|(idx, &z)| {
-                let fold_point = build_fold_args(&r_bar, z, mu);
-                let (m_eval, g_evals) = evaluate_blinding_at_point(
-                    &witness.g_polys,
-                    &witness.masking_poly,
-                    &fold_point,
-                    rho,
-                    ell,
-                    rem,
-                );
-                // blinding_adj = M(Φ_0, −ρ) + Σ_{i=1}^{ν} β^i · ĝ_i(Φ_i)
-                let blinding_adj = m_eval
-                    + beta_powers[1..]
-                        .iter()
-                        .zip(g_evals.iter())
-                        .map(|(&b, &g)| b * g)
-                        .sum::<F>();
-                rho * f_hat_weighted[idx] + blinding_adj
-            })
+            .map(|challenge| challenge.evaluate(&embedding, &f_zk))
             .collect();
+
+        for f_zk_eval in &in_domain_evals {
+            prover_state.prover_message(f_zk_eval);
+        }
 
         let stir_evaluations: Vec<F> = ood_evals.chain(in_domain_evals.into_iter()).collect();
 
         let stir_rlc_coeffs: Vec<F> = geometric_challenge(prover_state, stir_challenges.len());
         UnivariateEvaluation::accumulate_many(&stir_challenges, &mut covector, &stir_rlc_coeffs);
         the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
+
+        // DEBUG: verify invariant after STIR accumulation
+        debug_assert_eq!(
+            dot(&f_zk, &covector),
+            the_sum,
+            "invariant broken after STIR accumulation"
+        );
 
         // Round 0 sumcheck
         let mut folding_randomness =
@@ -486,6 +487,12 @@ impl<F: FftField> Config<F> {
             }
         }
 
+        // Send eval_matrix to transcript so the verifier can reconstruct it.
+        // The verifier can compute diagonal entries from Λ claims but not off-diagonal.
+        for eval in &eval_matrix {
+            prover_state.prover_message(eval);
+        }
+
         // Package weight covectors as LinearForm trait objects.
         let blinding_forms: Vec<Box<dyn LinearForm<F>>> = weight_covectors
             .into_iter()
@@ -494,10 +501,8 @@ impl<F: FftField> Config<F> {
 
         // Run the second WHIR instance on the blinding polynomials.
         // The returned FinalClaim is discarded — it is not needed by the outer protocol.
-        let blinding_vector_cows: Vec<Cow<'_, [F]>> = blinding_vecs
-            .into_iter()
-            .map(Cow::Owned)
-            .collect();
+        let blinding_vector_cows: Vec<Cow<'_, [F]>> =
+            blinding_vecs.into_iter().map(Cow::Owned).collect();
         let _ = self.blinding_polynomial.prove(
             prover_state,
             blinding_vector_cows,
@@ -519,7 +524,12 @@ impl<F: FftField> Config<F> {
 ///   Φ_i → variables [(i-1)·ℓ + rem, i·ℓ + rem)   for i ≥ 1
 ///
 /// Returns a slice of the input point corresponding to the selected variables.
-fn calculate_phi_i<F: FftField>(vector: &[F], phi_index: usize, ell: usize, rem: usize) -> &[F] {
+pub(super) fn calculate_phi_i<F: FftField>(
+    vector: &[F],
+    phi_index: usize,
+    ell: usize,
+    rem: usize,
+) -> &[F] {
     if phi_index == 0 {
         &vector[..ell]
     } else {
@@ -555,7 +565,7 @@ fn phi_i_bits(b: usize, phi_index: usize, mu: usize, ell: usize, rem: usize) -> 
 ///
 /// The z-derived coordinates use descending powers (big-endian convention)
 /// to match the codebase's `UnivariateEvaluation::mle_evaluate` squaring ladder.
-fn build_fold_args<F: FftField>(r_bar: &[F], z: F, mu: usize) -> Vec<F> {
+pub(super) fn build_fold_args<F: FftField>(r_bar: &[F], z: F, mu: usize) -> Vec<F> {
     let s = r_bar.len();
     let k = mu - s;
     let mut point = Vec::with_capacity(mu);
