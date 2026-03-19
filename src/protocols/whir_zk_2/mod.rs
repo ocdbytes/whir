@@ -1,34 +1,39 @@
-use crate::algebra::embedding::Embedding;
-
 use ark_ff::FftField;
+use serde::{Deserialize, Serialize};
+
+use crate::algebra::embedding::Embedding;
 
 mod commiter;
 mod prover;
+mod verifier;
 
+pub use self::{commiter::Witness, verifier::Commitments};
 use crate::{
     algebra::embedding::Identity,
     parameters::ProtocolParameters,
     protocols::{irs_commit, whir},
 };
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
+#[serde(bound = "F: FftField")]
 pub struct Config<F: FftField> {
     pub blinded_polynomial: whir::Config<Identity<F>>,
     pub blinding_polynomial: whir::Config<Identity<F>>,
 }
 
 impl<F: FftField> Config<F> {
-    pub fn new(
-        params: &ProtocolParameters,
-        irs_commit_config: &irs_commit::Config<Identity<F>>,
-        num_variables_main: usize,
-    ) -> Self {
+    pub fn new(params: &ProtocolParameters, num_variables_main: usize) -> Self {
+        let blinded_config: whir::Config<Identity<F>> =
+            whir::Config::new(1 << num_variables_main, params);
         let witness_sec = params.security_level.saturating_sub(params.pow_bits) as f64;
         let blinding_sec = params.security_level as f64;
 
+        let irs_commit_config = blinded_config.initial_committer;
+
         let witness_leak =
-            InstanceLeak::new(params, witness_sec, irs_commit_config, num_variables_main);
+            InstanceLeak::new(params, witness_sec, &irs_commit_config, num_variables_main);
         let blinding_leak =
-            InstanceLeak::new(params, blinding_sec, irs_commit_config, num_variables_main);
+            InstanceLeak::new(params, blinding_sec, &irs_commit_config, num_variables_main);
 
         let q_ub = query_upper_bound(&witness_leak, &blinding_leak);
 
@@ -158,5 +163,149 @@ fn query_upper_bound(witness: &InstanceLeak, blinding: &InstanceLeak) -> usize {
 
 #[cfg(test)]
 mod tests {
-    fn test_zk2() {}
+    use ark_ff::{AdditiveGroup, Field};
+
+    use super::Config;
+    use crate::{
+        algebra::{
+            fields::Field64,
+            linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
+            MultilinearPoint,
+        },
+        hash,
+        parameters::ProtocolParameters,
+        transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
+    };
+
+    type F = Field64;
+
+    const TEST_NUM_VARIABLES: usize = 12;
+    const TEST_NUM_COEFFS: usize = 1 << TEST_NUM_VARIABLES;
+
+    fn make_test_config() -> Config<F> {
+        let whir_params = ProtocolParameters {
+            unique_decoding: false,
+            security_level: 16,
+            pow_bits: 0,
+            initial_folding_factor: 2,
+            folding_factor: 2,
+            starting_log_inv_rate: 1,
+            batch_size: 1,
+            hash_id: hash::SHA2,
+        };
+        let mut config = Config::new(&whir_params, TEST_NUM_VARIABLES);
+        config.blinded_polynomial.disable_pow();
+        config.blinding_polynomial.disable_pow();
+        config
+    }
+
+    /// Materialize linear forms into Covectors for the prover.
+    fn to_prove_forms(forms: &[Box<dyn LinearForm<F>>]) -> Vec<Box<dyn LinearForm<F>>> {
+        forms
+            .iter()
+            .map(|f| {
+                let mut cv = vec![F::ZERO; TEST_NUM_COEFFS];
+                f.accumulate(&mut cv, F::ONE);
+                Box::new(Covector { vector: cv }) as Box<dyn LinearForm<F>>
+            })
+            .collect()
+    }
+
+    /// Helper: run a full prove → verify cycle for zkWHIR 2.0.
+    fn prove_and_verify(vector: Vec<F>, forms: Vec<Box<dyn LinearForm<F>>>, evaluations: Vec<F>) {
+        let config = make_test_config();
+        let prove_forms = to_prove_forms(&forms);
+
+        let ds = DomainSeparator::protocol(&config)
+            .session(&format!("zk2-pv {}:{}", file!(), line!()))
+            .instance(&Empty);
+        let mut prover_state = ProverState::new_std(&ds);
+
+        let witness = config.commit(&mut prover_state, &vector);
+        config.prove(
+            &mut prover_state,
+            vector,
+            witness,
+            prove_forms,
+            evaluations.clone(),
+        );
+
+        let proof = prover_state.proof();
+        let mut verifier_state = VerifierState::new_std(&ds, &proof);
+
+        let commitments = config
+            .receive_commitments(&mut verifier_state)
+            .expect("receive_commitments failed");
+
+        let weight_refs: Vec<&dyn LinearForm<F>> = forms
+            .iter()
+            .map(|f| f.as_ref() as &dyn LinearForm<F>)
+            .collect();
+
+        config
+            .verify(&mut verifier_state, &weight_refs, &evaluations, commitments)
+            .expect("verification failed");
+    }
+
+    #[test]
+    fn test_zk2_prove_verify_single_point() {
+        let mut rng = ark_std::test_rng();
+        let config = make_test_config();
+
+        let vector = vec![F::ONE; TEST_NUM_COEFFS];
+        let point = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
+        let form = MultilinearExtension {
+            point: point.0.clone(),
+        };
+        let evaluation = form.evaluate(config.blinded_polynomial.embedding(), &vector);
+
+        prove_and_verify(vector, vec![Box::new(form)], vec![evaluation]);
+    }
+
+    #[test]
+    fn test_zk2_prove_verify_multiple_points() {
+        let mut rng = ark_std::test_rng();
+        let config = make_test_config();
+
+        let vector: Vec<F> = (0..TEST_NUM_COEFFS)
+            .map(|i| F::from(i as u64 + 1))
+            .collect();
+
+        let p0 = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
+        let p1 = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
+        let f0 = MultilinearExtension { point: p0.0 };
+        let f1 = MultilinearExtension { point: p1.0 };
+
+        let embedding = config.blinded_polynomial.embedding();
+        let eval0 = f0.evaluate(embedding, &vector);
+        let eval1 = f1.evaluate(embedding, &vector);
+
+        prove_and_verify(vector, vec![Box::new(f0), Box::new(f1)], vec![eval0, eval1]);
+    }
+
+    #[test]
+    fn test_zk2_prove_verify_with_covector() {
+        let mut rng = ark_std::test_rng();
+        let config = make_test_config();
+
+        let vector = vec![F::ONE; TEST_NUM_COEFFS];
+
+        let point = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
+        let mle_form = MultilinearExtension {
+            point: point.0.clone(),
+        };
+        let embedding = config.blinded_polynomial.embedding();
+        let mle_eval = mle_form.evaluate(embedding, &vector);
+
+        let cov = Covector {
+            vector: (0..TEST_NUM_COEFFS).map(|i| F::from(i as u64)).collect(),
+        };
+        let cov_eval = cov.evaluate(embedding, &vector);
+
+        prove_and_verify(
+            vector,
+            vec![Box::new(mle_form), Box::new(cov)],
+            vec![mle_eval, cov_eval],
+        );
+    }
 }
