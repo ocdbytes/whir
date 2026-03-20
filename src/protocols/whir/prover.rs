@@ -224,91 +224,101 @@ where
 
         // Execute standard WHIR rounds on the batched vectors
         for (round_index, round_config) in self.round_configs.iter().enumerate() {
-            // Commit to the vector, this generates out-of-domain evaluations.
-            let new_witness = round_config.irs_committer.commit(prover_state, &[&vector]);
-
-            // Proof of work before in-domain challenges
-            round_config.pow.prove(prover_state);
-
-            // Open the previous round's witness.
-            let in_domain = match prev_witness {
+            match prev_witness {
                 RoundWitness::Initial(init_witnesses) => {
+                    // Round 0: open initial witnesses with embedding lift and tensor_product.
+                    let new_witness = round_config.irs_committer.commit(prover_state, &[&vector]);
+                    round_config.pow.prove(prover_state);
+
                     let witness_refs: Vec<&_> = init_witnesses.iter().map(|c| &**c).collect();
-                    self.initial_committer
+                    let in_domain = self
+                        .initial_committer
                         .open(prover_state, &witness_refs)
-                        .lift(self.embedding())
+                        .lift(self.embedding());
+
+                    let stir_challenges = new_witness
+                        .out_of_domain()
+                        .evaluators(round_config.initial_size())
+                        .chain(in_domain.evaluators(round_config.initial_size()))
+                        .collect::<Vec<_>>();
+                    let stir_evaluations = new_witness
+                        .out_of_domain()
+                        .values(&[M::Target::ONE])
+                        .chain(in_domain.values(&tensor_product(
+                            &vector_rlc_coeffs,
+                            &folding_randomness.eq_weights(),
+                        )))
+                        .collect::<Vec<_>>();
+                    let stir_rlc_coeffs = geometric_challenge(prover_state, stir_challenges.len());
+                    UnivariateEvaluation::accumulate_many(
+                        &stir_challenges,
+                        &mut covector,
+                        &stir_rlc_coeffs,
+                    );
+                    the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
+                    debug_assert_eq!(dot(&vector, &covector), the_sum);
+
+                    folding_randomness = round_config.sumcheck.prove(
+                        prover_state,
+                        &mut vector,
+                        &mut covector,
+                        &mut the_sum,
+                    );
+                    evaluation_point.extend(folding_randomness.0.iter().copied());
+                    debug_assert_eq!(dot(&vector, &covector), the_sum);
+
+                    prev_witness = RoundWitness::Round(new_witness);
+                    vector_rlc_coeffs = vec![M::Target::ONE];
                 }
                 RoundWitness::Round(old_witness) => {
-                    let prev_round_config = &self.round_configs[round_index - 1];
-                    prev_round_config
-                        .irs_committer
-                        .open(prover_state, &[&old_witness])
+                    // Rounds 1+: use shared round function.
+                    let prev_rc = &self.round_configs[round_index - 1];
+                    let (new_witness, _, new_folding) = super::rounds::prove_round(
+                        round_config,
+                        prev_rc,
+                        prover_state,
+                        &mut vector,
+                        &mut covector,
+                        &mut the_sum,
+                        &old_witness,
+                        &folding_randomness,
+                    );
+                    folding_randomness = new_folding;
+                    evaluation_point.extend(folding_randomness.0.iter().copied());
+                    prev_witness = RoundWitness::Round(new_witness);
                 }
-            };
-
-            // Collect constraints for this round and RLC them in
-            let stir_challenges = new_witness
-                .out_of_domain()
-                .evaluators(round_config.initial_size())
-                .chain(in_domain.evaluators(round_config.initial_size()))
-                .collect::<Vec<_>>();
-            let stir_evaluations = new_witness
-                .out_of_domain()
-                .values(&[M::Target::ONE])
-                .chain(in_domain.values(&tensor_product(
-                    &vector_rlc_coeffs,
-                    &folding_randomness.eq_weights(),
-                )))
-                .collect::<Vec<_>>();
-            let stir_rlc_coeffs = geometric_challenge(prover_state, stir_challenges.len());
-            UnivariateEvaluation::accumulate_many(
-                &stir_challenges,
-                &mut covector,
-                &stir_rlc_coeffs,
-            );
-            the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
-            debug_assert_eq!(dot(&vector, &covector), the_sum);
-
-            // Run sumcheck for this round
-            folding_randomness =
-                round_config
-                    .sumcheck
-                    .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
-
-            evaluation_point.extend(folding_randomness.0.iter().copied());
-            debug_assert_eq!(dot(&vector, &covector), the_sum);
-
-            prev_witness = RoundWitness::Round(new_witness);
-            vector_rlc_coeffs = vec![M::Target::ONE];
+            }
         }
 
-        // Directly send the vector to the verifier.
-        assert_eq!(vector.len(), self.final_sumcheck.initial_size);
-        for coeff in &vector {
-            prover_state.prover_message(coeff);
-        }
-
-        // PoW
-        self.final_pow.prove(prover_state);
-
-        // Open and consume the final previous witness.
-        match prev_witness {
+        // Final round: send vector, PoW, open previous witness, final sumcheck.
+        let final_folding_randomness = match prev_witness {
             RoundWitness::Initial(init_witnesses) => {
+                // 0-rounds case: open initial commitment inline.
+                assert_eq!(vector.len(), self.final_sumcheck.initial_size);
+                for coeff in &vector {
+                    prover_state.prover_message(coeff);
+                }
+                self.final_pow.prove(prover_state);
                 let witness_refs: Vec<&_> = init_witnesses.iter().map(|c| &**c).collect();
                 let _in_domain = self.initial_committer.open(prover_state, &witness_refs);
+                self.final_sumcheck
+                    .prove(prover_state, &mut vector, &mut covector, &mut the_sum)
             }
             RoundWitness::Round(old_witness) => {
-                let prev_config = self.round_configs.last().unwrap();
-                let _in_domain = prev_config
-                    .irs_committer
-                    .open(prover_state, &[&old_witness]);
+                let last_rc = self.round_configs.last().unwrap();
+                let (_, final_folding) = super::rounds::prove_final_round(
+                    &self.final_sumcheck,
+                    &self.final_pow,
+                    last_rc,
+                    prover_state,
+                    &mut vector,
+                    &mut covector,
+                    &mut the_sum,
+                    &old_witness,
+                );
+                final_folding
             }
-        }
-
-        // Final sumcheck
-        let final_folding_randomness =
-            self.final_sumcheck
-                .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
+        };
         evaluation_point.extend(final_folding_randomness.0.iter().copied());
 
         FinalClaim {

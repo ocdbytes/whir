@@ -2,6 +2,7 @@
 
 mod config;
 mod prover;
+pub(crate) mod rounds;
 mod verifier;
 
 use std::fmt::Debug;

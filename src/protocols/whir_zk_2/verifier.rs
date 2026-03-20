@@ -150,15 +150,13 @@ impl<F: FftField> Config<F> {
         // For each OOD point, read f̂, M, ĝ_i MLE evaluations from the prover.
         // These are committed to the Fiat-Shamir transcript. The M and ĝ_i claims
         // are accumulated into Λ for the Step 7 batched blinding proof.
-        // TODO : confirm this approach
+        // TODO: confirm this approach
         // Note: we do NOT check f_zk decomposition here because the prover sends MLE
         // evaluations while the committed OOD values are polynomial evaluations — these
         // are different functions. Soundness is ensured by the STIR constraints (which
         // bind [[H]] to the sumcheck chain) and the Step 7 blinding proof.
         let ood_points = commitment_h.out_of_domain().points.clone();
         let one_weight = [F::ONE];
-        let ood_committed_values: Vec<F> =
-            commitment_h.out_of_domain().values(&one_weight).collect();
 
         for &z in &ood_points {
             // Read f̂ MLE evaluation (transcript binding only, not verified here)
@@ -219,8 +217,9 @@ impl<F: FftField> Config<F> {
             .chain(in_domain.evaluators(round_config.initial_size()))
             .collect();
 
-        let stir_evaluations: Vec<F> = ood_committed_values
-            .into_iter()
+        let stir_evaluations: Vec<F> = commitment_h
+            .out_of_domain()
+            .values(&one_weight)
             .chain(f_zk_in_domain_evals)
             .collect();
 
@@ -243,93 +242,76 @@ impl<F: FftField> Config<F> {
         let mut gamma_h_values: Vec<F> = Vec::new();
 
         for round_index in 1..self.blinded_polynomial.round_configs.len() {
-            let round_config = &self.blinded_polynomial.round_configs[round_index];
-
-            let new_commitment = round_config
-                .irs_committer
-                .receive_commitment(verifier_state)?;
-            round_config.pow.verify(verifier_state)?;
-
-            let prev_round_config = &self.blinded_polynomial.round_configs[round_index - 1];
-            let in_domain = prev_round_config
-                .irs_committer
-                .verify(verifier_state, &[&prev_commitment])?;
-
+            let rc = &self.blinded_polynomial.round_configs[round_index];
+            let prev_rc = &self.blinded_polynomial.round_configs[round_index - 1];
+            let result = whir::rounds::verify_round(
+                rc,
+                prev_rc,
+                verifier_state,
+                &mut the_sum,
+                &prev_commitment,
+                &folding_randomness,
+            )?;
             // Save Γ when opening [[H]] (round_index == 1 opens round 0's commitment)
             if round_index == 1 {
-                gamma_points = in_domain.points.clone();
+                gamma_points.clone_from(&result.in_domain.points);
                 // Reconstruct [[H]](γ) = fold(r̄, f_zk)(γ) from interleaved codeword rows.
-                // H(γ) = Σ_j γ^{j·msg_len} · chunk_j(γ)
-                let msg_len = prev_round_config.irs_committer.message_length();
-                let d = prev_round_config.irs_committer.interleaving_depth;
-                gamma_h_values = in_domain
+                let msg_len = prev_rc.irs_committer.message_length();
+                let d = prev_rc.irs_committer.interleaving_depth;
+                gamma_h_values = result
+                    .in_domain
                     .points
                     .iter()
-                    .zip(in_domain.rows())
+                    .zip(result.in_domain.rows())
                     .map(|(&gamma, row)| {
-                        let gamma_step = gamma.pow(&[msg_len as u64]);
+                        let gamma_step = gamma.pow([msg_len as u64]);
                         let mut gamma_pow = F::ONE;
                         let mut val = F::ZERO;
-                        for j in 0..d {
-                            val += gamma_pow * row[j];
+                        for &r in row.iter().take(d) {
+                            val += gamma_pow * r;
                             gamma_pow *= gamma_step;
                         }
                         val
                     })
                     .collect();
             }
-
-            let stir_challenges: Vec<UnivariateEvaluation<F>> = new_commitment
-                .out_of_domain()
-                .evaluators(round_config.initial_size())
-                .chain(in_domain.evaluators(round_config.initial_size()))
-                .collect();
-            let stir_evaluations: Vec<F> = new_commitment
-                .out_of_domain()
-                .values(&one_weight)
-                .chain(in_domain.values(&folding_randomness.eq_weights()))
-                .collect();
-
-            let stir_rlc_coeffs: Vec<F> =
-                geometric_challenge(verifier_state, stir_challenges.len());
-            the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
-            round_constraints.push((stir_rlc_coeffs, stir_challenges));
-
-            folding_randomness = round_config.sumcheck.verify(verifier_state, &mut the_sum)?;
-            round_folding_randomness.push(folding_randomness.clone());
-
-            prev_commitment = new_commitment;
+            round_constraints.push((result.stir_rlc_coeffs, result.stir_challenges));
+            folding_randomness = result.folding_randomness.clone();
+            round_folding_randomness.push(result.folding_randomness);
+            prev_commitment = result.commitment;
         }
 
         // =====================================================================
         // Final round of blinded polynomial WHIR
         // =====================================================================
-        let final_vector: Vec<F> = verifier_state
-            .prover_messages_vec(self.blinded_polynomial.final_sumcheck.initial_size)?;
-
-        self.blinded_polynomial.final_pow.verify(verifier_state)?;
-
-        let last_round_config = self.blinded_polynomial.round_configs.last().unwrap();
-        let final_in_domain = last_round_config
-            .irs_committer
-            .verify(verifier_state, &[&prev_commitment])?;
+        let last_rc = self.blinded_polynomial.round_configs.last().unwrap();
+        let (final_vector, final_in_domain, final_sumcheck_randomness) =
+            whir::rounds::verify_final_round(
+                &self.blinded_polynomial.final_sumcheck,
+                &self.blinded_polynomial.final_pow,
+                last_rc,
+                verifier_state,
+                &mut the_sum,
+                &prev_commitment,
+                &folding_randomness,
+            )?;
 
         // If there's only one round config, [[H]] is opened in the final round.
         if self.blinded_polynomial.round_configs.len() == 1 {
-            gamma_points = final_in_domain.points.clone();
+            gamma_points.clone_from(&final_in_domain.points);
             // Reconstruct [[H]](γ) = fold(r̄, f_zk)(γ) from interleaved codeword rows.
-            let msg_len = last_round_config.irs_committer.message_length();
-            let d = last_round_config.irs_committer.interleaving_depth;
+            let msg_len = last_rc.irs_committer.message_length();
+            let d = last_rc.irs_committer.interleaving_depth;
             gamma_h_values = final_in_domain
                 .points
                 .iter()
                 .zip(final_in_domain.rows())
                 .map(|(&gamma, row)| {
-                    let gamma_step = gamma.pow(&[msg_len as u64]);
+                    let gamma_step = gamma.pow([msg_len as u64]);
                     let mut gamma_pow = F::ONE;
                     let mut val = F::ZERO;
-                    for j in 0..d {
-                        val += gamma_pow * row[j];
+                    for &r in row.iter().take(d) {
+                        val += gamma_pow * r;
                         gamma_pow *= gamma_step;
                     }
                     val
@@ -337,19 +319,6 @@ impl<F: FftField> Config<F> {
                 .collect();
         }
 
-        // Direct check: verify in-domain evaluations against the final vector.
-        for (weight, eval) in zip_strict(
-            final_in_domain.evaluators(final_vector.len()),
-            final_in_domain.values(&folding_randomness.eq_weights()),
-        ) {
-            verify!(weight.evaluate(&Identity::<F>::new(), &final_vector) == eval);
-        }
-
-        // Final sumcheck
-        let final_sumcheck_randomness = self
-            .blinded_polynomial
-            .final_sumcheck
-            .verify(verifier_state, &mut the_sum)?;
         round_folding_randomness.push(final_sumcheck_randomness.clone());
 
         // =====================================================================
@@ -421,9 +390,7 @@ impl<F: FftField> Config<F> {
 
         // Compute fold(r̄, [[f̂]])(γ) for each γ
         let initial_eq_weights = MultilinearPoint(r_bar.clone()).eq_weights();
-        let f_hat_fold_at_gamma: Vec<F> = gamma_f_hat_evals
-            .values(&initial_eq_weights)
-            .collect();
+        let f_hat_fold_at_gamma: Vec<F> = gamma_f_hat_evals.values(&initial_eq_weights).collect();
 
         // Read blinding claims and check decomposition
         for (idx, &gamma) in gamma_points.iter().enumerate() {
@@ -456,8 +423,7 @@ impl<F: FftField> Config<F> {
         let half_size = 1usize << ell;
         let full_size = 1usize << (ell + 1);
 
-        let beq_tables =
-            build_beq_tables(&lambda_z_points, &r_bar, tau, mu, ell, rem, num_g_polys);
+        let beq_tables = build_beq_tables(&lambda_z_points, &r_bar, tau, mu, ell, rem, num_g_polys);
 
         // Build weight covectors (same layout as prover)
         let mut weight_covectors: Vec<Vec<F>> = Vec::with_capacity(num_g_polys);
@@ -478,10 +444,10 @@ impl<F: FftField> Config<F> {
         // w_i (i ≥ 1, ĝ_i weights): interleaved [ĝ_i, 0]
         //   w_i[2k]   = beq_i[k]
         //   w_i[2k+1] = 0
-        for i in 1..num_g_polys {
+        for beq_table in beq_tables.iter().take(num_g_polys).skip(1) {
             let mut wi = vec![F::ZERO; full_size];
             for k in 0..half_size {
-                wi[2 * k] = beq_tables[i][k];
+                wi[2 * k] = beq_table[k];
             }
             weight_covectors.push(wi);
         }

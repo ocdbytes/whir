@@ -15,8 +15,9 @@ use crate::{
     protocols::{irs_commit, whir},
 };
 
+#[allow(clippy::trait_duplication_in_bounds)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
-#[serde(bound = "F: FftField")]
+#[serde(bound = "")]
 pub struct Config<F: FftField> {
     pub blinded_polynomial: whir::Config<Identity<F>>,
     pub blinding_polynomial: whir::Config<Identity<F>>,
@@ -103,6 +104,7 @@ impl InstanceLeak {
         M::Source: FftField,
         M::Target: FftField,
     {
+        #[allow(clippy::cast_possible_wrap)]
         let rate = 0.5_f64.powi(params.starting_log_inv_rate as i32);
         let (q, stir) = Self::query_counts(
             params.unique_decoding,
@@ -124,7 +126,7 @@ impl InstanceLeak {
     }
 
     /// `leak(δ, k, μ, d) := k · [q(δ) + stir(δ)] + T(δ) + ood(δ) + (d+1) · μ`
-    fn leak(&self) -> usize {
+    const fn leak(&self) -> usize {
         self.k * (self.q_delta + self.stir_delta)
             + self.t_delta
             + self.ood_delta
@@ -158,7 +160,7 @@ impl InstanceLeak {
 /// Compute `q_ub` — the total leakage upper bound across both WHIR instances.
 ///
 /// `q_ub ≤ leak(δ₁, k₁, μ, d) + leak(δ₂, k₂, μ, 3)`
-fn query_upper_bound(witness: &InstanceLeak, blinding: &InstanceLeak) -> usize {
+const fn query_upper_bound(witness: &InstanceLeak, blinding: &InstanceLeak) -> usize {
     witness.leak() + blinding.leak()
 }
 
@@ -213,7 +215,8 @@ mod tests {
     }
 
     /// Helper: run a full prove → verify cycle for zkWHIR 2.0.
-    fn prove_and_verify(vector: Vec<F>, forms: Vec<Box<dyn LinearForm<F>>>, evaluations: Vec<F>) {
+    #[allow(clippy::needless_pass_by_value)]
+    fn prove_and_verify(vector: Vec<F>, forms: Vec<Box<dyn LinearForm<F>>>, evaluations: &[F]) {
         let config = make_test_config();
         let prove_forms = to_prove_forms(&forms);
 
@@ -228,7 +231,7 @@ mod tests {
             vector,
             &witness,
             prove_forms,
-            &evaluations,
+            evaluations,
         );
 
         let proof = prover_state.proof();
@@ -244,7 +247,7 @@ mod tests {
             .collect();
 
         config
-            .verify(&mut verifier_state, &weight_refs, &evaluations, &commitments)
+            .verify(&mut verifier_state, &weight_refs, evaluations, &commitments)
             .expect("verification failed");
     }
 
@@ -254,14 +257,15 @@ mod tests {
     /// This validates the `compute_rs_fold_blinding_coeffs` helper by checking
     /// that the RS-fold of f_zk decomposes correctly into f̂ and blinding parts.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_rs_fold_decomposition() {
-        use crate::algebra::univariate_evaluate;
-        use crate::protocols::geometric_challenge::geometric_challenge;
-        use crate::protocols::whir_zk_2::utils::{
-            compute_rs_fold_blinding_coeffs, phi_i_bits,
-        };
-        use crate::transcript::{
-            codecs::Empty, DomainSeparator, ProverState, VerifierMessage,
+        use crate::{
+            algebra::univariate_evaluate,
+            protocols::{
+                geometric_challenge::geometric_challenge,
+                whir_zk_2::utils::{compute_rs_fold_blinding_coeffs, phi_i_bits},
+            },
+            transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierMessage},
         };
 
         let config = make_test_config();
@@ -291,25 +295,27 @@ mod tests {
         }
 
         let mut g_poly = vec![F::ZERO; size];
-        for b in 0..size {
-            for i in 0..num_g_polys {
+        for (b, g_val) in g_poly.iter_mut().enumerate().take(size) {
+            for (i, &bp) in beta_powers.iter().enumerate().take(num_g_polys) {
                 let idx = phi_i_bits(b, i, mu, ell, rem);
-                g_poly[b] += beta_powers[i] * witness.g_polys[i][idx];
+                *g_val += bp * witness.g_polys[i][idx];
             }
         }
 
         // G claims (read by verifier)
-        let linear_forms: Vec<Box<dyn LinearForm<F>>> = vec![
-            Box::new(MultilinearExtension {
-                point: MultilinearPoint::rand(&mut ark_std::test_rng(), mu).0,
-            }),
-        ];
+        let linear_forms: Vec<Box<dyn LinearForm<F>>> = vec![Box::new(MultilinearExtension {
+            point: MultilinearPoint::rand(&mut ark_std::test_rng(), mu).0,
+        })];
         let g_claims: Vec<F> = linear_forms
             .iter()
             .map(|w| {
                 let mut covector = vec![F::ZERO; size];
                 w.accumulate(&mut covector, F::ONE);
-                covector.iter().zip(g_poly.iter()).map(|(&a, &b)| a * b).sum()
+                covector
+                    .iter()
+                    .zip(g_poly.iter())
+                    .map(|(&a, &b)| a * b)
+                    .sum()
             })
             .collect();
         for g_claim in &g_claims {
@@ -339,7 +345,10 @@ mod tests {
             .map(|w| {
                 let mut cv = vec![F::ZERO; size];
                 w.accumulate(&mut cv, F::ONE);
-                cv.iter().zip(vector.iter()).map(|(&a, &b)| a * b).sum::<F>()
+                cv.iter()
+                    .zip(vector.iter())
+                    .map(|(&a, &b)| a * b)
+                    .sum::<F>()
             })
             .collect();
         let combined_claims: Vec<F> = evaluations
@@ -358,7 +367,7 @@ mod tests {
             &mut covector,
             &mut the_sum,
         );
-        let r_bar = folding_randomness.0.clone();
+        let r_bar = folding_randomness.0;
         let s = r_bar.len();
         let big_m = 1usize << (mu - s);
         let k = 1usize << s;
@@ -366,17 +375,17 @@ mod tests {
         // Compute RS-fold coefficients of f_zk directly
         let eq_weights = MultilinearPoint(r_bar.clone()).eq_weights();
         let mut f_zk_fold_coeffs = vec![F::ZERO; big_m];
-        for j in 0..k {
-            for m in 0..big_m {
-                f_zk_fold_coeffs[m] += eq_weights[j] * f_zk[j * big_m + m];
+        for (j, &eq_w) in eq_weights.iter().enumerate().take(k) {
+            for (m, coeff) in f_zk_fold_coeffs.iter_mut().enumerate().take(big_m) {
+                *coeff += eq_w * f_zk[j * big_m + m];
             }
         }
 
         // Compute RS-fold coefficients of f̂
         let mut f_hat_fold_coeffs = vec![F::ZERO; big_m];
-        for j in 0..k {
-            for m in 0..big_m {
-                f_hat_fold_coeffs[m] += eq_weights[j] * witness.f_hat_poly[j * big_m + m];
+        for (j, &eq_w) in eq_weights.iter().enumerate().take(k) {
+            for (m, coeff) in f_hat_fold_coeffs.iter_mut().enumerate().take(big_m) {
+                *coeff += eq_w * witness.f_hat_poly[j * big_m + m];
             }
         }
 
@@ -392,7 +401,7 @@ mod tests {
         );
 
         // Test at several z values: f_zk_fold(z) == ρ·f̂_fold(z) + m̃_RS(z) + Σ βⁱ·g̃ᵢ_RS(z)
-        let test_points: Vec<F> = (1..=10).map(|i| F::from(i as u64 * 7)).collect();
+        let test_points: Vec<F> = (1u64..=10).map(|i| F::from(i * 7)).collect();
         for z in test_points {
             let lhs = univariate_evaluate(&f_zk_fold_coeffs, z);
 
@@ -419,12 +428,10 @@ mod tests {
 
         let vector = vec![F::ONE; TEST_NUM_COEFFS];
         let point = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
-        let form = MultilinearExtension {
-            point: point.0.clone(),
-        };
+        let form = MultilinearExtension { point: point.0 };
         let evaluation = form.evaluate(config.blinded_polynomial.embedding(), &vector);
 
-        prove_and_verify(vector, vec![Box::new(form)], vec![evaluation]);
+        prove_and_verify(vector, vec![Box::new(form)], &[evaluation]);
     }
 
     #[test]
@@ -445,7 +452,7 @@ mod tests {
         let eval0 = f0.evaluate(embedding, &vector);
         let eval1 = f1.evaluate(embedding, &vector);
 
-        prove_and_verify(vector, vec![Box::new(f0), Box::new(f1)], vec![eval0, eval1]);
+        prove_and_verify(vector, vec![Box::new(f0), Box::new(f1)], &[eval0, eval1]);
     }
 
     #[test]
@@ -456,9 +463,7 @@ mod tests {
         let vector = vec![F::ONE; TEST_NUM_COEFFS];
 
         let point = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
-        let mle_form = MultilinearExtension {
-            point: point.0.clone(),
-        };
+        let mle_form = MultilinearExtension { point: point.0 };
         let embedding = config.blinded_polynomial.embedding();
         let mle_eval = mle_form.evaluate(embedding, &vector);
 
@@ -470,7 +475,7 @@ mod tests {
         prove_and_verify(
             vector,
             vec![Box::new(mle_form), Box::new(cov)],
-            vec![mle_eval, cov_eval],
+            &[mle_eval, cov_eval],
         );
     }
 }

@@ -14,7 +14,13 @@ use crate::algebra::{geometric_accumulate, geometric_sequence, MultilinearPoint}
 ///   index = x_0 · 2^{μ-1} + x_1 · 2^{μ-2} + ... + x_{μ-1} · 2^0
 ///
 /// The result is: `(b >> (μ - start - ℓ)) & ((1 << ℓ) - 1)`
-pub(super) fn phi_i_bits(b: usize, phi_index: usize, mu: usize, ell: usize, rem: usize) -> usize {
+pub(super) const fn phi_i_bits(
+    b: usize,
+    phi_index: usize,
+    mu: usize,
+    ell: usize,
+    rem: usize,
+) -> usize {
     let start = if phi_index == 0 {
         0
     } else {
@@ -98,12 +104,12 @@ pub(super) fn build_beq_tables<F: FftField>(
     let num_points = lambda_z_points.len();
     let mut tables = vec![vec![F::ZERO; half_size]; num_g_polys];
 
-    for i in 0..num_g_polys {
+    for (i, table) in tables.iter_mut().enumerate().take(num_g_polys) {
         let start_i = if i == 0 { 0 } else { (i - 1) * ell + rem };
 
         // Bit-window decomposition relative to c|m boundary at position s
         let a_below = mu - start_i - ell; // free m-bits below window (= shift_i)
-        let a_above = if start_i >= s { start_i - s } else { 0 }; // free m-bits above
+        let a_above = start_i.saturating_sub(s); // free m-bits above
         let m_cap = n - a_below - a_above; // captured m-bits in window
         let c_cap = ell - m_cap; // captured c-bits in window (low c_cap bits of c)
 
@@ -130,14 +136,14 @@ pub(super) fn build_beq_tables<F: FftField>(
 
             // Free-bit product below: Π_{j=0}^{a_below-1} (1 + z^{2^j})
             let mut geo_below = F::ONE;
-            for jj in 0..a_below {
-                geo_below *= F::ONE + z_pows[jj];
+            for &zp in z_pows.iter().take(a_below) {
+                geo_below *= F::ONE + zp;
             }
 
             // Free-bit product above: Π_{j=0}^{a_above-1} (1 + z^{2^{a_below+m_cap+j}})
             let mut geo_above = F::ONE;
-            for jj in 0..a_above {
-                geo_above *= F::ONE + z_pows[a_below + m_cap + jj];
+            for &zp in z_pows.iter().skip(a_below + m_cap).take(a_above) {
+                geo_above *= F::ONE + zp;
             }
 
             scalars.push(tp * geo_below * geo_above);
@@ -152,11 +158,11 @@ pub(super) fn build_beq_tables<F: FftField>(
         if c_cap > 0 {
             for (k_c, &ep) in eq_partial.iter().enumerate() {
                 for (k_m, &mi) in m_inner.iter().enumerate() {
-                    tables[i][k_c * m_cap_size + k_m] = ep * mi;
+                    table[k_c * m_cap_size + k_m] = ep * mi;
                 }
             }
         } else {
-            tables[i] = m_inner;
+            *table = m_inner;
         }
     }
 
@@ -201,24 +207,24 @@ pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
     // Precompute eq(r̄, j) for all j in 0..k
     let eq_weights = MultilinearPoint(r_bar.to_vec()).eq_weights();
 
-    let accumulate_j =
-        |m_acc: &mut Vec<F>, g_acc: &mut Vec<Vec<F>>, j: usize| {
-            let eq_j = eq_weights[j];
-            for m in 0..big_m {
-                let full_idx = j * big_m + m;
+    let accumulate_j = |m_acc: &mut Vec<F>, g_acc: &mut Vec<Vec<F>>, j: usize| {
+        let eq_j = eq_weights[j];
+        for m in 0..big_m {
+            let full_idx = j * big_m + m;
 
-                let phi_0_idx = phi_i_bits(full_idx, 0, mu, ell, rem);
-                m_acc[m] += eq_j * (g_polys[0][phi_0_idx] + neg_rho * masking_poly[phi_0_idx]);
+            let phi_0_idx = phi_i_bits(full_idx, 0, mu, ell, rem);
+            m_acc[m] += eq_j * (g_polys[0][phi_0_idx] + neg_rho * masking_poly[phi_0_idx]);
 
-                for i in 1..num_g_polys {
-                    let phi_i_idx = phi_i_bits(full_idx, i, mu, ell, rem);
-                    g_acc[i - 1][m] += eq_j * g_polys[i][phi_i_idx];
-                }
+            for i in 1..num_g_polys {
+                let phi_i_idx = phi_i_bits(full_idx, i, mu, ell, rem);
+                g_acc[i - 1][m] += eq_j * g_polys[i][phi_i_idx];
             }
-        };
+        }
+    };
 
     #[cfg(feature = "parallel")]
     {
+        #[allow(clippy::needless_return)]
         return (0..k)
             .into_par_iter()
             .fold(
