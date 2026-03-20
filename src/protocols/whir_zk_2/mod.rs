@@ -55,7 +55,7 @@ impl<F: FftField> Config<F> {
         // nu = ⌊mu/ell⌋ — number of blinding polynomials (alternative sampling, page 16)
         let nu = num_variables_main / ell;
         let blinding_params = ProtocolParameters {
-            batch_size: nu + 1,
+            batch_size: params.batch_size + nu,
             ..*params
         };
 
@@ -203,11 +203,11 @@ mod tests {
     }
 
     /// Materialize linear forms into Covectors for the prover.
-    fn to_prove_forms(forms: &[Box<dyn LinearForm<F>>]) -> Vec<Box<dyn LinearForm<F>>> {
+    fn to_prove_forms(forms: &[Box<dyn LinearForm<F>>], size: usize) -> Vec<Box<dyn LinearForm<F>>> {
         forms
             .iter()
             .map(|f| {
-                let mut cv = vec![F::ZERO; TEST_NUM_COEFFS];
+                let mut cv = vec![F::ZERO; size];
                 f.accumulate(&mut cv, F::ONE);
                 Box::new(Covector { vector: cv }) as Box<dyn LinearForm<F>>
             })
@@ -215,20 +215,27 @@ mod tests {
     }
 
     /// Helper: run a full prove → verify cycle for zkWHIR 2.0.
+    /// `vectors` is a list of witness polynomial evaluation tables.
+    /// `evaluations` is row-major: `evaluations[j * n + i]` = ⟨wⱼ, fᵢ⟩.
     #[allow(clippy::needless_pass_by_value)]
-    fn prove_and_verify(vector: Vec<F>, forms: Vec<Box<dyn LinearForm<F>>>, evaluations: &[F]) {
-        let config = make_test_config();
-        let prove_forms = to_prove_forms(&forms);
+    fn prove_and_verify(
+        config: &Config<F>,
+        vectors: Vec<Vec<F>>,
+        forms: Vec<Box<dyn LinearForm<F>>>,
+        evaluations: &[F],
+    ) {
+        let prove_forms = to_prove_forms(forms.as_slice(), vectors[0].len());
 
-        let ds = DomainSeparator::protocol(&config)
+        let ds = DomainSeparator::protocol(config)
             .session(&format!("zk2-pv {}:{}", file!(), line!()))
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
 
-        let witness = config.commit(&mut prover_state, &vector);
+        let poly_refs: Vec<&[F]> = vectors.iter().map(|v| v.as_slice()).collect();
+        let witness = config.commit(&mut prover_state, &poly_refs);
         config.prove(
             &mut prover_state,
-            vector,
+            vectors,
             &witness,
             prove_forms,
             evaluations,
@@ -281,9 +288,9 @@ mod tests {
             .instance(&Empty);
         let mut prover_state = ProverState::new_std(&ds);
 
-        // Commit (generates masking_poly, g_polys, f_hat_poly)
+        // Commit (generates masking_polys, g_polys, f_hat_polys)
         let vector = vec![F::ONE; size];
-        let witness = config.commit(&mut prover_state, &vector);
+        let witness = config.commit(&mut prover_state, &[vector.as_slice()]);
 
         // Step 1-2: get β, build g_poly
         let beta: F = prover_state.verifier_message();
@@ -381,19 +388,21 @@ mod tests {
             }
         }
 
-        // Compute RS-fold coefficients of f̂
+        // Compute RS-fold coefficients of f̂ (single polynomial, use f_hat_polys[0])
         let mut f_hat_fold_coeffs = vec![F::ZERO; big_m];
         for (j, &eq_w) in eq_weights.iter().enumerate().take(k) {
             for (m, coeff) in f_hat_fold_coeffs.iter_mut().enumerate().take(big_m) {
-                *coeff += eq_w * witness.f_hat_poly[j * big_m + m];
+                *coeff += eq_w * witness.f_hat_polys[0][j * big_m + m];
             }
         }
 
-        // Compute RS-fold blinding coefficients using the new helper
-        let (m_coeffs, g_i_coeffs) = compute_rs_fold_blinding_coeffs(
+        // Compute RS-fold blinding coefficients using the helper
+        // Single polynomial: alpha_coeffs = [ONE]
+        let (m_coeffs_all, g_i_coeffs) = compute_rs_fold_blinding_coeffs(
             &r_bar,
             &witness.g_polys,
-            &witness.masking_poly,
+            &witness.masking_polys,
+            &[F::ONE],
             rho,
             mu,
             ell,
@@ -406,7 +415,7 @@ mod tests {
             let lhs = univariate_evaluate(&f_zk_fold_coeffs, z);
 
             let f_hat_term = rho * univariate_evaluate(&f_hat_fold_coeffs, z);
-            let m_term = univariate_evaluate(&m_coeffs, z);
+            let m_term = univariate_evaluate(&m_coeffs_all[0], z);
             let g_terms: F = g_i_coeffs
                 .iter()
                 .enumerate()
@@ -431,7 +440,7 @@ mod tests {
         let form = MultilinearExtension { point: point.0 };
         let evaluation = form.evaluate(config.blinded_polynomial.embedding(), &vector);
 
-        prove_and_verify(vector, vec![Box::new(form)], &[evaluation]);
+        prove_and_verify(&config, vec![vector], vec![Box::new(form)], &[evaluation]);
     }
 
     #[test]
@@ -452,7 +461,7 @@ mod tests {
         let eval0 = f0.evaluate(embedding, &vector);
         let eval1 = f1.evaluate(embedding, &vector);
 
-        prove_and_verify(vector, vec![Box::new(f0), Box::new(f1)], &[eval0, eval1]);
+        prove_and_verify(&config, vec![vector], vec![Box::new(f0), Box::new(f1)], &[eval0, eval1]);
     }
 
     #[test]
@@ -473,9 +482,89 @@ mod tests {
         let cov_eval = cov.evaluate(embedding, &vector);
 
         prove_and_verify(
-            vector,
+            &config,
+            vec![vector],
             vec![Box::new(mle_form), Box::new(cov)],
             &[mle_eval, cov_eval],
+        );
+    }
+
+    fn make_test_config_batch(batch_size: usize) -> Config<F> {
+        let whir_params = ProtocolParameters {
+            unique_decoding: false,
+            security_level: 16,
+            pow_bits: 0,
+            initial_folding_factor: 2,
+            folding_factor: 2,
+            starting_log_inv_rate: 1,
+            batch_size,
+            hash_id: hash::SHA2,
+        };
+        let mut config = Config::new(&whir_params, TEST_NUM_VARIABLES);
+        config.blinded_polynomial.disable_pow();
+        config.blinding_polynomial.disable_pow();
+        config
+    }
+
+    #[test]
+    fn test_zk2_prove_verify_multi_vector() {
+        let mut rng = ark_std::test_rng();
+        let config = make_test_config_batch(2);
+
+        let v0: Vec<F> = (0..TEST_NUM_COEFFS)
+            .map(|i| F::from(i as u64 + 1))
+            .collect();
+        let v1: Vec<F> = (0..TEST_NUM_COEFFS)
+            .map(|i| F::from(i as u64 * 3 + 7))
+            .collect();
+
+        let p0 = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
+        let f0 = MultilinearExtension { point: p0.0 };
+
+        let embedding = config.blinded_polynomial.embedding();
+        // evaluations[j * n + i] = ⟨wⱼ, fᵢ⟩
+        // 1 form, 2 vectors: evaluations = [⟨w₀, f₀⟩, ⟨w₀, f₁⟩]
+        let eval_0_0 = f0.evaluate(embedding, &v0);
+        let eval_0_1 = f0.evaluate(embedding, &v1);
+
+        prove_and_verify(
+            &config,
+            vec![v0, v1],
+            vec![Box::new(f0)],
+            &[eval_0_0, eval_0_1],
+        );
+    }
+
+    #[test]
+    fn test_zk2_prove_verify_multi_vector_multi_form() {
+        let mut rng = ark_std::test_rng();
+        let config = make_test_config_batch(2);
+
+        let v0: Vec<F> = (0..TEST_NUM_COEFFS)
+            .map(|i| F::from(i as u64 + 1))
+            .collect();
+        let v1: Vec<F> = (0..TEST_NUM_COEFFS)
+            .map(|i| F::from(i as u64 * 3 + 7))
+            .collect();
+
+        let p0 = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
+        let p1 = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
+        let f0 = MultilinearExtension { point: p0.0 };
+        let f1 = MultilinearExtension { point: p1.0 };
+
+        let embedding = config.blinded_polynomial.embedding();
+        // Row-major: evaluations[j * n + i] = ⟨wⱼ, fᵢ⟩
+        // 2 forms × 2 vectors = 4 evaluations
+        let eval_0_0 = f0.evaluate(embedding, &v0);
+        let eval_0_1 = f0.evaluate(embedding, &v1);
+        let eval_1_0 = f1.evaluate(embedding, &v0);
+        let eval_1_1 = f1.evaluate(embedding, &v1);
+
+        prove_and_verify(
+            &config,
+            vec![v0, v1],
+            vec![Box::new(f0), Box::new(f1)],
+            &[eval_0_0, eval_0_1, eval_1_0, eval_1_1],
         );
     }
 }
