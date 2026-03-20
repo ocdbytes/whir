@@ -1,15 +1,22 @@
 use std::borrow::Cow;
 
 use ark_ff::FftField;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
-use super::Config;
+use super::{
+    utils::{build_beq_tables, build_fold_args, compute_rs_fold_blinding_coeffs, phi_i_bits},
+    Config,
+};
+#[cfg(feature = "parallel")]
+use crate::utils::workload_size;
 use crate::{
     algebra::{
         dot,
         embedding::Identity,
-        eval_eq,
+        geometric_sequence,
         linear_form::{Covector, Evaluate, LinearForm, UnivariateEvaluation},
-        multilinear_extend, univariate_evaluate, MultilinearPoint,
+        multilinear_extend, univariate_evaluate,
     },
     hash::Hash,
     protocols::{geometric_challenge::geometric_challenge, whir_zk_2::commiter::Witness},
@@ -18,6 +25,8 @@ use crate::{
         VerifierMessage,
     },
 };
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 // TODO: find some way to remove the reimplementation of rounds here.
 // This does not look clean and reimplements the same logic which is inside whir.
@@ -36,13 +45,14 @@ impl<F: FftField> Config<F> {
     ///   Step 6:   Consistency check — send blinding evaluations at Γ points.
     ///   Step 7:   Batched proof — run second WHIR on blinding polynomials
     ///             to prove all claimed evaluations from Steps 5-6.
-    pub fn prove<H, R>(
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    pub fn prove<'a, H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
         vector: Vec<F>,
-        witness: Witness<F>,
+        witness: &'a Witness<F>,
         linear_forms: Vec<Box<dyn LinearForm<F>>>,
-        evaluations: Vec<F>,
+        evaluations: &[F],
     ) where
         H: DuplexSpongeInterface<U = u8>,
         R: ark_std::rand::RngCore + ark_std::rand::CryptoRng,
@@ -72,38 +82,53 @@ impl<F: FftField> Config<F> {
         let beta: F = prover_state.verifier_message();
 
         // Precompute β powers: [1, β, β², ..., β^ν]
-        let mut beta_powers = Vec::with_capacity(num_g_polys);
-        let mut bp = F::ONE;
-        for _ in 0..num_g_polys {
-            beta_powers.push(bp);
-            bp *= beta;
-        }
+        let beta_powers = geometric_sequence(beta, num_g_polys);
 
         // Evaluate g on the full 2^μ hypercube via table lookups into ĝ_i.
         // g[b] = Σ_i β^i · ĝ_i[Φ_i(b)]  (no polynomial arithmetic — pure index extraction)
-        let mut g_poly = Vec::with_capacity(size);
-        for b in 0..size {
+        let compute_g = |b: usize| -> F {
             let mut sum = F::ZERO;
             for i in 0..num_g_polys {
                 let idx = phi_i_bits(b, i, mu, ell, rem);
                 sum += beta_powers[i] * witness.g_polys[i][idx];
             }
-            g_poly.push(sum);
-        }
+            sum
+        };
+
+        #[cfg(feature = "tracing")]
+        let _span_g_poly = tracing::info_span!("zk2_build_g_poly", size).entered();
+
+        #[cfg(feature = "parallel")]
+        let g_poly: Vec<F> = if size > workload_size::<F>() {
+            (0..size).into_par_iter().map(compute_g).collect()
+        } else {
+            (0..size).map(compute_g).collect()
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let g_poly: Vec<F> = (0..size).map(compute_g).collect();
+
+        #[cfg(feature = "tracing")]
+        drop(_span_g_poly);
+
+        #[cfg(feature = "tracing")]
+        let _span_g_claims = tracing::info_span!("zk2_g_claims").entered();
 
         // Compute blinding claims G_j = ⟨w_j, g⟩ for each linear form w_j.
+        let mut buf = vec![F::ZERO; size];
         let g_claims: Vec<F> = linear_forms
             .iter()
             .map(|w| {
-                let mut covector = vec![F::ZERO; size];
-                w.accumulate(&mut covector, F::ONE);
-                covector
-                    .iter()
-                    .zip(g_poly.iter())
-                    .map(|(&a, &b)| a * b)
-                    .sum()
+                buf.fill(F::ZERO);
+                w.accumulate(&mut buf, F::ONE);
+                dot(&buf, &g_poly)
             })
             .collect();
+
+        #[cfg(feature = "tracing")]
+        drop(_span_g_claims);
+
+        drop(buf); // free 2^μ scratch buffer, no longer needed
 
         // P → V: send G claims
         for g_claim in &g_claims {
@@ -120,16 +145,35 @@ impl<F: FftField> Config<F> {
         let rho: F = prover_state.verifier_message();
         assert_ne!(rho, F::ZERO, "rho should not be zero");
 
-        let mut f_zk: Vec<F> = vector
-            .iter()
-            .zip(g_poly.iter())
-            .map(|(&f, &g)| rho * f + g)
-            .collect();
+        #[cfg(feature = "tracing")]
+        let _span_blend = tracing::info_span!("zk2_blend_f_zk", size).entered();
 
-        let mut combined_claims = vec![F::ZERO; evaluations.len()];
-        for (i, (eval, g_claim)) in evaluations.iter().zip(g_claims.iter()).enumerate() {
-            combined_claims[i] = rho * eval + g_claim;
+        let mut f_zk = vector; // take ownership, no new allocation
+        #[cfg(feature = "parallel")]
+        if f_zk.len() > workload_size::<F>() {
+            f_zk.par_iter_mut()
+                .zip(g_poly.par_iter())
+                .for_each(|(f, &g)| *f = rho * *f + g);
+        } else {
+            for (f, &g) in f_zk.iter_mut().zip(g_poly.iter()) {
+                *f = rho * *f + g;
+            }
         }
+
+        #[cfg(not(feature = "parallel"))]
+        for (f, &g) in f_zk.iter_mut().zip(g_poly.iter()) {
+            *f = rho * *f + g;
+        }
+        drop(g_poly); // free 2^μ immediately
+
+        #[cfg(feature = "tracing")]
+        drop(_span_blend);
+
+        let combined_claims: Vec<F> = evaluations
+            .iter()
+            .zip(g_claims.iter())
+            .map(|(&eval, &g)| rho * eval + g)
+            .collect();
 
         // =====================================================================
         // Step 4: Initial sumcheck on f_zk
@@ -137,16 +181,24 @@ impl<F: FftField> Config<F> {
         // RLC the linear forms into a single covector and scalar claim.
         // Run s rounds of sumcheck, producing folding randomness r̄ = (r_0, ..., r_{s-1}).
 
+        #[cfg(feature = "tracing")]
+        let _span_covector = tracing::info_span!("zk2_initial_covector_setup", size).entered();
+
         let constraint_rlc_coeffs: Vec<F> = geometric_challenge(prover_state, linear_forms.len());
         let mut covector = vec![F::ZERO; size];
         for (coeff, lf) in constraint_rlc_coeffs.iter().zip(linear_forms.iter()) {
             lf.accumulate(&mut covector, *coeff);
         }
+        drop(linear_forms); // free linear form objects, no longer needed
+
         let mut the_sum: F = constraint_rlc_coeffs
             .iter()
             .zip(combined_claims.iter())
             .map(|(&c, &eval)| c * eval)
             .sum();
+
+        #[cfg(feature = "tracing")]
+        drop(_span_covector);
 
         let folding_randomness = self.blinded_polynomial.initial_sumcheck.prove(
             prover_state,
@@ -173,6 +225,9 @@ impl<F: FftField> Config<F> {
             .initial_committer
             .open(prover_state, &[&witness.blinded_witness]);
 
+        #[cfg(feature = "tracing")]
+        let _span_rs_fold = tracing::info_span!("zk2_rs_fold_blinding_coeffs").entered();
+
         let r_bar = folding_randomness.0.clone();
         let (m_coeffs, g_i_coeffs) = compute_rs_fold_blinding_coeffs(
             &r_bar,
@@ -183,6 +238,10 @@ impl<F: FftField> Config<F> {
             ell,
             rem,
         );
+
+        #[cfg(feature = "tracing")]
+        drop(_span_rs_fold);
+
         let z_points = folded_f_zk_commitment.out_of_domain().points.clone();
 
         // Λ accumulator: fold_args points and blinding evaluations for Step 7.
@@ -193,6 +252,10 @@ impl<F: FftField> Config<F> {
         let mut lambda_m_evals: Vec<F> = Vec::new();
         let mut lambda_g_evals: Vec<Vec<F>> = Vec::new();
         let mut lambda_z_points: Vec<F> = Vec::new();
+
+        #[cfg(feature = "tracing")]
+        let _span_ood_stir =
+            tracing::info_span!("zk2_ood_stir_responses", num_ood = z_points.len(), num_stir = in_domain.points.len()).entered();
 
         // --- OOD responses ---
         // For each OOD point z₀: send f̂(fold_args(r̄, z₀)), M, and ĝ_i evaluations.
@@ -238,10 +301,16 @@ impl<F: FftField> Config<F> {
             lambda_g_evals.push(g_evals);
         }
 
+        #[cfg(feature = "tracing")]
+        drop(_span_ood_stir);
+
         // --- STIR constraint accumulation ---
         // Collect UnivariateEvaluation constraints from OOD and in-domain points.
         // Evaluate f_zk at each STIR point via RS interpolation.
         // RLC all STIR constraints into the covector and the_sum.
+
+        #[cfg(feature = "tracing")]
+        let _span_stir_accum = tracing::info_span!("zk2_stir_accumulation").entered();
 
         let stir_challenges: Vec<UnivariateEvaluation<F>> = folded_f_zk_commitment
             .out_of_domain()
@@ -269,6 +338,9 @@ impl<F: FftField> Config<F> {
         UnivariateEvaluation::accumulate_many(&stir_challenges, &mut covector, &stir_rlc_coeffs);
         the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
 
+        #[cfg(feature = "tracing")]
+        drop(_span_stir_accum);
+
         // DEBUG: verify invariant after STIR accumulation
         debug_assert_eq!(
             dot(&f_zk, &covector),
@@ -292,7 +364,18 @@ impl<F: FftField> Config<F> {
         let mut prev_witness = folded_f_zk_commitment;
         let mut gamma_points: Vec<F> = Vec::new();
 
+        #[cfg(feature = "tracing")]
+        let _span_whir_rounds = tracing::info_span!(
+            "zk2_whir_rounds",
+            num_rounds = self.blinded_polynomial.round_configs.len() - 1
+        )
+        .entered();
+
         for round_index in 1..self.blinded_polynomial.round_configs.len() {
+            #[cfg(feature = "tracing")]
+            let _span_round =
+                tracing::info_span!("zk2_whir_round", round_index).entered();
+
             let round_config = &self.blinded_polynomial.round_configs[round_index];
 
             let new_witness = round_config.irs_committer.commit(prover_state, &[&f_zk]);
@@ -307,6 +390,10 @@ impl<F: FftField> Config<F> {
             if round_index == 1 {
                 gamma_points = in_domain.points.clone();
             }
+
+            #[cfg(feature = "tracing")]
+            let _span_round_stir =
+                tracing::info_span!("zk2_round_stir_accumulation", round_index).entered();
 
             let stir_challenges: Vec<UnivariateEvaluation<F>> = new_witness
                 .out_of_domain()
@@ -326,6 +413,9 @@ impl<F: FftField> Config<F> {
             );
             the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
 
+            #[cfg(feature = "tracing")]
+            drop(_span_round_stir);
+
             folding_randomness =
                 round_config
                     .sumcheck
@@ -334,11 +424,17 @@ impl<F: FftField> Config<F> {
             prev_witness = new_witness;
         }
 
+        #[cfg(feature = "tracing")]
+        drop(_span_whir_rounds);
+
         // =====================================================================
         // Final round of the first WHIR instance
         // =====================================================================
         // Send the (small) final folded vector directly. Open the last commitment.
         // If there's only one round, [[H]] is opened here — save Γ in that case.
+
+        #[cfg(feature = "tracing")]
+        let _span_final = tracing::info_span!("zk2_final_round").entered();
 
         assert_eq!(
             f_zk.len(),
@@ -366,6 +462,9 @@ impl<F: FftField> Config<F> {
             &mut the_sum,
         );
 
+        #[cfg(feature = "tracing")]
+        drop(_span_final);
+
         // =====================================================================
         // Step 6: Verifier Consistency Check
         // =====================================================================
@@ -379,6 +478,9 @@ impl<F: FftField> Config<F> {
         //
         // All evaluation points and values are accumulated into Λ for Step 7.
 
+        #[cfg(feature = "tracing")]
+        let _span_gamma = tracing::info_span!("zk2_gamma_consistency", num_gamma = gamma_points.len()).entered();
+
         // Map Γ points (from Ω₁) to [[f̂]] codeword indices (in Ω₀).
         // gen₁ = gen₀^stride where stride = N₀/N₁, so Ω₁ index i → Ω₀ index i·stride.
         let n0 = self.blinded_polynomial.initial_committer.codeword_length;
@@ -389,25 +491,39 @@ impl<F: FftField> Config<F> {
         let gen_h = self.blinded_polynomial.round_configs[0]
             .irs_committer
             .generator();
-        let gamma_f_hat_indices: Vec<usize> = gamma_points
-            .iter()
-            .map(|&gamma| {
-                let mut g = F::ONE;
-                for i in 0..n1 {
-                    if g == gamma {
-                        return i * stride;
-                    }
-                    g *= gen_h;
+
+        #[cfg(feature = "tracing")]
+        let _span_gamma_search = tracing::info_span!("zk2_gamma_index_search", n1).entered();
+
+        // Single pass through Ω₁ instead of per-gamma linear scan
+        let mut gamma_f_hat_indices = vec![0usize; gamma_points.len()];
+        let mut remaining = gamma_points.len();
+        let mut found = vec![false; gamma_points.len()];
+        let mut g = F::ONE;
+        for i in 0..n1 {
+            if remaining == 0 {
+                break;
+            }
+            for (j, &gamma) in gamma_points.iter().enumerate() {
+                if !found[j] && g == gamma {
+                    gamma_f_hat_indices[j] = i * stride;
+                    found[j] = true;
+                    remaining -= 1;
                 }
-                panic!("gamma not found in Ω₁ domain");
-            })
-            .collect();
+            }
+            g *= gen_h;
+        }
+        assert_eq!(remaining, 0, "some gamma points not found in Ω₁ domain");
+
+        #[cfg(feature = "tracing")]
+        drop(_span_gamma_search);
 
         // Open [[f̂]] at Γ-mapped indices (goes on transcript before blinding claims)
-        let _gamma_f_hat_evals = self
-            .blinded_polynomial
-            .initial_committer
-            .open_at_indices(prover_state, &[&witness.blinded_witness], &gamma_f_hat_indices);
+        let _gamma_f_hat_evals = self.blinded_polynomial.initial_committer.open_at_indices(
+            prover_state,
+            &[&witness.blinded_witness],
+            &gamma_f_hat_indices,
+        );
 
         for gamma in gamma_points {
             let fold_point = build_fold_args(&r_bar, gamma, mu);
@@ -426,6 +542,9 @@ impl<F: FftField> Config<F> {
             lambda_g_evals.push(g_evals);
         }
 
+        #[cfg(feature = "tracing")]
+        drop(_span_gamma);
+
         // =====================================================================
         // Step 7: Batched Proof on Blinding Polynomials
         // =====================================================================
@@ -442,49 +561,28 @@ impl<F: FftField> Config<F> {
         //
         // The base WHIR prove() handles vector RLC and constraint RLC internally.
 
+        // m_coeffs and g_i_coeffs are no longer needed after Step 6
+        drop(m_coeffs);
+        drop(g_i_coeffs);
+
         // V → P: sample τ for Λ-point batching
         let tau: F = prover_state.verifier_message();
 
         let half_size = 1usize << ell; // 2^ℓ — size of each ĝ_i table
         let full_size = 1usize << (ell + 1); // 2^{ℓ+1} — size of committed vectors
 
-        // // Build batched eq tables: beq_i[k] = Σ_j τ^{j+1} · eq(Φ_i(A[j]), k)
-        // // Each beq_i is ℓ-variate (size 2^ℓ), one per blinding polynomial.
-        // // Uses eval_eq for in-place accumulation of scalar · eq(point, ·).
-        // let mut beq_tables: Vec<Vec<F>> = vec![vec![F::ZERO; half_size]; num_g_polys];
-        // let mut tau_pow = tau;
-        // for fold_point in &lambda_fold_points {
-        //     for i in 0..num_g_polys {
-        //         let phi_i_point = calculate_phi_i(fold_point, i, ell, rem);
-        //         eval_eq(&mut beq_tables[i], phi_i_point, tau_pow);
-        //     }
-        //     tau_pow *= tau;
-        // }
-        let mut beq_tables: Vec<Vec<F>> = vec![vec![F::ZERO; half_size]; num_g_polys];
-        let s = r_bar.len();
-        let k = 1 << s;
-        let big_m = 1 << (mu - s);
-        let mut tau_pow = tau;
-        let eq_weights = MultilinearPoint(r_bar.to_vec()).eq_weights();
-        for (fold_point, z_value) in lambda_fold_points.iter().zip(lambda_z_points.iter()) {
-            let mut z_powers = Vec::with_capacity(big_m);
-            let mut zp = F::ONE;
-            for _ in 0..big_m {
-                z_powers.push(zp);
-                zp *= z_value;
-            }
-            for c in 0..k {
-                for m in 0..big_m {
-                    let full_idx = c * big_m + m;
-                    for i in 0..num_g_polys {
-                        let phi_idx = phi_i_bits(full_idx as usize, i, mu, ell, rem);
-                        beq_tables[i][phi_idx] +=
-                            tau_pow * eq_weights[c as usize] * z_powers[m as usize];
-                    }
-                }
-            }
-            tau_pow *= tau;
-        }
+        #[cfg(feature = "tracing")]
+        let _span_beq = tracing::info_span!("zk2_beq_tables", num_lambda = lambda_z_points.len(), half_size).entered();
+
+        let beq_tables =
+            build_beq_tables(&lambda_z_points, &r_bar, tau, mu, ell, rem, num_g_polys);
+        drop(lambda_fold_points); // no longer needed after beq_tables are built
+
+        #[cfg(feature = "tracing")]
+        drop(_span_beq);
+
+        #[cfg(feature = "tracing")]
+        let _span_weights = tracing::info_span!("zk2_weight_covectors", full_size, num_g_polys).entered();
 
         // Expand ℓ-variate beq tables to (ℓ+1)-variate weight covectors.
         // The lowest bit (t) accounts for the interleaved committed layout.
@@ -515,6 +613,12 @@ impl<F: FftField> Config<F> {
             weight_covectors.push(wi);
         }
 
+        #[cfg(feature = "tracing")]
+        drop(_span_weights);
+
+        #[cfg(feature = "tracing")]
+        let _span_blinding_vecs = tracing::info_span!("zk2_blinding_vecs", full_size, num_g_polys).entered();
+
         // Reconstruct blinding vectors (same interleaved layout as commiter.rs).
         let mut blinding_vecs: Vec<Vec<F>> = Vec::with_capacity(num_g_polys);
 
@@ -530,6 +634,12 @@ impl<F: FftField> Config<F> {
             blinding_vecs.push(emb);
         }
 
+        #[cfg(feature = "tracing")]
+        drop(_span_blinding_vecs);
+
+        #[cfg(feature = "tracing")]
+        let _span_eval_matrix = tracing::info_span!("zk2_eval_matrix", num_g_polys, full_size).entered();
+
         // Compute full evaluation matrix E[i][j] = ⟨w_i, v_j⟩ (row-major).
         // Diagonal E[i][i] = F_i (the batched claim for polynomial i).
         // Off-diagonal entries are cross-evaluations required by the base WHIR
@@ -541,6 +651,9 @@ impl<F: FftField> Config<F> {
                 eval_matrix.push(eval);
             }
         }
+
+        #[cfg(feature = "tracing")]
+        drop(_span_eval_matrix);
 
         // Send eval_matrix to transcript so the verifier can reconstruct it.
         // The verifier can compute diagonal entries from Λ claims but not off-diagonal.
@@ -556,174 +669,20 @@ impl<F: FftField> Config<F> {
 
         // Run the second WHIR instance on the blinding polynomials.
         // The returned FinalClaim is discarded — it is not needed by the outer protocol.
+        #[cfg(feature = "tracing")]
+        let _span_inner_prove = tracing::info_span!("zk2_inner_blinding_prove").entered();
+
         let blinding_vector_cows: Vec<Cow<'_, [F]>> =
             blinding_vecs.into_iter().map(Cow::Owned).collect();
         let _ = self.blinding_polynomial.prove(
             prover_state,
             blinding_vector_cows,
-            vec![Cow::Owned(witness.blinding_witness)],
+            vec![Cow::Borrowed(&witness.blinding_witness)],
             blinding_forms,
             Cow::Owned(eval_matrix),
         );
+
+        #[cfg(feature = "tracing")]
+        drop(_span_inner_prove);
     }
-}
-
-// =============================================================================
-// Helper functions
-// =============================================================================
-
-/// Extract the ℓ-variable slice from a μ-variate point for the Φ_i coordinate projection.
-///
-/// Φ_i selects a contiguous block of ℓ variables:
-///   Φ_0 → variables [0, ℓ)
-///   Φ_i → variables [(i-1)·ℓ + rem, i·ℓ + rem)   for i ≥ 1
-///
-/// Returns a slice of the input point corresponding to the selected variables.
-pub(super) fn calculate_phi_i<F: FftField>(
-    vector: &[F],
-    phi_index: usize,
-    ell: usize,
-    rem: usize,
-) -> &[F] {
-    if phi_index == 0 {
-        &vector[..ell]
-    } else {
-        let start = (phi_index - 1) * ell + rem;
-        &vector[start..start + ell]
-    }
-}
-
-/// Extract the ℓ-bit sub-index from a μ-bit hypercube index `b` for the Φ_i variable block.
-///
-/// This is the integer-index analogue of [`calculate_phi_i`] — it extracts the same
-/// variable block but operates on hypercube indices (bit patterns) rather than field
-/// element slices.
-///
-/// Index convention (big-endian):
-///   index = x_0 · 2^{μ-1} + x_1 · 2^{μ-2} + ... + x_{μ-1} · 2^0
-///
-/// The result is: `(b >> (μ - start - ℓ)) & ((1 << ℓ) - 1)`
-pub(super) fn phi_i_bits(b: usize, phi_index: usize, mu: usize, ell: usize, rem: usize) -> usize {
-    let start = if phi_index == 0 {
-        0
-    } else {
-        (phi_index - 1) * ell + rem
-    };
-    let shift = mu - start - ell;
-    (b >> shift) & ((1 << ell) - 1)
-}
-
-/// Build the μ-variate evaluation point `fold_args(r̄, z)`.
-///
-/// Result: `(r_0, ..., r_{s-1}, z^{2^{k-1}}, z^{2^{k-2}}, ..., z^2, z)`
-/// where `s = |r̄|` and `k = μ − s`.
-///
-/// The z-derived coordinates use descending powers (big-endian convention)
-/// to match the codebase's `UnivariateEvaluation::mle_evaluate` squaring ladder.
-pub(super) fn build_fold_args<F: FftField>(r_bar: &[F], z: F, mu: usize) -> Vec<F> {
-    let s = r_bar.len();
-    let k = mu - s;
-    let mut point = Vec::with_capacity(mu);
-    point.extend(r_bar);
-
-    // Squaring ladder: z, z², z⁴, ..., z^{2^{k-1}}
-    let mut z_pow = z;
-    let mut z_pows = Vec::with_capacity(k);
-    for _ in 0..k {
-        z_pows.push(z_pow);
-        z_pow.square_in_place();
-    }
-    // Reverse to descending order: z^{2^{k-1}}, ..., z², z
-    point.extend(z_pows.iter().rev());
-    point
-}
-
-/// Evaluate blinding polynomials at a μ-variate point using Φ_i projections.
-///
-/// Returns `(m_eval, [g_1_eval, ..., g_ν_eval])` where:
-///   - `m_eval  = M(Φ_0(point), −ρ) = ĝ_0(Φ_0(point)) + (−ρ)·msk(Φ_0(point))`
-///   - `g_i_eval = ĝ_i(Φ_i(point))`  for i = 1, ..., ν
-fn evaluate_blinding_at_point<F: FftField>(
-    g_polys: &[Vec<F>],
-    masking_poly: &[F],
-    fold_point: &[F],
-    rho: F,
-    ell: usize,
-    rem: usize,
-) -> (F, Vec<F>) {
-    let phi_0 = calculate_phi_i(fold_point, 0, ell, rem);
-    let g0_eval = multilinear_extend(&g_polys[0], phi_0);
-    let msk_eval = multilinear_extend(masking_poly, phi_0);
-    let m_eval = g0_eval + (-rho) * msk_eval;
-
-    let g_evals: Vec<F> = (1..g_polys.len())
-        .map(|i| {
-            let phi_i = calculate_phi_i(fold_point, i, ell, rem);
-            multilinear_extend(&g_polys[i], phi_i)
-        })
-        .collect();
-
-    (m_eval, g_evals)
-}
-
-/// Precompute RS-fold coefficient vectors for the blinding polynomials.
-///
-/// After the initial sumcheck folds `s` variables with randomness `r̄`, the original
-/// 2^μ-coefficient polynomial is viewed as `k = 2^s` sub-polynomials of length `M = 2^(μ-s)`.
-/// The RS-fold is:
-///
-/// ```text
-/// fold(r̄, poly)(z) = Σ_m [ Σ_j eq(r̄, j) · poly[j·M + m] ] · z^m
-/// ```
-///
-/// For blinding polynomials, the 2^μ evaluation table is the lift of an ℓ-variate table
-/// via Φ_i projections: `lifted[b] = table[Φ_i_bits(b)]`.
-///
-/// This function computes:
-/// - `m_coeffs[m] = Σ_j eq(r̄, j) · [ĝ₀[Φ₀(j·M+m)] + (-ρ)·msk[Φ₀(j·M+m)]]`
-/// - `g_i_coeffs[i][m] = Σ_j eq(r̄, j) · ĝᵢ[Φᵢ(j·M+m)]`  for i = 1..ν
-///
-/// Returns `(m_coeffs, g_i_coeffs)` where each vector has length M.
-/// To evaluate at a point z, use `univariate_evaluate(&coeffs, z)`.
-pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
-    r_bar: &[F],
-    g_polys: &[Vec<F>],
-    masking_poly: &[F],
-    rho: F,
-    mu: usize,
-    ell: usize,
-    rem: usize,
-) -> (Vec<F>, Vec<Vec<F>>) {
-    let s = r_bar.len();
-    let k = 1usize << s; // number of sub-polynomials
-    let big_m = 1usize << (mu - s); // length of each sub-polynomial
-    let num_g_polys = g_polys.len();
-    let neg_rho = -rho;
-
-    // Precompute eq(r̄, j) for all j in 0..k
-    let eq_weights = MultilinearPoint(r_bar.to_vec()).eq_weights();
-
-    // m_coeffs for M_ρ (polynomial 0: ĝ₀ + (-ρ)·msk)
-    let mut m_coeffs = vec![F::ZERO; big_m];
-    // g_i_coeffs for ĝ_i, i = 1..ν
-    let mut g_i_coeffs = vec![vec![F::ZERO; big_m]; num_g_polys - 1];
-
-    for j in 0..k {
-        let eq_j = eq_weights[j];
-        for m in 0..big_m {
-            let full_idx = j * big_m + m;
-
-            // M_ρ contribution: ĝ₀[Φ₀(full_idx)] + (-ρ)·msk[Φ₀(full_idx)]
-            let phi_0_idx = phi_i_bits(full_idx, 0, mu, ell, rem);
-            m_coeffs[m] += eq_j * (g_polys[0][phi_0_idx] + neg_rho * masking_poly[phi_0_idx]);
-
-            // ĝ_i contributions for i ≥ 1
-            for i in 1..num_g_polys {
-                let phi_i_idx = phi_i_bits(full_idx, i, mu, ell, rem);
-                g_i_coeffs[i - 1][m] += eq_j * g_polys[i][phi_i_idx];
-            }
-        }
-    }
-
-    (m_coeffs, g_i_coeffs)
 }
