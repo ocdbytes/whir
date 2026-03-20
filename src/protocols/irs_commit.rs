@@ -473,6 +473,97 @@ where
         Ok(Evaluations { points, matrix })
     }
 
+    /// Opens the commitment at caller-provided codeword indices.
+    ///
+    /// Like [`open`] but does not sample indices from the transcript.
+    /// Used for the Γ consistency check in zkWHIR 2.0.
+    pub fn open_at_indices<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        witnesses: &[&Witness<M::Source, M::Target>],
+        indices: &[usize],
+    ) -> Evaluations<M::Source>
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        Hash: ProverMessage<[H::U]>,
+    {
+        let generator = self.generator();
+        let points: Vec<M::Source> = indices
+            .iter()
+            .map(|&i| generator.pow([i as u64]))
+            .collect();
+
+        let stride = witnesses.len() * self.num_cols();
+        let mut matrix = vec![M::Source::ZERO; indices.len() * stride];
+        let mut submatrix = Vec::with_capacity(indices.len() * self.num_cols());
+        let mut matrix_col_offset = 0;
+        for witness in witnesses {
+            submatrix.clear();
+            for (point_index, &code_index) in indices.iter().enumerate() {
+                let row = &witness.matrix
+                    [code_index * self.num_cols()..(code_index + 1) * self.num_cols()];
+                submatrix.extend_from_slice(row);
+
+                let matrix_row = &mut matrix[point_index * stride..(point_index + 1) * stride];
+                matrix_row[matrix_col_offset..matrix_col_offset + self.num_cols()]
+                    .copy_from_slice(row);
+            }
+            prover_state.prover_hint_ark(&submatrix);
+            self.matrix_commit
+                .open(prover_state, &witness.matrix_witness, indices);
+            matrix_col_offset += self.num_cols();
+        }
+
+        Evaluations { points, matrix }
+    }
+
+    /// Verifies an opening at caller-provided codeword indices.
+    ///
+    /// Like [`verify`] but does not sample indices from the transcript.
+    /// Used for the Γ consistency check in zkWHIR 2.0.
+    pub fn verify_at_indices<H>(
+        &self,
+        verifier_state: &mut VerifierState<H>,
+        commitments: &[&Commitment<M::Target>],
+        indices: &[usize],
+    ) -> VerificationResult<Evaluations<M::Source>>
+    where
+        H: DuplexSpongeInterface,
+        u8: Decoding<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        let generator = self.generator();
+        let points: Vec<M::Source> = indices
+            .iter()
+            .map(|&i| generator.pow([i as u64]))
+            .collect();
+
+        let stride = commitments.len() * self.num_cols();
+        let mut matrix = vec![M::Source::ZERO; indices.len() * stride];
+        let mut matrix_col_offset = 0;
+        for commitment in commitments {
+            let submatrix: Vec<M::Source> = verifier_state.prover_hint_ark()?;
+            self.matrix_commit.verify(
+                verifier_state,
+                &commitment.matrix_commitment,
+                indices,
+                &submatrix,
+            )?;
+            if stride != 0 && self.num_cols() != 0 {
+                for (dst, src) in zip_strict(
+                    matrix.chunks_exact_mut(stride),
+                    submatrix.chunks_exact(self.num_cols()),
+                ) {
+                    dst[matrix_col_offset..matrix_col_offset + self.num_cols()]
+                        .copy_from_slice(src);
+                }
+            }
+            matrix_col_offset += self.num_cols();
+        }
+        Ok(Evaluations { points, matrix })
+    }
+
     fn in_domain_challenges<T>(&self, transcript: &mut T) -> (Vec<usize>, Vec<M::Source>)
     where
         T: VerifierMessage,
