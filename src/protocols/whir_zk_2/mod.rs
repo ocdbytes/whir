@@ -247,6 +247,170 @@ mod tests {
             .expect("verification failed");
     }
 
+    /// Test that the RS-fold decomposition holds:
+    /// fold(r̄, f_zk)(z) = ρ · fold(r̄, f̂)(z) + m̃_RS(z) + Σ βⁱ · g̃_i_RS(z)
+    ///
+    /// This validates the `compute_rs_fold_blinding_coeffs` helper by checking
+    /// that the RS-fold of f_zk decomposes correctly into f̂ and blinding parts.
+    #[test]
+    fn test_rs_fold_decomposition() {
+        use crate::algebra::univariate_evaluate;
+        use crate::protocols::geometric_challenge::geometric_challenge;
+        use crate::protocols::whir_zk_2::prover::{
+            compute_rs_fold_blinding_coeffs, phi_i_bits,
+        };
+        use crate::transcript::{
+            codecs::Empty, DomainSeparator, ProverState, VerifierMessage,
+        };
+
+        let config = make_test_config();
+        let mu = TEST_NUM_VARIABLES;
+        let ell = config.blinding_polynomial.initial_num_variables() - 1;
+        let rem = mu % ell;
+        let num_g_polys = config.blinding_polynomial.initial_committer.num_vectors;
+        let size = 1usize << mu;
+
+        // Set up a transcript to get deterministic randomness
+        let ds = DomainSeparator::protocol(&config)
+            .session(&format!("rs-fold-test {}:{}", file!(), line!()))
+            .instance(&Empty);
+        let mut prover_state = ProverState::new_std(&ds);
+
+        // Commit (generates masking_poly, g_polys, f_hat_poly)
+        let vector = vec![F::ONE; size];
+        let witness = config.commit(&mut prover_state, &vector);
+
+        // Step 1-2: get β, build g_poly
+        let beta: F = prover_state.verifier_message();
+        let mut beta_powers = Vec::with_capacity(num_g_polys);
+        let mut bp = F::ONE;
+        for _ in 0..num_g_polys {
+            beta_powers.push(bp);
+            bp *= beta;
+        }
+
+        let mut g_poly = vec![F::ZERO; size];
+        for b in 0..size {
+            for i in 0..num_g_polys {
+                let idx = phi_i_bits(b, i, mu, ell, rem);
+                g_poly[b] += beta_powers[i] * witness.g_polys[i][idx];
+            }
+        }
+
+        // G claims (read by verifier)
+        let linear_forms: Vec<Box<dyn LinearForm<F>>> = vec![
+            Box::new(MultilinearExtension {
+                point: MultilinearPoint::rand(&mut ark_std::test_rng(), mu).0,
+            }),
+        ];
+        let g_claims: Vec<F> = linear_forms
+            .iter()
+            .map(|w| {
+                let mut covector = vec![F::ZERO; size];
+                w.accumulate(&mut covector, F::ONE);
+                covector.iter().zip(g_poly.iter()).map(|(&a, &b)| a * b).sum()
+            })
+            .collect();
+        for g_claim in &g_claims {
+            prover_state.prover_message(g_claim);
+        }
+
+        // Step 3: get ρ, build f_zk
+        let rho: F = prover_state.verifier_message();
+
+        let f_zk: Vec<F> = vector
+            .iter()
+            .zip(g_poly.iter())
+            .map(|(&f, &g)| rho * f + g)
+            .collect();
+
+        // Run initial sumcheck to get r̄
+        let constraint_rlc_coeffs: Vec<F> =
+            geometric_challenge(&mut prover_state, linear_forms.len());
+        let mut f_zk_copy = f_zk.clone();
+        let mut covector = vec![F::ZERO; size];
+        for (&coeff, lf) in constraint_rlc_coeffs.iter().zip(linear_forms.iter()) {
+            lf.accumulate(&mut covector, coeff);
+        }
+        // Compute combined claims for the_sum
+        let evaluations: Vec<F> = linear_forms
+            .iter()
+            .map(|w| {
+                let mut cv = vec![F::ZERO; size];
+                w.accumulate(&mut cv, F::ONE);
+                cv.iter().zip(vector.iter()).map(|(&a, &b)| a * b).sum::<F>()
+            })
+            .collect();
+        let combined_claims: Vec<F> = evaluations
+            .iter()
+            .zip(g_claims.iter())
+            .map(|(&e, &g)| rho * e + g)
+            .collect();
+        let mut the_sum: F = constraint_rlc_coeffs
+            .iter()
+            .zip(combined_claims.iter())
+            .map(|(&c, &v)| c * v)
+            .sum();
+        let folding_randomness = config.blinded_polynomial.initial_sumcheck.prove(
+            &mut prover_state,
+            &mut f_zk_copy,
+            &mut covector,
+            &mut the_sum,
+        );
+        let r_bar = folding_randomness.0.clone();
+        let s = r_bar.len();
+        let big_m = 1usize << (mu - s);
+        let k = 1usize << s;
+
+        // Compute RS-fold coefficients of f_zk directly
+        let eq_weights = MultilinearPoint(r_bar.clone()).eq_weights();
+        let mut f_zk_fold_coeffs = vec![F::ZERO; big_m];
+        for j in 0..k {
+            for m in 0..big_m {
+                f_zk_fold_coeffs[m] += eq_weights[j] * f_zk[j * big_m + m];
+            }
+        }
+
+        // Compute RS-fold coefficients of f̂
+        let mut f_hat_fold_coeffs = vec![F::ZERO; big_m];
+        for j in 0..k {
+            for m in 0..big_m {
+                f_hat_fold_coeffs[m] += eq_weights[j] * witness.f_hat_poly[j * big_m + m];
+            }
+        }
+
+        // Compute RS-fold blinding coefficients using the new helper
+        let (m_coeffs, g_i_coeffs) = compute_rs_fold_blinding_coeffs(
+            &r_bar,
+            &witness.g_polys,
+            &witness.masking_poly,
+            rho,
+            mu,
+            ell,
+            rem,
+        );
+
+        // Test at several z values: f_zk_fold(z) == ρ·f̂_fold(z) + m̃_RS(z) + Σ βⁱ·g̃ᵢ_RS(z)
+        let test_points: Vec<F> = (1..=10).map(|i| F::from(i as u64 * 7)).collect();
+        for z in test_points {
+            let lhs = univariate_evaluate(&f_zk_fold_coeffs, z);
+
+            let f_hat_term = rho * univariate_evaluate(&f_hat_fold_coeffs, z);
+            let m_term = univariate_evaluate(&m_coeffs, z);
+            let g_terms: F = g_i_coeffs
+                .iter()
+                .enumerate()
+                .map(|(i, coeffs)| beta_powers[i + 1] * univariate_evaluate(coeffs, z))
+                .sum();
+            let rhs = f_hat_term + m_term + g_terms;
+
+            assert_eq!(
+                lhs, rhs,
+                "RS-fold decomposition failed at z={z:?}: lhs={lhs:?}, rhs={rhs:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_zk2_prove_verify_single_point() {
         let mut rng = ark_std::test_rng();

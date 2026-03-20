@@ -9,7 +9,7 @@ use crate::{
         embedding::Identity,
         eval_eq,
         linear_form::{Covector, Evaluate, LinearForm, UnivariateEvaluation},
-        multilinear_extend,
+        multilinear_extend, univariate_evaluate, MultilinearPoint,
     },
     hash::Hash,
     protocols::{geometric_challenge::geometric_challenge, whir_zk_2::commiter::Witness},
@@ -174,6 +174,15 @@ impl<F: FftField> Config<F> {
             .open(prover_state, &[&witness.blinded_witness]);
 
         let r_bar = folding_randomness.0.clone();
+        let (m_coeffs, g_i_coeffs) = compute_rs_fold_blinding_coeffs(
+            &r_bar,
+            &witness.g_polys,
+            &witness.masking_poly,
+            rho,
+            mu,
+            ell,
+            rem,
+        );
         let z_points = folded_f_zk_commitment.out_of_domain().points.clone();
 
         // Λ accumulator: fold_args points and blinding evaluations for Step 7.
@@ -183,6 +192,7 @@ impl<F: FftField> Config<F> {
         let mut lambda_fold_points: Vec<Vec<F>> = Vec::new();
         let mut lambda_m_evals: Vec<F> = Vec::new();
         let mut lambda_g_evals: Vec<Vec<F>> = Vec::new();
+        let mut lambda_z_points: Vec<F> = Vec::new();
 
         // --- OOD responses ---
         // For each OOD point z₀: send f̂(fold_args(r̄, z₀)), M, and ĝ_i evaluations.
@@ -192,19 +202,17 @@ impl<F: FftField> Config<F> {
             let ood_f_hat = multilinear_extend(&witness.f_hat_poly, &fold_point);
             prover_state.prover_message(&ood_f_hat);
 
-            let (m_eval, g_evals) = evaluate_blinding_at_point(
-                &witness.g_polys,
-                &witness.masking_poly,
-                &fold_point,
-                rho,
-                ell,
-                rem,
-            );
+            let m_eval = univariate_evaluate(&m_coeffs, z);
             prover_state.prover_message(&m_eval);
+            let g_evals = g_i_coeffs
+                .iter()
+                .map(|g| univariate_evaluate(&g, z))
+                .collect();
             for g_eval in &g_evals {
                 prover_state.prover_message(g_eval);
             }
             lambda_fold_points.push(fold_point);
+            lambda_z_points.push(z);
             lambda_m_evals.push(m_eval);
             lambda_g_evals.push(g_evals);
         }
@@ -215,19 +223,17 @@ impl<F: FftField> Config<F> {
         for &z in &in_domain.points {
             let fold_point = build_fold_args(&r_bar, z, mu);
 
-            let (m_eval, g_evals) = evaluate_blinding_at_point(
-                &witness.g_polys,
-                &witness.masking_poly,
-                &fold_point,
-                rho,
-                ell,
-                rem,
-            );
+            let m_eval = univariate_evaluate(&m_coeffs, z);
             prover_state.prover_message(&m_eval);
+            let g_evals = g_i_coeffs
+                .iter()
+                .map(|g| univariate_evaluate(&g, z))
+                .collect();
             for g_eval in &g_evals {
                 prover_state.prover_message(g_eval);
             }
             lambda_fold_points.push(fold_point);
+            lambda_z_points.push(z);
             lambda_m_evals.push(m_eval);
             lambda_g_evals.push(g_evals);
         }
@@ -256,10 +262,6 @@ impl<F: FftField> Config<F> {
             .iter()
             .map(|challenge| challenge.evaluate(&embedding, &f_zk))
             .collect();
-
-        for f_zk_eval in &in_domain_evals {
-            prover_state.prover_message(f_zk_eval);
-        }
 
         let stir_evaluations: Vec<F> = ood_evals.chain(in_domain_evals.into_iter()).collect();
 
@@ -377,21 +379,49 @@ impl<F: FftField> Config<F> {
         //
         // All evaluation points and values are accumulated into Λ for Step 7.
 
+        // Map Γ points (from Ω₁) to [[f̂]] codeword indices (in Ω₀).
+        // gen₁ = gen₀^stride where stride = N₀/N₁, so Ω₁ index i → Ω₀ index i·stride.
+        let n0 = self.blinded_polynomial.initial_committer.codeword_length;
+        let n1 = self.blinded_polynomial.round_configs[0]
+            .irs_committer
+            .codeword_length;
+        let stride = n0 / n1;
+        let gen_h = self.blinded_polynomial.round_configs[0]
+            .irs_committer
+            .generator();
+        let gamma_f_hat_indices: Vec<usize> = gamma_points
+            .iter()
+            .map(|&gamma| {
+                let mut g = F::ONE;
+                for i in 0..n1 {
+                    if g == gamma {
+                        return i * stride;
+                    }
+                    g *= gen_h;
+                }
+                panic!("gamma not found in Ω₁ domain");
+            })
+            .collect();
+
+        // Open [[f̂]] at Γ-mapped indices (goes on transcript before blinding claims)
+        let _gamma_f_hat_evals = self
+            .blinded_polynomial
+            .initial_committer
+            .open_at_indices(prover_state, &[&witness.blinded_witness], &gamma_f_hat_indices);
+
         for gamma in gamma_points {
             let fold_point = build_fold_args(&r_bar, gamma, mu);
-            let (m_eval, g_evals) = evaluate_blinding_at_point(
-                &witness.g_polys,
-                &witness.masking_poly,
-                &fold_point,
-                rho,
-                ell,
-                rem,
-            );
+            let m_eval = univariate_evaluate(&m_coeffs, gamma);
             prover_state.prover_message(&m_eval);
+            let g_evals = g_i_coeffs
+                .iter()
+                .map(|g| univariate_evaluate(&g, gamma))
+                .collect();
             for g_eval in &g_evals {
                 prover_state.prover_message(g_eval);
             }
             lambda_fold_points.push(fold_point);
+            lambda_z_points.push(gamma);
             lambda_m_evals.push(m_eval);
             lambda_g_evals.push(g_evals);
         }
@@ -418,15 +448,40 @@ impl<F: FftField> Config<F> {
         let half_size = 1usize << ell; // 2^ℓ — size of each ĝ_i table
         let full_size = 1usize << (ell + 1); // 2^{ℓ+1} — size of committed vectors
 
-        // Build batched eq tables: beq_i[k] = Σ_j τ^{j+1} · eq(Φ_i(A[j]), k)
-        // Each beq_i is ℓ-variate (size 2^ℓ), one per blinding polynomial.
-        // Uses eval_eq for in-place accumulation of scalar · eq(point, ·).
+        // // Build batched eq tables: beq_i[k] = Σ_j τ^{j+1} · eq(Φ_i(A[j]), k)
+        // // Each beq_i is ℓ-variate (size 2^ℓ), one per blinding polynomial.
+        // // Uses eval_eq for in-place accumulation of scalar · eq(point, ·).
+        // let mut beq_tables: Vec<Vec<F>> = vec![vec![F::ZERO; half_size]; num_g_polys];
+        // let mut tau_pow = tau;
+        // for fold_point in &lambda_fold_points {
+        //     for i in 0..num_g_polys {
+        //         let phi_i_point = calculate_phi_i(fold_point, i, ell, rem);
+        //         eval_eq(&mut beq_tables[i], phi_i_point, tau_pow);
+        //     }
+        //     tau_pow *= tau;
+        // }
         let mut beq_tables: Vec<Vec<F>> = vec![vec![F::ZERO; half_size]; num_g_polys];
+        let s = r_bar.len();
+        let k = 1 << s;
+        let big_m = 1 << (mu - s);
         let mut tau_pow = tau;
-        for fold_point in &lambda_fold_points {
-            for i in 0..num_g_polys {
-                let phi_i_point = calculate_phi_i(fold_point, i, ell, rem);
-                eval_eq(&mut beq_tables[i], phi_i_point, tau_pow);
+        let eq_weights = MultilinearPoint(r_bar.to_vec()).eq_weights();
+        for (fold_point, z_value) in lambda_fold_points.iter().zip(lambda_z_points.iter()) {
+            let mut z_powers = Vec::with_capacity(big_m);
+            let mut zp = F::ONE;
+            for _ in 0..big_m {
+                z_powers.push(zp);
+                zp *= z_value;
+            }
+            for c in 0..k {
+                for m in 0..big_m {
+                    let full_idx = c * big_m + m;
+                    for i in 0..num_g_polys {
+                        let phi_idx = phi_i_bits(full_idx as usize, i, mu, ell, rem);
+                        beq_tables[i][phi_idx] +=
+                            tau_pow * eq_weights[c as usize] * z_powers[m as usize];
+                    }
+                }
             }
             tau_pow *= tau;
         }
@@ -548,7 +603,7 @@ pub(super) fn calculate_phi_i<F: FftField>(
 ///   index = x_0 · 2^{μ-1} + x_1 · 2^{μ-2} + ... + x_{μ-1} · 2^0
 ///
 /// The result is: `(b >> (μ - start - ℓ)) & ((1 << ℓ) - 1)`
-fn phi_i_bits(b: usize, phi_index: usize, mu: usize, ell: usize, rem: usize) -> usize {
+pub(super) fn phi_i_bits(b: usize, phi_index: usize, mu: usize, ell: usize, rem: usize) -> usize {
     let start = if phi_index == 0 {
         0
     } else {
@@ -609,4 +664,66 @@ fn evaluate_blinding_at_point<F: FftField>(
         .collect();
 
     (m_eval, g_evals)
+}
+
+/// Precompute RS-fold coefficient vectors for the blinding polynomials.
+///
+/// After the initial sumcheck folds `s` variables with randomness `r̄`, the original
+/// 2^μ-coefficient polynomial is viewed as `k = 2^s` sub-polynomials of length `M = 2^(μ-s)`.
+/// The RS-fold is:
+///
+/// ```text
+/// fold(r̄, poly)(z) = Σ_m [ Σ_j eq(r̄, j) · poly[j·M + m] ] · z^m
+/// ```
+///
+/// For blinding polynomials, the 2^μ evaluation table is the lift of an ℓ-variate table
+/// via Φ_i projections: `lifted[b] = table[Φ_i_bits(b)]`.
+///
+/// This function computes:
+/// - `m_coeffs[m] = Σ_j eq(r̄, j) · [ĝ₀[Φ₀(j·M+m)] + (-ρ)·msk[Φ₀(j·M+m)]]`
+/// - `g_i_coeffs[i][m] = Σ_j eq(r̄, j) · ĝᵢ[Φᵢ(j·M+m)]`  for i = 1..ν
+///
+/// Returns `(m_coeffs, g_i_coeffs)` where each vector has length M.
+/// To evaluate at a point z, use `univariate_evaluate(&coeffs, z)`.
+pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
+    r_bar: &[F],
+    g_polys: &[Vec<F>],
+    masking_poly: &[F],
+    rho: F,
+    mu: usize,
+    ell: usize,
+    rem: usize,
+) -> (Vec<F>, Vec<Vec<F>>) {
+    let s = r_bar.len();
+    let k = 1usize << s; // number of sub-polynomials
+    let big_m = 1usize << (mu - s); // length of each sub-polynomial
+    let num_g_polys = g_polys.len();
+    let neg_rho = -rho;
+
+    // Precompute eq(r̄, j) for all j in 0..k
+    let eq_weights = MultilinearPoint(r_bar.to_vec()).eq_weights();
+
+    // m_coeffs for M_ρ (polynomial 0: ĝ₀ + (-ρ)·msk)
+    let mut m_coeffs = vec![F::ZERO; big_m];
+    // g_i_coeffs for ĝ_i, i = 1..ν
+    let mut g_i_coeffs = vec![vec![F::ZERO; big_m]; num_g_polys - 1];
+
+    for j in 0..k {
+        let eq_j = eq_weights[j];
+        for m in 0..big_m {
+            let full_idx = j * big_m + m;
+
+            // M_ρ contribution: ĝ₀[Φ₀(full_idx)] + (-ρ)·msk[Φ₀(full_idx)]
+            let phi_0_idx = phi_i_bits(full_idx, 0, mu, ell, rem);
+            m_coeffs[m] += eq_j * (g_polys[0][phi_0_idx] + neg_rho * masking_poly[phi_0_idx]);
+
+            // ĝ_i contributions for i ≥ 1
+            for i in 1..num_g_polys {
+                let phi_i_idx = phi_i_bits(full_idx, i, mu, ell, rem);
+                g_i_coeffs[i - 1][m] += eq_j * g_polys[i][phi_i_idx];
+            }
+        }
+    }
+
+    (m_coeffs, g_i_coeffs)
 }
