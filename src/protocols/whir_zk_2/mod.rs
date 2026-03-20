@@ -5,6 +5,7 @@ use crate::algebra::embedding::Embedding;
 
 mod commiter;
 mod prover;
+mod utils;
 mod verifier;
 
 pub use self::{commiter::Witness, verifier::Commitments};
@@ -225,9 +226,9 @@ mod tests {
         config.prove(
             &mut prover_state,
             vector,
-            witness,
+            &witness,
             prove_forms,
-            evaluations.clone(),
+            &evaluations,
         );
 
         let proof = prover_state.proof();
@@ -243,7 +244,7 @@ mod tests {
             .collect();
 
         config
-            .verify(&mut verifier_state, &weight_refs, &evaluations, commitments)
+            .verify(&mut verifier_state, &weight_refs, &evaluations, &commitments)
             .expect("verification failed");
     }
 
@@ -256,7 +257,7 @@ mod tests {
     fn test_rs_fold_decomposition() {
         use crate::algebra::univariate_evaluate;
         use crate::protocols::geometric_challenge::geometric_challenge;
-        use crate::protocols::whir_zk_2::prover::{
+        use crate::protocols::whir_zk_2::utils::{
             compute_rs_fold_blinding_coeffs, phi_i_bits,
         };
         use crate::transcript::{

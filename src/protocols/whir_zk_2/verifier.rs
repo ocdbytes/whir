@@ -1,17 +1,16 @@
 use ark_ff::FftField;
 
 use super::{
-    prover::{build_fold_args, calculate_phi_i},
+    utils::{build_beq_tables, build_fold_args},
     Config,
 };
-use crate::algebra::MultilinearPoint;
-use crate::protocols::whir_zk_2::prover::phi_i_bits;
 use crate::{
     algebra::{
         dot,
         embedding::Identity,
-        eval_eq,
+        geometric_sequence,
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension, UnivariateEvaluation},
+        MultilinearPoint,
     },
     hash::Hash,
     protocols::{geometric_challenge::geometric_challenge, whir},
@@ -69,7 +68,7 @@ impl<F: FftField> Config<F> {
         verifier_state: &mut VerifierState<'_, H>,
         weights: &[&dyn LinearForm<F>],
         evaluations: &[F],
-        commitments: Commitments<F>,
+        commitments: &Commitments<F>,
     ) -> VerificationResult<()>
     where
         H: DuplexSpongeInterface,
@@ -92,12 +91,7 @@ impl<F: FftField> Config<F> {
         // Steps 1-2: Sample β, receive blinding claims G
         // =====================================================================
         let beta: F = verifier_state.verifier_message();
-        let mut beta_powers = Vec::with_capacity(num_g_polys);
-        let mut bp = F::ONE;
-        for _ in 0..num_g_polys {
-            beta_powers.push(bp);
-            bp *= beta;
-        }
+        let beta_powers = geometric_sequence(beta, num_g_polys);
 
         let g_claims: Vec<F> = verifier_state.prover_messages_vec(num_forms)?;
 
@@ -166,7 +160,7 @@ impl<F: FftField> Config<F> {
         let ood_committed_values: Vec<F> =
             commitment_h.out_of_domain().values(&one_weight).collect();
 
-        for (_, &z) in ood_points.iter().enumerate() {
+        for &z in &ood_points {
             // Read f̂ MLE evaluation (transcript binding only, not verified here)
             let _ood_f_hat: F = verifier_state.prover_message()?;
             let m_eval: F = verifier_state.prover_message()?;
@@ -194,7 +188,7 @@ impl<F: FftField> Config<F> {
 
             lambda_fold_points.push(build_fold_args(&r_bar, z, mu));
             lambda_z_points.push(z);
-            lambda_m_evals.push(m_eval.clone());
+            lambda_m_evals.push(m_eval);
             in_domain_m_evals.push(m_eval);
             lambda_g_evals.push(g_evals.clone());
             in_domain_g_evals.push(g_evals);
@@ -462,32 +456,8 @@ impl<F: FftField> Config<F> {
         let half_size = 1usize << ell;
         let full_size = 1usize << (ell + 1);
 
-        // Build batched eq tables: beq_i[k] = Σ_j τ^{j+1} · eq(Φ_i(A[j]), k)
-        let mut beq_tables: Vec<Vec<F>> = vec![vec![F::ZERO; half_size]; num_g_polys];
-        let s = r_bar.len();
-        let k = 1 << s;
-        let big_m = 1 << (mu - s);
-        let mut tau_pow = tau;
-        let eq_weights = MultilinearPoint(r_bar.to_vec()).eq_weights();
-        for (fold_point, z_value) in lambda_fold_points.iter().zip(lambda_z_points.iter()) {
-            let mut z_powers = Vec::with_capacity(big_m);
-            let mut zp = F::ONE;
-            for _ in 0..big_m {
-                z_powers.push(zp);
-                zp *= z_value;
-            }
-            for c in 0..k {
-                for m in 0..big_m {
-                    let full_idx = c * big_m + m;
-                    for i in 0..num_g_polys {
-                        let phi_idx = phi_i_bits(full_idx as usize, i, mu, ell, rem);
-                        beq_tables[i][phi_idx] +=
-                            tau_pow * eq_weights[c as usize] * z_powers[m as usize];
-                    }
-                }
-            }
-            tau_pow *= tau;
-        }
+        let beq_tables =
+            build_beq_tables(&lambda_z_points, &r_bar, tau, mu, ell, rem, num_g_polys);
 
         // Build weight covectors (same layout as prover)
         let mut weight_covectors: Vec<Vec<F>> = Vec::with_capacity(num_g_polys);
