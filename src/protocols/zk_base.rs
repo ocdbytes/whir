@@ -168,8 +168,9 @@ mod tests {
     };
 
     impl<F: FftField> Config<F> {
-        pub fn arbitrary(size: usize) -> impl Strategy<Value = Self> {
-            let commit = irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, 1);
+        pub fn arbitrary(size: usize, mask_length: usize) -> impl Strategy<Value = Self> {
+            let commit =
+                irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1);
             commit.prop_map(move |commit| Config {
                 commit: irs_commit::Config {
                     out_domain_samples: 0,
@@ -238,7 +239,8 @@ mod tests {
         Standard: Distribution<F>,
     {
         crate::tests::init();
-        let configs = (0_usize..1 << 10).prop_flat_map(|size| Config::arbitrary(size));
+        let configs = (0_usize..1 << 10, 0_usize..1 << 10)
+            .prop_flat_map(|(size, mask_lenngth)| Config::arbitrary(size, mask_lenngth));
         proptest!(|(seed: u64, config in configs)| {
             test_config(seed, &config);
         });

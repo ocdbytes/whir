@@ -24,7 +24,7 @@ use std::{
 };
 
 use ark_ff::{AdditiveGroup, FftField, Field};
-use ark_std::rand::{CryptoRng, RngCore};
+use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, Rng, RngCore};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
@@ -64,6 +64,9 @@ where
     /// The number of coefficients in each vector.
     pub vector_size: usize,
 
+    /// The number of masking values to add per codeword.
+    pub mask_length: usize,
+
     /// The number of Reed-Solomon evaluation points.
     pub codeword_length: usize,
 
@@ -97,6 +100,7 @@ pub struct Witness<F: FftField, G = F>
 where
     G: Field,
 {
+    pub masks: Vec<F>,
     pub matrix: Vec<F>,
     pub matrix_witness: matrix_commit::Witness,
     pub out_of_domain: Evaluations<G>,
@@ -191,6 +195,7 @@ where
             embedding: Typed::<M>::default(),
             num_vectors,
             vector_size,
+            mask_length: 0,
             codeword_length,
             interleaving_depth,
             matrix_commit: matrix_commit::Config::with_hash(
@@ -215,6 +220,10 @@ where
 
     pub fn embedding(&self) -> &M {
         &self.embedding
+    }
+
+    pub fn num_messages(&self) -> usize {
+        self.interleaving_depth * self.num_vectors
     }
 
     pub fn message_length(&self) -> usize {
@@ -292,6 +301,7 @@ where
         vectors: &[&[M::Source]],
     ) -> Witness<M::Source, M::Target>
     where
+        Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
         M::Target: Codec<[H::U]>,
@@ -300,21 +310,24 @@ where
         // Validate config
         assert!((self.vector_size).is_multiple_of(self.interleaving_depth));
         assert_eq!(self.matrix_commit.num_rows(), self.codeword_length);
-        assert_eq!(
-            self.matrix_commit.num_cols,
-            self.num_vectors * self.interleaving_depth
-        );
+        assert_eq!(self.matrix_commit.num_cols, self.num_messages());
 
         // Validate input
         assert_eq!(vectors.len(), self.num_vectors);
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
+
+        // Generate random mask
+        let rng = prover_state.rng();
+        let masks = (0..self.mask_length * self.num_messages())
+            .map(|_| rng.gen::<M::Source>())
+            .collect::<Vec<_>>();
 
         // Interleaved RS Encode the vectorss
         let messages = vectors
             .iter()
             .flat_map(|v| chunks_exact_or_empty(v, self.message_length(), self.interleaving_depth))
             .collect::<Vec<_>>();
-        let matrix = ntt::interleaved_rs_encode(&messages, &[], self.codeword_length);
+        let matrix = ntt::interleaved_rs_encode(&messages, &masks, self.codeword_length);
 
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
@@ -332,6 +345,7 @@ where
         }
 
         Witness {
+            masks,
             matrix,
             matrix_witness,
             out_of_domain: Evaluations {
@@ -634,6 +648,7 @@ pub(crate) mod tests {
             embedding: M,
             num_vectors: usize,
             vector_size: usize,
+            mask_length: usize,
             interleaving_depth: usize,
         ) -> impl Strategy<Value = Config<M>> {
             assert!(interleaving_depth != 0);
@@ -671,6 +686,7 @@ pub(crate) mod tests {
                     embedding: Typed::new(embedding.clone()),
                     num_vectors,
                     vector_size,
+                    mask_length,
                     codeword_length,
                     interleaving_depth,
                     matrix_commit,
@@ -803,6 +819,7 @@ pub(crate) mod tests {
                     embedding.clone(),
                     num_vectors,
                     size * interleaving_depth,
+                    0,
                     interleaving_depth,
                 )
             },
