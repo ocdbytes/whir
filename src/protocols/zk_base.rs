@@ -194,12 +194,8 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut rng = StdRng::seed_from_u64(seed);
-        let vector = (0..config.size())
-            .map(|_| rng.gen::<F>())
-            .collect::<Vec<_>>();
-        let covector = (0..config.size())
-            .map(|_| rng.gen::<F>())
-            .collect::<Vec<_>>();
+        let vector = random_vector(&mut rng, config.size());
+        let covector = random_vector(&mut rng, config.size());
         let sum = dot(&vector, &covector);
 
         // Prover

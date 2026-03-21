@@ -136,7 +136,7 @@ pub(crate) mod tests {
     use proptest::proptest;
 
     use super::*;
-    use crate::algebra::fields::Field64;
+    use crate::algebra::{fields::Field64, random_vector};
 
     type F = Field64;
 
@@ -154,12 +154,8 @@ pub(crate) mod tests {
     fn sumcheck_poly_zero_extend() {
         proptest!(|(seed:u64, length in 0_usize..(1 << 14))| {
             let mut rng = StdRng::seed_from_u64(seed);
-            let vector = (0..length)
-                .map(|_| rng.gen::<F>())
-                .collect::<Vec<_>>();
-            let covector = (0..length)
-                .map(|_| rng.gen::<F>())
-                .collect::<Vec<_>>();
+            let vector: Vec<F> = random_vector(&mut rng, length);
+            let covector: Vec<F> = random_vector(&mut rng, length);
             let extended_vector = zero_pad(&vector);
             let extended_covector = zero_pad(&covector);
             let expected = compute_sumcheck_polynomial(&extended_vector, &extended_covector);
@@ -173,9 +169,7 @@ pub(crate) mod tests {
     fn fold_zero_extend() {
         proptest!(|(seed:u64, length in 0_usize..(1 << 14))| {
             let mut rng = StdRng::seed_from_u64(seed);
-            let mut vector = (0..length)
-                .map(|_| rng.gen::<F>())
-                .collect::<Vec<_>>();
+            let mut vector: Vec<F> = random_vector(&mut rng, length);
             let mut extended_vector = zero_pad(&vector);
             let weight = rng.gen::<F>();
 

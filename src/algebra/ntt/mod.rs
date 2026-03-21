@@ -117,13 +117,13 @@ mod tests {
     use std::iter;
 
     use ark_std::rand::{
-        distributions::Standard, prelude::Distribution, rngs::StdRng, Rng, SeedableRng,
+        distributions::Standard, prelude::Distribution, rngs::StdRng, SeedableRng,
     };
     use proptest::{collection, prelude::Just, proptest, sample::select, strategy::Strategy};
 
     use super::*;
     use crate::{
-        algebra::univariate_evaluate,
+        algebra::{random_vector, univariate_evaluate},
         utils::{chunks_exact_or_empty, zip_strict},
     };
 
@@ -164,15 +164,9 @@ mod tests {
         )| {
             let mut rng = StdRng::seed_from_u64(seed);
             let messages = (0..num_messages)
-                .map(|_| {
-                    (0..message_length)
-                        .map(|_| rng.gen::<F>())
-                        .collect::<Vec<_>>()
-                })
+                .map(|_| random_vector(&mut rng, message_length))
                 .collect::<Vec<_>>();
-            let masks = (0..mask_length * num_messages)
-                .map(|_| rng.gen::<F>())
-                .collect::<Vec<_>>();
+            let masks = random_vector(&mut rng, mask_length * num_messages);
             let message_refs = messages.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
             let codeword = ntt.interleaved_encode(
                 &message_refs,

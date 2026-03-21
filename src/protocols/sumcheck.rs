@@ -161,7 +161,7 @@ mod tests {
     use ark_std::rand::{
         distributions::{Distribution, Standard},
         rngs::StdRng,
-        Rng, SeedableRng,
+        SeedableRng,
     };
     use proptest::{proptest, strategy::Strategy};
     #[cfg(feature = "tracing")]
@@ -169,7 +169,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        algebra::{fields, multilinear_extend},
+        algebra::{fields, multilinear_extend, random_vector},
         transcript::DomainSeparator,
     };
 
@@ -202,12 +202,8 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut rng = StdRng::seed_from_u64(seed);
-        let initial_vector = (0..config.initial_size)
-            .map(|_| rng.gen::<F>())
-            .collect::<Vec<_>>();
-        let initial_covector = (0..config.initial_size)
-            .map(|_| rng.gen::<F>())
-            .collect::<Vec<_>>();
+        let initial_vector = random_vector(&mut rng, config.initial_size);
+        let initial_covector = random_vector(&mut rng, config.initial_size);
         let initial_sum = dot(&initial_vector, &initial_covector);
 
         // Prover

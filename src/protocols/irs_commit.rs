@@ -33,7 +33,7 @@ use tracing::instrument;
 use crate::{
     algebra::{
         dot, embedding::Embedding, fields::FieldWithSize, lift, linear_form::UnivariateEvaluation,
-        mixed_univariate_evaluate, ntt,
+        mixed_univariate_evaluate, ntt, random_vector,
     },
     engines::EngineId,
     hash::Hash,
@@ -231,12 +231,17 @@ where
         self.vector_size / self.interleaving_depth
     }
 
+    /// Message length including mask coefficients.
+    pub fn masked_message_length(&self) -> usize {
+        self.message_length() + self.mask_length
+    }
+
     pub fn evaluation_point(&self, index: usize) -> M::Source {
         ntt::evaluation_point::<M::Source>(self.codeword_length, index).unwrap()
     }
 
     pub fn rate(&self) -> f64 {
-        self.message_length() as f64 / self.codeword_length as f64
+        self.masked_message_length() as f64 / self.codeword_length as f64
     }
 
     pub fn unique_decoding(&self) -> bool {
@@ -279,7 +284,7 @@ where
     pub fn rbr_soundness_fold_prox_gaps(&self) -> f64 {
         let log_field_size = M::Target::field_size_bits();
         let log_inv_rate = self.rate().log2().neg();
-        let log_k = (self.message_length() as f64).log2();
+        let log_k = (self.masked_message_length() as f64).log2();
         // See WHIR Theorem 4.8
         // Recall, at each round we are only folding by two at a time
         let error = if self.unique_decoding() {
@@ -317,10 +322,7 @@ where
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
         // Generate random mask
-        let rng = prover_state.rng();
-        let masks = (0..self.mask_length * self.num_messages())
-            .map(|_| rng.gen::<M::Source>())
-            .collect::<Vec<_>>();
+        let masks = random_vector(prover_state.rng(), self.mask_length * self.num_messages());
 
         // Interleaved RS Encode the vectorss
         let messages = vectors
@@ -625,7 +627,7 @@ pub(crate) mod tests {
     use std::iter;
 
     use ark_std::rand::{
-        distributions::Standard, prelude::Distribution, rngs::StdRng, Rng, SeedableRng,
+        distributions::Standard, prelude::Distribution, rngs::StdRng, SeedableRng,
     };
     use proptest::{bool, prelude::Strategy, proptest, sample::select, strategy::Just};
 
@@ -635,7 +637,7 @@ pub(crate) mod tests {
             embedding::{Basefield, Compose, Frobenius, Identity},
             fields,
             ntt::NTT,
-            univariate_evaluate,
+            random_vector, univariate_evaluate,
         },
         transcript::{codecs::U64, DomainSeparator},
     };
@@ -714,11 +716,7 @@ pub(crate) mod tests {
             .instance(&instance);
         let mut rng = StdRng::seed_from_u64(seed);
         let vectors = (0..config.num_vectors)
-            .map(|_| {
-                (0..config.vector_size)
-                    .map(|_| rng.gen::<M::Source>())
-                    .collect::<Vec<_>>()
-            })
+            .map(|_| random_vector(&mut rng, config.vector_size))
             .collect::<Vec<_>>();
 
         // TODO: Multiple commitments and openings.

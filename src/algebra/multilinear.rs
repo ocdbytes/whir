@@ -183,11 +183,11 @@ pub fn eval_eq<F: Field>(accumulator: &mut [F], point: &[F], scalar: F) {
 
 #[cfg(test)]
 mod tests {
-    use ark_std::rand::{rngs::StdRng, Rng, SeedableRng};
+    use ark_std::rand::{rngs::StdRng, SeedableRng};
     use proptest::proptest;
 
     use super::*;
-    use crate::algebra::sumcheck::tests::zero_pad;
+    use crate::algebra::{random_vector, sumcheck::tests::zero_pad};
 
     pub type F = crate::algebra::fields::Field64;
 
@@ -195,14 +195,10 @@ mod tests {
     fn test_multilinear_zero_extend() {
         proptest!(|(seed:u64, length in 0_usize..(1 << 14))| {
             let mut rng = StdRng::seed_from_u64(seed);
-            let vector = (0..length)
-                .map(|_| rng.gen::<F>())
-                .collect::<Vec<_>>();
+            let vector: Vec<F> = random_vector(&mut rng, length);
             let extended_vector = zero_pad(&vector);
             let num_variables = length.next_power_of_two().trailing_zeros();
-            let point = (0..num_variables)
-                .map(|_| rng.gen::<F>())
-                .collect::<Vec<_>>();
+            let point = random_vector(&mut rng, num_variables as usize);
             assert_eq!(
                 multilinear_extend(&vector, &point),
                 multilinear_extend(&extended_vector, &point)
@@ -214,13 +210,9 @@ mod tests {
     fn test_multilinear_extra_variables() {
         proptest!(|(seed:u64, length in 0_usize..(1 << 10), excess_variables in 0_usize..3)| {
             let mut rng = StdRng::seed_from_u64(seed);
-            let vector = (0..length)
-                .map(|_| rng.gen::<F>())
-                .collect::<Vec<_>>();
+            let vector: Vec<F> = random_vector(&mut rng, length);
             let num_variables = length.next_power_of_two().trailing_zeros() as usize + excess_variables;
-            let point = (0..num_variables)
-                .map(|_| rng.gen::<F>())
-                .collect::<Vec<_>>();
+            let point = random_vector(&mut rng, num_variables);
             let mut extended_vector = vector.clone();
             extended_vector.resize(1 << num_variables, F::ZERO);
             assert_eq!(
