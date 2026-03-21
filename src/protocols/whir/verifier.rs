@@ -11,7 +11,7 @@ use crate::{
         tensor_product, MultilinearPoint,
     },
     hash::Hash,
-    protocols::{geometric_challenge::geometric_challenge, irs_commit, whir::FinalClaim},
+    protocols::{geometric_challenge::geometric_challenge, whir::FinalClaim},
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, VerificationResult,
         VerifierMessage, VerifierState,
@@ -19,16 +19,6 @@ use crate::{
     utils::zip_strict,
     verify,
 };
-
-enum RoundCommitment<'a, F: FftField> {
-    Initial {
-        commitments: &'a [&'a irs_commit::Commitment<F>],
-        batching_weights: Vec<F>,
-    },
-    Round {
-        commitment: irs_commit::Commitment<F>,
-    },
-}
 
 impl<M: Embedding> Config<M>
 where
@@ -94,10 +84,6 @@ where
 
         // Random linear combination of the vectors.
         let vector_rlc_coeffs = geometric_challenge(verifier_state, num_vectors);
-        let mut prev_commitment = RoundCommitment::Initial {
-            commitments,
-            batching_weights: vector_rlc_coeffs.clone(),
-        };
 
         // Random linear combination of the constraints.
         let constraint_rlc_coeffs: Vec<M::Target> =
@@ -133,111 +119,82 @@ where
         };
         round_folding_randomness.push(folding_randomness);
 
-        for (round_index, round_config) in self.round_configs.iter().enumerate() {
-            match prev_commitment {
-                RoundCommitment::Initial {
-                    commitments,
-                    batching_weights,
-                } => {
-                    // Round 0: open initial commitments with embedding lift and tensor_product.
-                    let commitment = round_config
-                        .irs_committer
-                        .receive_commitment(verifier_state)?;
-                    round_config.pow.verify(verifier_state)?;
+        let (final_vector, final_sumcheck_randomness) = if self.round_configs.is_empty() {
+            // 0-rounds case: open initial commitment and run final sumcheck directly.
+            let final_vector =
+                verifier_state.prover_messages_vec(self.final_sumcheck.initial_size)?;
+            self.final_pow.verify(verifier_state)?;
 
-                    let in_domain = self.initial_committer.verify(verifier_state, commitments)?;
-                    // TODO: Skip lift and keep initial in-domain in subfield for evaluation.
-                    let in_domain = in_domain.lift(self.embedding());
+            let in_domain = self.initial_committer.verify(verifier_state, commitments)?;
+            let in_domain = in_domain.lift(self.embedding());
 
-                    let constraint_weights = commitment
-                        .out_of_domain()
-                        .evaluators(round_config.initial_size())
-                        .chain(in_domain.evaluators(round_config.initial_size()))
-                        .collect::<Vec<_>>();
-                    let constraint_values = commitment
-                        .out_of_domain()
-                        .values(&[M::Target::ONE])
-                        .chain(in_domain.values(&tensor_product(
-                            &batching_weights,
-                            &round_folding_randomness.last().unwrap().eq_weights(),
-                        )))
-                        .collect::<Vec<_>>();
-                    let constraint_rlc_coeffs =
-                        geometric_challenge(verifier_state, constraint_values.len());
-                    the_sum += dot(&constraint_rlc_coeffs, &constraint_values);
-                    round_constraints.push((constraint_rlc_coeffs, constraint_weights));
-
-                    let folding_randomness =
-                        round_config.sumcheck.verify(verifier_state, &mut the_sum)?;
-                    round_folding_randomness.push(folding_randomness);
-
-                    prev_commitment = RoundCommitment::Round { commitment };
-                }
-                RoundCommitment::Round { commitment } => {
-                    // Rounds 1+: use shared round function.
-                    let prev_rc = &self.round_configs[round_index - 1];
-                    let result = super::rounds::verify_round(
-                        round_config,
-                        prev_rc,
-                        verifier_state,
-                        &mut the_sum,
-                        &commitment,
-                        round_folding_randomness.last().unwrap(),
-                    )?;
-                    round_constraints.push((result.stir_rlc_coeffs, result.stir_challenges));
-                    round_folding_randomness.push(result.folding_randomness);
-                    prev_commitment = RoundCommitment::Round {
-                        commitment: result.commitment,
-                    };
-                }
+            for (weights, evals) in zip_strict(
+                in_domain.evaluators(final_vector.len()),
+                in_domain.values(&tensor_product(
+                    &vector_rlc_coeffs,
+                    &round_folding_randomness.last().unwrap().eq_weights(),
+                )),
+            ) {
+                verify!(
+                    weights.evaluate(&Identity::<M::Target>::new(), &final_vector) == evals
+                );
             }
-        }
 
-        // Final round
-        let (final_vector, final_sumcheck_randomness) = match prev_commitment {
-            RoundCommitment::Initial {
-                commitments,
-                batching_weights,
-            } => {
-                // 0-rounds case: open initial commitment inline.
-                let final_vector =
-                    verifier_state.prover_messages_vec(self.final_sumcheck.initial_size)?;
-                self.final_pow.verify(verifier_state)?;
+            let final_sumcheck_randomness =
+                self.final_sumcheck.verify(verifier_state, &mut the_sum)?;
+            round_folding_randomness.push(final_sumcheck_randomness.clone());
+            (final_vector, final_sumcheck_randomness)
+        } else {
+            // Round 0: open initial commitments with embedding lift and tensor_product.
+            let round0_config = &self.round_configs[0];
+            let commitment_h = round0_config
+                .irs_committer
+                .receive_commitment(verifier_state)?;
+            round0_config.pow.verify(verifier_state)?;
 
-                let in_domain = self.initial_committer.verify(verifier_state, commitments)?;
-                let in_domain = in_domain.lift(self.embedding());
+            let in_domain = self.initial_committer.verify(verifier_state, commitments)?;
+            // TODO: Skip lift and keep initial in-domain in subfield for evaluation.
+            let in_domain = in_domain.lift(self.embedding());
 
-                for (weights, evals) in zip_strict(
-                    in_domain.evaluators(final_vector.len()),
-                    in_domain.values(&tensor_product(
-                        &batching_weights,
-                        &round_folding_randomness.last().unwrap().eq_weights(),
-                    )),
-                ) {
-                    verify!(
-                        weights.evaluate(&Identity::<M::Target>::new(), &final_vector) == evals
-                    );
-                }
+            let constraint_weights = commitment_h
+                .out_of_domain()
+                .evaluators(round0_config.initial_size())
+                .chain(in_domain.evaluators(round0_config.initial_size()))
+                .collect::<Vec<_>>();
+            let constraint_values = commitment_h
+                .out_of_domain()
+                .values(&[M::Target::ONE])
+                .chain(in_domain.values(&tensor_product(
+                    &vector_rlc_coeffs,
+                    &round_folding_randomness.last().unwrap().eq_weights(),
+                )))
+                .collect::<Vec<_>>();
+            let constraint_rlc_coeffs =
+                geometric_challenge(verifier_state, constraint_values.len());
+            the_sum += dot(&constraint_rlc_coeffs, &constraint_values);
+            round_constraints.push((constraint_rlc_coeffs, constraint_weights));
 
-                let final_sumcheck_randomness =
-                    self.final_sumcheck.verify(verifier_state, &mut the_sum)?;
-                (final_vector, final_sumcheck_randomness)
-            }
-            RoundCommitment::Round { commitment } => {
-                let last_rc = self.round_configs.last().unwrap();
-                let (final_vector, _, final_folding) = super::rounds::verify_final_round(
-                    &self.final_sumcheck,
-                    &self.final_pow,
-                    last_rc,
-                    verifier_state,
-                    &mut the_sum,
-                    &commitment,
-                    round_folding_randomness.last().unwrap(),
-                )?;
-                (final_vector, final_folding)
-            }
+            let folding_randomness =
+                round0_config.sumcheck.verify(verifier_state, &mut the_sum)?;
+            round_folding_randomness.push(folding_randomness.clone());
+
+            // Rounds 1..N + final round.
+            let remaining = super::rounds::verify_remaining_rounds(
+                &self.round_configs,
+                &super::rounds::FinalRoundConfig {
+                    sumcheck: &self.final_sumcheck,
+                    pow: &self.final_pow,
+                },
+                verifier_state,
+                &mut the_sum,
+                &commitment_h,
+                &folding_randomness,
+            )?;
+
+            round_constraints.extend(remaining.round_constraints);
+            round_folding_randomness.extend(remaining.round_folding_randomness);
+            (remaining.final_vector, remaining.final_sumcheck_randomness)
         };
-        round_folding_randomness.push(final_sumcheck_randomness.clone());
 
         // Compute folding randomness across all rounds
         let evaluation_point = round_folding_randomness
