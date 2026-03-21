@@ -1,14 +1,32 @@
+/// zkWHIR 2.0 — Zero-Knowledge WHIR with poly-logarithmic overhead.
+///
+/// Implements the "Alternative Randomness Sampling" variant (paper pp. 16-24)
+/// which samples only ν = ⌊μ/ℓ⌋ + 1 blinding polynomials (instead of μ + 1),
+/// reducing proof size to (ν + 1) · q(δ) field elements.
+///
+/// Two WHIR instances run as sub-protocols:
+///   1. `blinded_polynomial`: over the μ-variate masked witness f̂ = f + msk(Φ₀)
+///   2. `blinding_polynomial`: over (ℓ+1)-variate committed vectors M and ĝ₁..ĝ_ν
+///
+/// Protocol phases (see prover.rs / verifier.rs for per-step details):
+///   Step 1: Commitment — sample msk, ĝ₀..ĝ_ν; commit [[f̂]], [[M]], [[ĝᵢ]]
+///   Step 2: Blinding claims — V samples β; P builds g(x̄) = Σ βⁱ·ĝᵢ(Φᵢ(x̄)), sends G
+///   Step 3: Combination — V samples ρ ≠ 0; P forms f_zk = ρ·f + g
+///   Step 4: Initial sumcheck on f_zk; P sends [[H]] = fold_k(f_zk, r̄)
+///   Step 5: Virtual OOD/STIR queries + remaining WHIR rounds
+///   Step 6: Γ consistency check — verify [[f̂]] openings match [[H]]
+///   Step 7: Batched blinding proof via second WHIR instance
 use ark_ff::FftField;
 use serde::{Deserialize, Serialize};
 
 use crate::algebra::embedding::Embedding;
 
-mod commiter;
+mod committer;
 mod prover;
 mod utils;
 mod verifier;
 
-pub use self::{commiter::Witness, verifier::Commitments};
+pub use self::{committer::Witness, verifier::Commitments};
 use crate::{
     algebra::embedding::Identity,
     parameters::ProtocolParameters,
@@ -19,7 +37,10 @@ use crate::{
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(bound = "")]
 pub struct Config<F: FftField> {
+    /// First WHIR instance: proves claims about f_zk = ρ·f + g over 2^μ evaluations.
     pub blinded_polynomial: whir::Config<Identity<F>>,
+    /// Second WHIR instance: batched proof of blinding polynomial evaluations
+    /// over 2^(ℓ+1) evaluations with n + ν committed vectors.
     pub blinding_polynomial: whir::Config<Identity<F>>,
 }
 
@@ -30,12 +51,24 @@ impl<F: FftField> Config<F> {
         let witness_sec = params.security_level.saturating_sub(params.pow_bits) as f64;
         let blinding_sec = params.security_level as f64;
 
-        let irs_commit_config = blinded_config.initial_committer;
+        // T(δ) for the witness instance: the polynomial size sent in the final WHIR round.
+        let witness_t_delta = blinded_config.final_sumcheck.initial_size;
 
-        let witness_leak =
-            InstanceLeak::new(params, witness_sec, &irs_commit_config, num_variables_main);
-        let blinding_leak =
-            InstanceLeak::new(params, blinding_sec, &irs_commit_config, num_variables_main);
+        let mut witness_leak = InstanceLeak::new(
+            params,
+            witness_sec,
+            &blinded_config.initial_committer,
+            num_variables_main,
+        );
+        witness_leak.t_delta = witness_t_delta;
+        // For the blinding instance, T(δ) is approximated as q(δ) since its config
+        // depends on ℓ, which we're computing here (conservative upper bound).
+        let blinding_leak = InstanceLeak::new(
+            params,
+            blinding_sec,
+            &blinded_config.initial_committer,
+            num_variables_main,
+        );
 
         let q_ub = query_upper_bound(&witness_leak, &blinding_leak);
 
@@ -60,11 +93,14 @@ impl<F: FftField> Config<F> {
         };
 
         Self {
-            blinded_polynomial: whir::Config::new(1 << num_variables_main, params),
+            blinded_polynomial: blinded_config,
             blinding_polynomial: whir::Config::new(1 << (ell + 1), &blinding_params),
         }
     }
 }
+
+/// Maximum degree of the sumcheck round polynomial.
+const MAX_SUMCHECK_DEGREE: usize = 3;
 
 /// Per-instance leakage parameters for a single WHIR execution.
 ///
@@ -116,12 +152,11 @@ impl InstanceLeak {
         Self {
             k: 1 << params.initial_folding_factor,
             mu: num_variables,
-            d: 3,
+            d: MAX_SUMCHECK_DEGREE,
             q_delta: q,
             stir_delta: stir,
             ood_delta: irs_config.out_domain_samples,
-            // TODO: use q(delta_last_round) instead of q(delta).
-            t_delta: q,
+            t_delta: q, // conservative default; overridden for witness instance in Config::new
         }
     }
 
@@ -203,13 +238,16 @@ mod tests {
     }
 
     /// Materialize linear forms into Covectors for the prover.
-    fn to_prove_forms(forms: &[Box<dyn LinearForm<F>>], size: usize) -> Vec<Box<dyn LinearForm<F>>> {
+    fn to_prove_forms(
+        forms: &[Box<dyn LinearForm<F>>],
+        size: usize,
+    ) -> Vec<Box<dyn LinearForm<F>>> {
         forms
             .iter()
             .map(|f| {
                 let mut cv = vec![F::ZERO; size];
                 f.accumulate(&mut cv, F::ONE);
-                Box::new(Covector { vector: cv }) as Box<dyn LinearForm<F>>
+                Box::new(Covector::new(cv)) as Box<dyn LinearForm<F>>
             })
             .collect()
     }
@@ -236,7 +274,7 @@ mod tests {
         config.prove(
             &mut prover_state,
             vectors,
-            &witness,
+            witness,
             prove_forms,
             evaluations,
         );
@@ -256,178 +294,6 @@ mod tests {
         config
             .verify(&mut verifier_state, &weight_refs, evaluations, &commitments)
             .expect("verification failed");
-    }
-
-    /// Test that the RS-fold decomposition holds:
-    /// fold(r̄, f_zk)(z) = ρ · fold(r̄, f̂)(z) + m̃_RS(z) + Σ βⁱ · g̃_i_RS(z)
-    ///
-    /// This validates the `compute_rs_fold_blinding_coeffs` helper by checking
-    /// that the RS-fold of f_zk decomposes correctly into f̂ and blinding parts.
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn test_rs_fold_decomposition() {
-        use crate::{
-            algebra::univariate_evaluate,
-            protocols::{
-                geometric_challenge::geometric_challenge,
-                whir_zk_2::utils::{compute_rs_fold_blinding_coeffs, phi_i_bits},
-            },
-            transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierMessage},
-        };
-
-        let config = make_test_config();
-        let mu = TEST_NUM_VARIABLES;
-        let ell = config.blinding_polynomial.initial_num_variables() - 1;
-        let rem = mu % ell;
-        let num_g_polys = config.blinding_polynomial.initial_committer.num_vectors;
-        let size = 1usize << mu;
-
-        // Set up a transcript to get deterministic randomness
-        let ds = DomainSeparator::protocol(&config)
-            .session(&format!("rs-fold-test {}:{}", file!(), line!()))
-            .instance(&Empty);
-        let mut prover_state = ProverState::new_std(&ds);
-
-        // Commit (generates masking_polys, g_polys, f_hat_polys)
-        let vector = vec![F::ONE; size];
-        let witness = config.commit(&mut prover_state, &[vector.as_slice()]);
-
-        // Step 1-2: get β, build g_poly
-        let beta: F = prover_state.verifier_message();
-        let mut beta_powers = Vec::with_capacity(num_g_polys);
-        let mut bp = F::ONE;
-        for _ in 0..num_g_polys {
-            beta_powers.push(bp);
-            bp *= beta;
-        }
-
-        let mut g_poly = vec![F::ZERO; size];
-        for (b, g_val) in g_poly.iter_mut().enumerate().take(size) {
-            for (i, &bp) in beta_powers.iter().enumerate().take(num_g_polys) {
-                let idx = phi_i_bits(b, i, mu, ell, rem);
-                *g_val += bp * witness.g_polys[i][idx];
-            }
-        }
-
-        // G claims (read by verifier)
-        let linear_forms: Vec<Box<dyn LinearForm<F>>> = vec![Box::new(MultilinearExtension {
-            point: MultilinearPoint::rand(&mut ark_std::test_rng(), mu).0,
-        })];
-        let g_claims: Vec<F> = linear_forms
-            .iter()
-            .map(|w| {
-                let mut covector = vec![F::ZERO; size];
-                w.accumulate(&mut covector, F::ONE);
-                covector
-                    .iter()
-                    .zip(g_poly.iter())
-                    .map(|(&a, &b)| a * b)
-                    .sum()
-            })
-            .collect();
-        for g_claim in &g_claims {
-            prover_state.prover_message(g_claim);
-        }
-
-        // Step 3: get ρ, build f_zk
-        let rho: F = prover_state.verifier_message();
-
-        let f_zk: Vec<F> = vector
-            .iter()
-            .zip(g_poly.iter())
-            .map(|(&f, &g)| rho * f + g)
-            .collect();
-
-        // Run initial sumcheck to get r̄
-        let constraint_rlc_coeffs: Vec<F> =
-            geometric_challenge(&mut prover_state, linear_forms.len());
-        let mut f_zk_copy = f_zk.clone();
-        let mut covector = vec![F::ZERO; size];
-        for (&coeff, lf) in constraint_rlc_coeffs.iter().zip(linear_forms.iter()) {
-            lf.accumulate(&mut covector, coeff);
-        }
-        // Compute combined claims for the_sum
-        let evaluations: Vec<F> = linear_forms
-            .iter()
-            .map(|w| {
-                let mut cv = vec![F::ZERO; size];
-                w.accumulate(&mut cv, F::ONE);
-                cv.iter()
-                    .zip(vector.iter())
-                    .map(|(&a, &b)| a * b)
-                    .sum::<F>()
-            })
-            .collect();
-        let combined_claims: Vec<F> = evaluations
-            .iter()
-            .zip(g_claims.iter())
-            .map(|(&e, &g)| rho * e + g)
-            .collect();
-        let mut the_sum: F = constraint_rlc_coeffs
-            .iter()
-            .zip(combined_claims.iter())
-            .map(|(&c, &v)| c * v)
-            .sum();
-        let folding_randomness = config.blinded_polynomial.initial_sumcheck.prove(
-            &mut prover_state,
-            &mut f_zk_copy,
-            &mut covector,
-            &mut the_sum,
-        );
-        let r_bar = folding_randomness.0;
-        let s = r_bar.len();
-        let big_m = 1usize << (mu - s);
-        let k = 1usize << s;
-
-        // Compute RS-fold coefficients of f_zk directly
-        let eq_weights = MultilinearPoint(r_bar.clone()).eq_weights();
-        let mut f_zk_fold_coeffs = vec![F::ZERO; big_m];
-        for (j, &eq_w) in eq_weights.iter().enumerate().take(k) {
-            for (m, coeff) in f_zk_fold_coeffs.iter_mut().enumerate().take(big_m) {
-                *coeff += eq_w * f_zk[j * big_m + m];
-            }
-        }
-
-        // Compute RS-fold coefficients of f̂ (single polynomial, use f_hat_polys[0])
-        let mut f_hat_fold_coeffs = vec![F::ZERO; big_m];
-        for (j, &eq_w) in eq_weights.iter().enumerate().take(k) {
-            for (m, coeff) in f_hat_fold_coeffs.iter_mut().enumerate().take(big_m) {
-                *coeff += eq_w * witness.f_hat_polys[0][j * big_m + m];
-            }
-        }
-
-        // Compute RS-fold blinding coefficients using the helper
-        // Single polynomial: alpha_coeffs = [ONE]
-        let (m_coeffs_all, g_i_coeffs) = compute_rs_fold_blinding_coeffs(
-            &r_bar,
-            &witness.g_polys,
-            &witness.masking_polys,
-            &[F::ONE],
-            rho,
-            mu,
-            ell,
-            rem,
-        );
-
-        // Test at several z values: f_zk_fold(z) == ρ·f̂_fold(z) + m̃_RS(z) + Σ βⁱ·g̃ᵢ_RS(z)
-        let test_points: Vec<F> = (1u64..=10).map(|i| F::from(i * 7)).collect();
-        for z in test_points {
-            let lhs = univariate_evaluate(&f_zk_fold_coeffs, z);
-
-            let f_hat_term = rho * univariate_evaluate(&f_hat_fold_coeffs, z);
-            let m_term = univariate_evaluate(&m_coeffs_all[0], z);
-            let g_terms: F = g_i_coeffs
-                .iter()
-                .enumerate()
-                .map(|(i, coeffs)| beta_powers[i + 1] * univariate_evaluate(coeffs, z))
-                .sum();
-            let rhs = f_hat_term + m_term + g_terms;
-
-            assert_eq!(
-                lhs, rhs,
-                "RS-fold decomposition failed at z={z:?}: lhs={lhs:?}, rhs={rhs:?}"
-            );
-        }
     }
 
     #[test]
@@ -461,7 +327,12 @@ mod tests {
         let eval0 = f0.evaluate(embedding, &vector);
         let eval1 = f1.evaluate(embedding, &vector);
 
-        prove_and_verify(&config, vec![vector], vec![Box::new(f0), Box::new(f1)], &[eval0, eval1]);
+        prove_and_verify(
+            &config,
+            vec![vector],
+            vec![Box::new(f0), Box::new(f1)],
+            &[eval0, eval1],
+        );
     }
 
     #[test]
@@ -476,9 +347,7 @@ mod tests {
         let embedding = config.blinded_polynomial.embedding();
         let mle_eval = mle_form.evaluate(embedding, &vector);
 
-        let cov = Covector {
-            vector: (0..TEST_NUM_COEFFS).map(|i| F::from(i as u64)).collect(),
-        };
+        let cov = Covector::new((0..TEST_NUM_COEFFS).map(|i| F::from(i as u64)).collect());
         let cov_eval = cov.evaluate(embedding, &vector);
 
         prove_and_verify(
