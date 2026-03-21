@@ -14,7 +14,7 @@ use super::{
     utils::{lcm, sqrt_factor},
     ReedSolomon,
 };
-use crate::utils::zip_strict;
+use crate::utils::{chunks_exact_or_empty, zip_strict};
 
 /// Enginge for computing NTTs over arbitrary fields.
 /// Assumes the field has large two-adicity.
@@ -166,7 +166,6 @@ impl<F: Field> NttEngine<F> {
 
     /// Returns a cached table of roots of unity of the given order.
     fn roots_table(&self, order: usize) -> RwLockReadGuard<'_, Vec<F>> {
-        dbg!(self.order, &self.divisors, order);
         assert!(
             self.order.is_multiple_of(order),
             "No subgroup of order {order}."
@@ -367,9 +366,6 @@ impl<F: FftField> ReedSolomon<F> for NttEngine<F> {
     ) -> Vec<F> {
         assert!(self.order.is_multiple_of(codeword_length));
         assert!(interleaving_depth > 0);
-        if !mask.is_empty() {
-            todo!();
-        }
         if interleaved_coeffs.is_empty() {
             return Vec::new();
         }
@@ -378,10 +374,12 @@ impl<F: FftField> ReedSolomon<F> for NttEngine<F> {
         for poly in interleaved_coeffs {
             assert_eq!(poly.len(), poly_size);
         }
-        let message_length = poly_size / interleaving_depth;
+        let num_messages = interleaving_depth * interleaved_coeffs.len();
+        assert!(mask.len().is_multiple_of(num_messages));
+        let mask_length = mask.len() / num_messages;
+        let coefs_length = poly_size / interleaving_depth;
+        let message_length = coefs_length + mask_length;
         assert!(message_length <= codeword_length);
-        let per_poly_size = codeword_length * interleaving_depth;
-        let total_size = per_poly_size * interleaved_coeffs.len();
 
         // Coset-NTT: instead of doing one codeword-length NTT on mostly zeros,
         // do `num_cosets` many `coset_size`-point NTTs on twisted coefficient
@@ -390,6 +388,10 @@ impl<F: FftField> ReedSolomon<F> for NttEngine<F> {
         //     ω_N^{c + j * num_cosets} = ω_N^c · (ω_N^{num_cosets})^j
         //
         // so the coefficient of X^i must be multiplied by (ω_N^c)^i.
+        //
+        // You can also see this as applying a first round of Cooley-Tukey with
+        // N = coset_size × num_cosets, and solving it directly by observing that
+        // only the first coset is non-zero.
         let mut coset_size = self.next_order(message_length).unwrap();
         while !codeword_length.is_multiple_of(coset_size) {
             coset_size = self.next_order(coset_size + 1).unwrap();
@@ -398,32 +400,35 @@ impl<F: FftField> ReedSolomon<F> for NttEngine<F> {
 
         // Lay out twisted coefficients in contiguous coset blocks of length
         // `coset_size`, zero-padding each block as needed.
-        let mut result = vec![F::ZERO; total_size];
-        if message_length > 0 {
-            let omega_n = self.root(codeword_length);
-            let messages = interleaved_coeffs
-                .iter()
-                .flat_map(|poly| poly.chunks_exact(message_length));
-            let codewords = result.chunks_exact_mut(codeword_length);
-            for (message, codeword) in zip_strict(messages, codewords) {
-                let cosets = codeword.chunks_exact_mut(coset_size);
-                let mut twist_base = F::ONE;
-                for (c, coset) in cosets.enumerate() {
-                    if c == 0 {
-                        coset[..message_length].copy_from_slice(message);
-                    } else {
-                        twist_base *= omega_n;
-                        let mut twiddle = F::ONE;
-                        for (src, dst) in message.iter().zip(coset.iter_mut()) {
-                            *dst = *src * twiddle;
-                            twiddle *= twist_base;
-                        }
+        let mut result = vec![F::ZERO; num_messages * codeword_length];
+
+        let omega_n = self.root(codeword_length);
+        let messages = interleaved_coeffs
+            .iter()
+            .flat_map(|poly| chunks_exact_or_empty(poly, coefs_length, interleaving_depth));
+        let masks = chunks_exact_or_empty(mask, mask_length, num_messages);
+        let codewords = result.chunks_exact_mut(codeword_length);
+        for ((message, mask), codeword) in zip_strict(zip_strict(messages, masks), codewords) {
+            let cosets = codeword.chunks_exact_mut(coset_size);
+            let mut twist_base = F::ONE;
+            for (c, coset) in cosets.enumerate() {
+                if c == 0 {
+                    coset[..coefs_length].copy_from_slice(message);
+                    coset[coefs_length..coefs_length + mask_length].copy_from_slice(mask);
+                } else {
+                    twist_base *= omega_n;
+                    let mut twiddle = F::ONE;
+                    for (src, dst) in message.iter().zip(coset.iter_mut()) {
+                        *dst = *src * twiddle;
+                        twiddle *= twist_base;
+                    }
+                    for (src, dst) in mask.iter().zip(coset[coefs_length..].iter_mut()) {
+                        *dst = *src * twiddle;
+                        twiddle *= twist_base;
                     }
                 }
             }
         }
-
-        // TODO: Add masks.
 
         // NTT each coset block, then transpose each codeword block from
         // coset-major `(num_cosets × coset_size)` layout into standard codeword

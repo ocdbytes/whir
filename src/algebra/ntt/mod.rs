@@ -13,8 +13,6 @@ use std::{
 
 use ark_ff::Field;
 use static_assertions::assert_obj_safe;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 use self::matrix::MatrixMut;
 pub use self::{
@@ -140,7 +138,10 @@ mod tests {
     use proptest::{collection, prelude::Just, proptest, sample::select, strategy::Strategy};
 
     use super::*;
-    use crate::{algebra::univariate_evaluate, utils::zip_strict};
+    use crate::{
+        algebra::univariate_evaluate,
+        utils::{chunks_exact_or_empty, zip_strict},
+    };
 
     fn valid_codeword_lengths<F: 'static>(size: usize, count: usize) -> Vec<usize> {
         let ntt = NTT.get::<F>().expect("No NTT engine for field.");
@@ -153,34 +154,50 @@ mod tests {
     where
         Standard: Distribution<F>,
     {
-        let cases = (0_usize..3, 0_usize..(1 << 10), 1_usize..=8, 1_usize..=32).prop_flat_map(
-            |(num_vectors, message_length, interleaving_depth, sample_size)| {
-                let valid_codeword_lengths = valid_codeword_lengths::<F>(message_length, 6);
-                select(valid_codeword_lengths).prop_flat_map(move |codeword_length| {
-                    let sample_size = sample_size.min(codeword_length.max(1));
-                    (
-                        Just(num_vectors),
-                        Just(message_length),
-                        Just(codeword_length),
-                        Just(interleaving_depth),
-                        collection::vec(0..codeword_length, sample_size),
-                    )
-                })
-            },
-        );
+        let cases = (
+            0_usize..3,
+            0_usize..(1 << 10),
+            0_usize..(1 << 10),
+            1_usize..=8,
+            1_usize..=32,
+        )
+            .prop_flat_map(
+                |(num_vectors, coeffs_length, mask_length, interleaving_depth, sample_size)| {
+                    let valid_codeword_lengths =
+                        valid_codeword_lengths::<F>(coeffs_length + mask_length, 6);
+                    select(valid_codeword_lengths).prop_flat_map(move |codeword_length| {
+                        let sample_size = sample_size.min(codeword_length.max(1));
+                        (
+                            Just(num_vectors),
+                            Just(coeffs_length),
+                            Just(mask_length),
+                            Just(codeword_length),
+                            Just(interleaving_depth),
+                            collection::vec(0..codeword_length, sample_size),
+                        )
+                    })
+                },
+            );
         proptest!(|(
             seed: u64,
-            (num_vectors, message_length, codeword_length, interleaving_depth, sampled_indices) in cases
+            (num_vectors, coeffs_length, mask_length, codeword_length, interleaving_depth, sampled_indices) in cases
         )| {
             let block_length = interleaving_depth * num_vectors;
             let mut rng = StdRng::seed_from_u64(seed);
-            let vector = (0..num_vectors).map(|_| (0..message_length * interleaving_depth)
+            let vector = (0..num_vectors)
+                .map(|_| {
+                    (0..coeffs_length * interleaving_depth)
+                        .map(|_| rng.gen::<F>())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let mask = (0..mask_length * block_length)
                 .map(|_| rng.gen::<F>())
-                .collect::<Vec<_>>()).collect::<Vec<_>>();
+                .collect::<Vec<_>>();
             let vector_refs = vector.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
             let codeword = ntt.interleaved_encode(
                 &vector_refs,
-                &[],
+                &mask,
                 codeword_length,
                 interleaving_depth,
             );
@@ -188,18 +205,19 @@ mod tests {
             // Output must be the right size.
             assert_eq!(codeword.len(), codeword_length * block_length);
 
-            // Output valus are polynomial evaluations in the evaluation points.
+            // Output values are polynomial evaluations in the evaluation points.
             let mut evaluation_points = Vec::new();
             for &index in &sampled_indices {
                 let evaluation_point = ntt.evaluation_point(codeword_length, index).unwrap();
                 evaluation_points.push(evaluation_point);
                 let evaluations = &codeword[index * block_length.. (index + 1) * block_length];
-                if message_length > 0 {
-                    for (coeffs, value) in vector.iter().flat_map(|v| v.chunks_exact(message_length)).zip(evaluations) {
-                        assert_eq!(*value, univariate_evaluate(coeffs, evaluation_point));
-                    }
-                } else {
-                    assert!(evaluations.iter().all(|v| *v == F::ZERO));
+                let messages = vector_refs.iter().flat_map(|v| chunks_exact_or_empty(v, coeffs_length, interleaving_depth));
+                let masks = chunks_exact_or_empty(&mask, mask_length, block_length);
+                for ((coeffs, mask), value) in zip_strict(zip_strict(messages, masks), evaluations) {
+                    assert_eq!(*value,
+                        univariate_evaluate(coeffs, evaluation_point)
+                        + evaluation_point.pow([coeffs_length as u64])
+                        * univariate_evaluate(mask, evaluation_point));
                 }
             }
 
