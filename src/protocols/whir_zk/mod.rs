@@ -182,7 +182,7 @@ impl<F: FftField> Config<F> {
     }
 
     /// Sub-domain generator (ω_sub = ω^interleaving_depth).
-    #[deprecated = "RS codes do not necessarily have a generator."]
+    // #[deprecated = "RS codes do not necessarily have a generator."]
     fn omega_sub(&self) -> F {
         // Assume it has a generator, and the evaluation order is 1, g, g^2, ...
         self.blinded_commitment
