@@ -201,9 +201,9 @@ where
     }
 
     #[cfg_attr(test, track_caller)]
-    pub fn prover_messages<T: Sized>(&mut self, messages: &[T])
+    pub fn prover_messages<T>(&mut self, messages: &[T])
     where
-        T: Encoding<[H::U]> + NargSerialize + ?Sized,
+        T: Encoding<[H::U]> + NargSerialize,
     {
         for message in messages {
             self.prover_message(message);

@@ -1,6 +1,9 @@
 #[cfg(test)]
 use std::fmt::Debug;
-use std::iter::FusedIterator;
+use std::{
+    iter::{FusedIterator, RepeatN},
+    slice::ChunksExact,
+};
 
 use ark_ff::Field;
 #[cfg(test)]
@@ -14,6 +17,11 @@ macro_rules! ensure {
             return Err($err.into());
         };
     };
+}
+
+pub enum EitherIter<A, B> {
+    Left(A),
+    Right(B),
 }
 
 /// Target single-thread workload size for `T`.
@@ -60,76 +68,71 @@ pub fn zip_strict<A, B>(
     })
 }
 
-pub fn chunks_exact_or_empty<'a, T>(
-    slice: &'a [T],
+impl<T, A, B> Iterator for EitherIter<A, B>
+where
+    A: Iterator<Item = T>,
+    B: Iterator<Item = T>,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Left(a) => a.next(),
+            Self::Right(b) => b.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Left(a) => a.size_hint(),
+            Self::Right(b) => b.size_hint(),
+        }
+    }
+}
+
+impl<T, A, B> DoubleEndedIterator for EitherIter<A, B>
+where
+    A: DoubleEndedIterator<Item = T>,
+    B: DoubleEndedIterator<Item = T>,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Left(a) => a.next_back(),
+            Self::Right(b) => b.next_back(),
+        }
+    }
+}
+
+impl<T, A, B> ExactSizeIterator for EitherIter<A, B>
+where
+    A: ExactSizeIterator<Item = T>,
+    B: ExactSizeIterator<Item = T>,
+{
+    fn len(&self) -> usize {
+        match self {
+            Self::Left(a) => a.len(),
+            Self::Right(b) => b.len(),
+        }
+    }
+}
+
+impl<T, A, B> FusedIterator for EitherIter<A, B>
+where
+    A: FusedIterator<Item = T>,
+    B: FusedIterator<Item = T>,
+{
+}
+
+pub fn chunks_exact_or_empty<T>(
+    slice: &[T],
     chunk_size: usize,
     count: usize,
-) -> impl Iterator<Item = &'a [T]> + DoubleEndedIterator + ExactSizeIterator + FusedIterator {
-    enum Either<A, B> {
-        Left(A),
-        Right(B),
-    }
-
-    impl<T, A, B> Iterator for Either<A, B>
-    where
-        A: Iterator<Item = T>,
-        B: Iterator<Item = T>,
-    {
-        type Item = T;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            match self {
-                Self::Left(a) => a.next(),
-                Self::Right(b) => b.next(),
-            }
-        }
-
-        fn size_hint(&self) -> (usize, Option<usize>) {
-            match self {
-                Self::Left(a) => a.size_hint(),
-                Self::Right(b) => b.size_hint(),
-            }
-        }
-    }
-
-    impl<T, A, B> DoubleEndedIterator for Either<A, B>
-    where
-        A: DoubleEndedIterator<Item = T>,
-        B: DoubleEndedIterator<Item = T>,
-    {
-        fn next_back(&mut self) -> Option<Self::Item> {
-            match self {
-                Self::Left(a) => a.next_back(),
-                Self::Right(b) => b.next_back(),
-            }
-        }
-    }
-
-    impl<T, A, B> ExactSizeIterator for Either<A, B>
-    where
-        A: ExactSizeIterator<Item = T>,
-        B: ExactSizeIterator<Item = T>,
-    {
-        fn len(&self) -> usize {
-            match self {
-                Self::Left(a) => a.len(),
-                Self::Right(b) => b.len(),
-            }
-        }
-    }
-
-    impl<T, A, B> FusedIterator for Either<A, B>
-    where
-        A: FusedIterator<Item = T>,
-        B: FusedIterator<Item = T>,
-    {
-    }
-
+) -> EitherIter<RepeatN<&[T]>, ChunksExact<'_, T>> {
     assert_eq!(slice.len(), chunk_size * count);
     if chunk_size == 0 {
-        Either::Left(std::iter::repeat_n(&slice[0..0], count))
+        EitherIter::Left(std::iter::repeat_n(&slice[0..0], count))
     } else {
-        Either::Right(slice.chunks_exact(chunk_size))
+        EitherIter::Right(slice.chunks_exact(chunk_size))
     }
 }
 

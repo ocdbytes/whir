@@ -11,6 +11,7 @@ pub fn multilinear_extend<F: Field>(evals: &[F], point: &[F]) -> F {
 ///
 /// Supports implicit zero-padding: when `evals.len() < 1 << point.len()`,
 /// the missing tail entries are treated as zeros.
+#[allow(clippy::too_many_lines)]
 pub fn mixed_multilinear_extend<M: Embedding>(
     embedding: &M,
     evals: &[M::Source],

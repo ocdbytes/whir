@@ -71,7 +71,7 @@ impl<F: Field> NttEngine<F> {
         );
         assert_eq!(omega_order.pow([order as u64]), F::ONE);
         assert_ne!(omega_order.pow([order as u64 / 2]), F::ONE);
-        divisors.sort();
+        divisors.sort_unstable();
         let mut res = Self {
             order,
             divisors,
