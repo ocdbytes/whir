@@ -25,8 +25,7 @@ use crate::{
     },
     hash::Hash,
     protocols::{
-        geometric_challenge::geometric_challenge, irs_commit, whir,
-        whir_zk_2::committer::Witness,
+        geometric_challenge::geometric_challenge, irs_commit, whir, whir_zk_2::committer::Witness,
     },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
@@ -428,11 +427,7 @@ where
             .config
             .blinded_polynomial
             .initial_committer
-            .open_at_indices(
-                self.prover_state,
-                &[blinded_witness],
-                &gamma_f_hat_indices,
-            );
+            .open_at_indices(self.prover_state, &[blinded_witness], &gamma_f_hat_indices);
 
         for gamma in gamma_points {
             send_blinding_evals(self.prover_state, gamma, m_coeffs_all, g_i_coeffs);

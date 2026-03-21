@@ -135,9 +135,7 @@ where
                     &round_folding_randomness.last().unwrap().eq_weights(),
                 )),
             ) {
-                verify!(
-                    weights.evaluate(&Identity::<M::Target>::new(), &final_vector) == evals
-                );
+                verify!(weights.evaluate(&Identity::<M::Target>::new(), &final_vector) == evals);
             }
 
             let final_sumcheck_randomness =
@@ -174,8 +172,9 @@ where
             the_sum += dot(&constraint_rlc_coeffs, &constraint_values);
             round_constraints.push((constraint_rlc_coeffs, constraint_weights));
 
-            let folding_randomness =
-                round0_config.sumcheck.verify(verifier_state, &mut the_sum)?;
+            let folding_randomness = round0_config
+                .sumcheck
+                .verify(verifier_state, &mut the_sum)?;
             round_folding_randomness.push(folding_randomness.clone());
 
             // Rounds 1..N + final round.

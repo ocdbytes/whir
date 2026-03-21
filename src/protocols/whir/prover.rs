@@ -45,7 +45,11 @@ where
     /// `vectors.len()`.
     ///
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    #[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cognitive_complexity,
+        clippy::needless_pass_by_value
+    )]
     pub fn prove<'a, H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
@@ -221,17 +225,14 @@ where
             self.final_pow.prove(prover_state);
             let witness_refs: Vec<&_> = witnesses.iter().map(|c| &**c).collect();
             let _in_domain = self.initial_committer.open(prover_state, &witness_refs);
-            let final_folding = self
-                .final_sumcheck
-                .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
+            let final_folding =
+                self.final_sumcheck
+                    .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
             evaluation_point.extend(final_folding.0.iter().copied());
         } else {
             // Round 0: open initial witnesses with embedding lift and tensor_product.
             let round0_config = &self.round_configs[0];
-            let round0_witness =
-                round0_config
-                    .irs_committer
-                    .commit(prover_state, &[&vector]);
+            let round0_witness = round0_config.irs_committer.commit(prover_state, &[&vector]);
             round0_config.pow.prove(prover_state);
 
             let witness_refs: Vec<&_> = witnesses.iter().map(|c| &**c).collect();
