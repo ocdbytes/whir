@@ -136,6 +136,21 @@ pub fn chunks_exact_or_empty<T>(
     }
 }
 
+#[cfg(feature = "parallel")]
+pub fn par_chunks_exact_or_empty<T: Sync>(
+    slice: &[T],
+    chunk_size: usize,
+    count: usize,
+) -> rayon::iter::Either<rayon::iter::RepeatN<&[T]>, rayon::slice::ChunksExact<'_, T>> {
+    use rayon::{iter::Either, slice::ParallelSlice};
+    assert_eq!(slice.len(), chunk_size * count);
+    if chunk_size == 0 {
+        Either::Left(rayon::iter::repeat_n(&slice[0..0], count))
+    } else {
+        Either::Right(slice.par_chunks_exact(chunk_size))
+    }
+}
+
 // TODO(Gotti): n_bits is a misnomer if base > 2. Should be n_limbs or sth.
 // Also, should the behaviour for value >= base^n_bits be specified as part of the API or asserted not to happen?
 // Currently, we compute the decomposition of value % (base^n_bits).

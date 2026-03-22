@@ -14,6 +14,9 @@ use super::{
     utils::{lcm, sqrt_factor},
     ReedSolomon,
 };
+#[cfg(feature = "parallel")]
+use crate::utils::par_chunks_exact_or_empty;
+#[cfg(not(feature = "parallel"))]
 use crate::utils::{chunks_exact_or_empty, zip_strict};
 
 /// Enginge for computing NTTs over arbitrary fields.
@@ -390,17 +393,35 @@ impl<F: FftField> ReedSolomon<F> for NttEngine<F> {
 
         // Lay out twisted coefficients in contiguous coset blocks of length
         // `coset_size`, zero-padding each block as needed.
+        // TODO: Avoid intializing to zeros.
         let mut result = vec![F::ZERO; num_messages * codeword_length];
 
-        let masks = chunks_exact_or_empty(masks, mask_length, num_messages);
-        let codewords = result.chunks_exact_mut(codeword_length);
-        for ((message, mask), codeword) in zip_strict(zip_strict(messages, masks), codewords) {
+        #[cfg(not(feature = "parallel"))]
+        for ((message, mask), codeword) in zip_strict(
+            zip_strict(
+                messages,
+                chunks_exact_or_empty(masks, mask_length, num_messages),
+            ),
+            result.chunks_exact_mut(codeword_length),
+        ) {
             // FFT[a 0 0 0] = [a a a a], so just replicate input in coset dimentsion.
             for coset in codeword.chunks_exact_mut(coset_size) {
                 coset[..message_len].copy_from_slice(message);
                 coset[message_len..message_len + mask_length].copy_from_slice(mask);
             }
         }
+        #[cfg(feature = "parallel")]
+        messages
+            .par_iter()
+            .zip(par_chunks_exact_or_empty(masks, mask_length, num_messages))
+            .zip(result.par_chunks_exact_mut(codeword_length))
+            .for_each(|((message, mask), codeword)| {
+                // FFT[a 0 0 0] = [a a a a], so just replicate input in coset dimentsion.
+                for coset in codeword.chunks_exact_mut(coset_size) {
+                    coset[..message_len].copy_from_slice(message);
+                    coset[message_len..message_len + mask_length].copy_from_slice(mask);
+                }
+            });
 
         // NTT each coset block, then transpose each codeword block from
         // coset-major `(num_cosets × coset_size)` layout into standard codeword
