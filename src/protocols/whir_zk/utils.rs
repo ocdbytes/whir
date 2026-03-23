@@ -268,6 +268,15 @@ pub(super) fn build_beq_tables<F: FftField>(
     tables
 }
 
+/// RS-fold coefficient vectors for the blinding polynomials.
+///
+/// Produced by [`compute_rs_fold_blinding_coeffs`]; consumed when evaluating
+/// m̃(r̄, z, ρ) and g̃ᵢ(r̄, z) at OOD/STIR/Γ points.
+pub(super) struct RsFoldCoeffs<F> {
+    pub(super) m_coeffs_all: Vec<Vec<F>>,
+    pub(super) g_i_coeffs: Vec<Vec<F>>,
+}
+
 /// Precompute RS-fold coefficient vectors for the blinding polynomials (Steps 5-6).
 ///
 /// Used to evaluate m̃(r̄, z, ρ) and g̃ᵢ(r̄, z) at OOD/STIR/Γ points.
@@ -288,7 +297,7 @@ pub(super) fn build_beq_tables<F: FftField>(
 /// - `m_coeffs_all[i][m] = (-ρ·αⁱ) · Σ_j eq · mskᵢ[Φ₀(j·M+m)]`  for i = 1..n-1
 /// - `g_i_coeffs[i][m] = Σ_j eq · ĝ_{i+1}[Φ_{i+1}(j·M+m)]`  for i = 0..ν-1
 ///
-/// Returns `(m_coeffs_all, g_i_coeffs)` where each vector has length M.
+/// Returns [`RsFoldCoeffs`] where each inner vector has length M.
 #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, fields(mu = dims.mu, ell = dims.ell, num_g_polys = g_polys.len())))]
 pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
     eq_weights: &[F],
@@ -297,7 +306,7 @@ pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
     alpha_coeffs: &[F],
     rho: F,
     dims: ProtocolDims,
-) -> (Vec<Vec<F>>, Vec<Vec<F>>) {
+) -> RsFoldCoeffs<F> {
     let mu = dims.mu;
     assert!(
         eq_weights.len().is_power_of_two(),
@@ -332,26 +341,27 @@ pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
         };
 
     // Assemble m_coeffs_all from raw g₀ fold and masking folds
-    let assemble = |g0_fold: Vec<F>,
-                    msk_folds: Vec<Vec<F>>,
-                    g_i_coeffs: Vec<Vec<F>>|
-     -> (Vec<Vec<F>>, Vec<Vec<F>>) {
-        let mut m_coeffs_all = Vec::with_capacity(num_masking);
-        // m₀ = g₀_fold + (-ρ) · msk₀_fold
-        let m0: Vec<F> = g0_fold
-            .iter()
-            .zip(msk_folds[0].iter())
-            .map(|(&g, &msk)| g + neg_rho * msk)
-            .collect();
-        m_coeffs_all.push(m0);
-        // mᵢ = (-ρ·αⁱ) · mskᵢ_fold for i ≥ 1
-        for i in 1..num_masking {
-            let scale = neg_rho * alpha_coeffs[i];
-            let mi: Vec<F> = msk_folds[i].iter().map(|&v| scale * v).collect();
-            m_coeffs_all.push(mi);
-        }
-        (m_coeffs_all, g_i_coeffs)
-    };
+    let assemble =
+        |g0_fold: Vec<F>, msk_folds: Vec<Vec<F>>, g_i_coeffs: Vec<Vec<F>>| -> RsFoldCoeffs<F> {
+            let mut m_coeffs_all = Vec::with_capacity(num_masking);
+            // m₀ = g₀_fold + (-ρ) · msk₀_fold
+            let m0: Vec<F> = g0_fold
+                .iter()
+                .zip(msk_folds[0].iter())
+                .map(|(&g, &msk)| g + neg_rho * msk)
+                .collect();
+            m_coeffs_all.push(m0);
+            // mᵢ = (-ρ·αⁱ) · mskᵢ_fold for i ≥ 1
+            for i in 1..num_masking {
+                let scale = neg_rho * alpha_coeffs[i];
+                let mi: Vec<F> = msk_folds[i].iter().map(|&v| scale * v).collect();
+                m_coeffs_all.push(mi);
+            }
+            RsFoldCoeffs {
+                m_coeffs_all,
+                g_i_coeffs,
+            }
+        };
 
     let mut g0_fold = vec![F::ZERO; sub_poly_len];
     let mut msk_folds = vec![vec![F::ZERO; sub_poly_len]; num_masking];
