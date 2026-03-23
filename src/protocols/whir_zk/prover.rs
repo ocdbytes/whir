@@ -10,7 +10,7 @@ use tracing::instrument;
 use super::{
     utils::{
         build_beq_tables, build_fold_args, build_weight_covectors, compute_eq_weights,
-        compute_rs_fold_blinding_coeffs, gamma_to_f_hat_indices, ProtocolDims,
+        compute_rs_fold_blinding_coeffs, gamma_to_f_hat_indices, ProtocolDims, RsFoldCoeffs,
     },
     Config,
 };
@@ -298,7 +298,10 @@ where
 
         let r_bar = folding_randomness.0;
         let eq_weights = compute_eq_weights(&r_bar);
-        let (m_coeffs_all, g_i_coeffs) = compute_rs_fold_blinding_coeffs(
+        let RsFoldCoeffs {
+            m_coeffs_all,
+            g_i_coeffs,
+        } = compute_rs_fold_blinding_coeffs(
             &eq_weights,
             g_polys,
             masking_polys,
