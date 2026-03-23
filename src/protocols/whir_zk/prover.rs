@@ -111,6 +111,7 @@ where
     Hash: ProverMessage<[H::U]>,
 {
     /// Steps 2-4: Blinding claims, multi-polynomial batching, form f_zk, initial sumcheck.
+    #[allow(clippy::too_many_lines)]
     fn prepare_and_sumcheck(
         &mut self,
         vectors: Vec<Cow<'_, [F]>>,
@@ -187,12 +188,16 @@ where
         // and proves: ρ·F + G = Σ_{b̄} w(f_zk(b̄), b̄)
         // =====================================================================
         let rho: F = self.prover_state.verifier_message();
-        assert_ne!(rho, F::ZERO, "rho should not be zero");
+        debug_assert_ne!(
+            rho,
+            F::ZERO,
+            "rho must not be zero (negligible probability)"
+        );
 
         // f_combined = Σ αⁱ fᵢ, then f_zk = ρ·f_combined + g
         let mut f_zk = {
             let mut iter = vectors.into_iter();
-            let mut combined = iter.next().unwrap().into_owned();
+            let mut combined = iter.next().expect("vectors must be non-empty").into_owned();
             // alpha_coeffs[0] = ONE, so combined starts as vectors[0]
             for (vec_i, &alpha) in iter.zip(alpha_coeffs[1..].iter()) {
                 for (f, v) in combined.iter_mut().zip(vec_i.iter()) {
@@ -275,7 +280,7 @@ where
         alpha_coeffs: &[F],
         rho: F,
         folding_randomness: MultilinearPoint<F>,
-        blinded_witness: &irs_commit::Witness<F, F>,
+        f_hat_witness: &irs_commit::Witness<F, F>,
         f_hat_polys: Vec<Vec<F>>,
         masking_polys: &[Vec<F>],
         g_polys: &[Vec<F>],
@@ -292,7 +297,7 @@ where
             .config
             .blinded_polynomial
             .initial_committer
-            .open(self.prover_state, &[blinded_witness]);
+            .open(self.prover_state, &[f_hat_witness]);
 
         let r_bar = folding_randomness.0;
         let eq_weights = compute_eq_weights(&r_bar);
@@ -408,7 +413,7 @@ where
     /// Opens [[f̂]] at Γ indices and sends blinding evaluations for each γ ∈ Γ.
     fn gamma_check(
         &mut self,
-        blinded_witness: &irs_commit::Witness<F, F>,
+        f_hat_witness: &irs_commit::Witness<F, F>,
         m_coeffs_all: &[Vec<F>],
         g_i_coeffs: &[Vec<F>],
         gamma_points: Vec<F>,
@@ -423,7 +428,7 @@ where
             .config
             .blinded_polynomial
             .initial_committer
-            .open_at_indices(self.prover_state, &[blinded_witness], &gamma_f_hat_indices);
+            .open_at_indices(self.prover_state, &[f_hat_witness], &gamma_f_hat_indices);
 
         for gamma in gamma_points {
             send_blinding_evals(self.prover_state, gamma, m_coeffs_all, g_i_coeffs);
@@ -439,11 +444,11 @@ impl<F: FftField> Config<F> {
     /// before the memory-intensive WHIR rounds begin.
     /// Other witness fields are borrowed; the caller frees them before Step 7.
     #[allow(clippy::too_many_arguments)]
-    fn prove_blinded_polynomial<'a, H, R>(
+    fn prove_blinded_polynomial<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vectors: Vec<Cow<'a, [F]>>,
-        blinded_witness: &irs_commit::Witness<F, F>,
+        vectors: Vec<Cow<'_, [F]>>,
+        f_hat_witness: &irs_commit::Witness<F, F>,
         f_hat_polys: Vec<Vec<F>>,
         masking_polys: &[Vec<F>],
         g_polys: &[Vec<F>],
@@ -509,7 +514,7 @@ impl<F: FftField> Config<F> {
             &alpha_coeffs,
             rho,
             folding_randomness,
-            blinded_witness,
+            f_hat_witness,
             f_hat_polys,
             masking_polys,
             g_polys,
@@ -519,7 +524,7 @@ impl<F: FftField> Config<F> {
         drop(covector);
 
         ctx.gamma_check(
-            blinded_witness,
+            f_hat_witness,
             &m_coeffs_all,
             &g_i_coeffs,
             gamma_points,
@@ -547,7 +552,7 @@ impl<F: FftField> Config<F> {
         &self,
         prover_state: &mut ProverState<H, R>,
         blinding_vectors: &[Vec<F>],
-        blinding_witness: &irs_commit::Witness<F, F>,
+        blinding_poly_witness: &irs_commit::Witness<F, F>,
         blinded: &BlindedProveResult<F>,
     ) where
         H: DuplexSpongeInterface<U = u8>,
@@ -593,7 +598,7 @@ impl<F: FftField> Config<F> {
         let _blinding_final_claim = self.blinding_polynomial.prove(
             prover_state,
             blinding_vector_cows,
-            vec![Cow::Borrowed(blinding_witness)],
+            vec![Cow::Borrowed(blinding_poly_witness)],
             blinding_forms,
             Cow::Owned(eval_matrix),
         );
@@ -619,8 +624,8 @@ impl<F: FftField> Config<F> {
         Hash: ProverMessage<[H::U]>,
     {
         let Witness {
-            blinded_witness,
-            blinding_witness,
+            f_hat_witness,
+            blinding_poly_witness,
             f_hat_polys,
             masking_polys,
             g_polys,
@@ -631,7 +636,7 @@ impl<F: FftField> Config<F> {
         let blinded = self.prove_blinded_polynomial(
             prover_state,
             vectors,
-            &blinded_witness,
+            &f_hat_witness,
             f_hat_polys,
             &masking_polys,
             &g_polys,
@@ -640,7 +645,7 @@ impl<F: FftField> Config<F> {
         );
 
         // Free fields only needed during Steps 2-6, before Step 7.
-        drop(blinded_witness);
+        drop(f_hat_witness);
         drop(masking_polys);
         drop(g_polys);
         drop(linear_forms);
@@ -649,7 +654,7 @@ impl<F: FftField> Config<F> {
         self.prove_blinding_polynomial(
             prover_state,
             &blinding_vectors,
-            &blinding_witness,
+            &blinding_poly_witness,
             &blinded,
         );
     }

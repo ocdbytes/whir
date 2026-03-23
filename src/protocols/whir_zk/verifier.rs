@@ -1,3 +1,5 @@
+use std::mem;
+
 use ark_ff::FftField;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -27,7 +29,8 @@ use crate::{
     verify,
 };
 
-/// Commitments for blinded and blinding polynomials
+/// Commitments for blinded and blinding polynomials.
+#[derive(Debug)]
 pub struct Commitments<F: FftField> {
     pub blinded_commitment: whir::Commitment<F>,
     pub blinding_commitment: whir::Commitment<F>,
@@ -35,14 +38,17 @@ pub struct Commitments<F: FftField> {
 
 /// Intermediate result from verifying the blinded polynomial (Steps 2-6).
 ///
-/// Carries the values needed by [`Config::verify_blinding_polynomial`] (Step 7).
+/// Carries the values needed by [`Config::verify_blinding_polynomial`] (Step 7)
+/// and the blinded polynomial's deferred `FinalClaim`.
 #[must_use]
-struct BlindedVerifyResult<F> {
+struct BlindedVerifyResult<F: FftField> {
     lambda: LambdaAccumulator<F>,
     eq_weights: Vec<F>,
     rho: F,
     alpha_coeffs: Vec<F>,
     dims: ProtocolDims,
+    /// Deferred final claim for the blinded polynomial instance.
+    blinded_final_claim: whir::FinalClaim<F>,
 }
 
 /// Result of Steps 2-4 (blinding claims, batching, combined claims, initial sumcheck).
@@ -58,12 +64,18 @@ struct VerifyPrepareResult<F> {
     batching_weights: Vec<F>,
 }
 
-/// Result of Step 5 (OOD/STIR queries, remaining WHIR rounds, linear form RLC check).
+/// Result of Step 5 (OOD/STIR queries, remaining WHIR rounds, linear form RLC).
 #[must_use]
 struct VerifyOodStirResult<F> {
     lambda: LambdaAccumulator<F>,
     gamma_points: Vec<F>,
     gamma_h_values: Vec<F>,
+    /// Evaluation point for the blinded polynomial's deferred linear form check.
+    evaluation_point: Vec<F>,
+    /// RLC coefficients for the blinded polynomial's constraint combination.
+    constraint_rlc_coeffs: Vec<F>,
+    /// Claimed RLC value of the linear form MLEs at `evaluation_point`.
+    linear_form_rlc: F,
 }
 
 /// Context for verifying the blinded polynomial (Steps 2-6).
@@ -279,10 +291,7 @@ where
         let folding_randomness = round_config
             .sumcheck
             .verify(self.verifier_state, &mut prepare.the_sum)?;
-        let mut round_folding_randomness = vec![
-            prepare.folding_randomness.clone(),
-            folding_randomness.clone(),
-        ];
+        let mut round_folding_randomness = vec![mem::take(&mut prepare.folding_randomness)];
 
         // =====================================================================
         // Step 5 (continued): Remaining standard WHIR rounds
@@ -298,9 +307,9 @@ where
             &commitment_h,
             &folding_randomness,
         )?;
+        round_folding_randomness.push(folding_randomness);
 
-        // Extract gamma points and compute gamma_h_values from first in-domain opening
-        let gamma_points = remaining.first_in_domain.points.clone();
+        // Compute gamma_h_values from first in-domain opening, then move points out.
         let msg_len = round_config.irs_committer.message_length();
         let interleaving_depth = round_config.irs_committer.interleaving_depth;
         let gamma_h_values: Vec<F> = remaining
@@ -319,12 +328,18 @@ where
                 val
             })
             .collect();
+        let gamma_points = remaining.first_in_domain.points;
 
         round_constraints.extend(remaining.round_constraints);
         round_folding_randomness.extend(remaining.round_folding_randomness);
+        round_folding_randomness.push(remaining.final_sumcheck_randomness.clone());
 
         // =====================================================================
-        // Verify linear form RLC from the sumcheck chain
+        // Compute linear form RLC from the sumcheck chain.
+        //
+        // The blinded polynomial's FinalClaim is built here and returned to
+        // the caller (via verify → verify_blinded_polynomial) for deferred
+        // verification, matching the base WHIR pattern.
         // =====================================================================
         let evaluation_point: Vec<F> = round_folding_randomness
             .into_iter()
@@ -344,6 +359,8 @@ where
             }
         }
 
+        // Inline linear form RLC check (blinded polynomial FinalClaim).
+        // Also returned to the caller for deferred verification.
         let expected_rlc: F = prepare
             .constraint_rlc_coeffs
             .iter()
@@ -356,6 +373,9 @@ where
             lambda,
             gamma_points,
             gamma_h_values,
+            evaluation_point,
+            constraint_rlc_coeffs: mem::take(&mut prepare.constraint_rlc_coeffs),
+            linear_form_rlc,
         })
     }
 
@@ -416,6 +436,11 @@ where
             rho: prepare.rho,
             alpha_coeffs: prepare.alpha_coeffs,
             dims: self.dims,
+            blinded_final_claim: whir::FinalClaim {
+                evaluation_point: ood.evaluation_point,
+                rlc_coefficients: ood.constraint_rlc_coeffs,
+                linear_form_rlc: ood.linear_form_rlc,
+            },
         })
     }
 }
@@ -487,7 +512,7 @@ impl<F: FftField> Config<F> {
         verifier_state: &mut VerifierState<'_, H>,
         commitments: &Commitments<F>,
         blinded: BlindedVerifyResult<F>,
-    ) -> VerificationResult<()>
+    ) -> VerificationResult<whir::FinalClaim<F>>
     where
         H: DuplexSpongeInterface,
         F: Codec<[H::U]>,
@@ -497,6 +522,7 @@ impl<F: FftField> Config<F> {
         Hash: ProverMessage<[H::U]>,
     {
         let dims = blinded.dims;
+        let blinded_final_claim = blinded.blinded_final_claim;
         let tau: F = verifier_state.verifier_message();
 
         let beq_tables = build_beq_tables(&blinded.lambda.z_points, &blinded.eq_weights, tau, dims);
@@ -514,12 +540,7 @@ impl<F: FftField> Config<F> {
             let mut expected = F::ZERO;
             let mut tau_power = tau;
             for lambda_idx in 0..num_lambda {
-                let claim = if i < dims.num_vectors {
-                    blinded.lambda.m_evals[lambda_idx][i]
-                } else {
-                    blinded.lambda.g_evals[lambda_idx][i - dims.num_vectors]
-                };
-                expected += tau_power * claim;
+                expected += tau_power * blinded.lambda.claim(lambda_idx, i, dims.num_vectors);
                 tau_power *= tau;
             }
             verify!(eval_matrix[i * dims.num_blinding_vecs + i] == expected);
@@ -531,7 +552,7 @@ impl<F: FftField> Config<F> {
             .map(|cv| Box::new(Covector::new(cv)) as Box<dyn LinearForm<F>>)
             .collect();
 
-        // Run blinding WHIR verifier
+        // Run blinding WHIR verifier.
         self.blinding_polynomial
             .verify(
                 verifier_state,
@@ -544,13 +565,15 @@ impl<F: FftField> Config<F> {
                     .map(|l| l.as_ref() as &dyn LinearForm<F>),
             )?;
 
-        Ok(())
+        Ok(blinded_final_claim)
     }
 
     /// zkWHIR 2.0 verifier — Alternative Randomness Sampling.
     ///
     /// Executes Steps 2-7 of the protocol.
     /// `evaluations` is row-major: `evaluations[j * n + i]` = ⟨wⱼ, fᵢ⟩.
+    ///
+    /// Returns a [`FinalClaim`](whir::FinalClaim) for the blinded polynomial instance.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn verify<H>(
         &self,
@@ -558,7 +581,7 @@ impl<F: FftField> Config<F> {
         weights: &[&dyn LinearForm<F>],
         evaluations: &[F],
         commitments: &Commitments<F>,
-    ) -> VerificationResult<()>
+    ) -> VerificationResult<whir::FinalClaim<F>>
     where
         H: DuplexSpongeInterface,
         F: Codec<[H::U]>,

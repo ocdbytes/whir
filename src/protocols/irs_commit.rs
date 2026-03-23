@@ -430,6 +430,11 @@ where
         R: RngCore + CryptoRng,
         Hash: ProverMessage<[H::U]>,
     {
+        debug_assert!(
+            indices.iter().all(|&i| i < self.codeword_length),
+            "index out of bounds: all indices must be < codeword_length ({})",
+            self.codeword_length
+        );
         let generator = self.generator();
         let points: Vec<M::Source> = indices.iter().map(|&i| generator.pow([i as u64])).collect();
         self.open_inner(prover_state, witnesses, indices, points)
@@ -450,6 +455,11 @@ where
         u8: Decoding<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
+        debug_assert!(
+            indices.iter().all(|&i| i < self.codeword_length),
+            "index out of bounds: all indices must be < codeword_length ({})",
+            self.codeword_length
+        );
         let generator = self.generator();
         let points: Vec<M::Source> = indices.iter().map(|&i| generator.pow([i as u64])).collect();
         self.verify_inner(verifier_state, commitments, indices, points)
