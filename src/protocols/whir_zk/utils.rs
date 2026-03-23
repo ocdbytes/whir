@@ -21,10 +21,17 @@ pub(super) struct ProtocolDims {
 impl ProtocolDims {
     pub(super) fn new<F: FftField>(config: &Config<F>, num_vectors: usize) -> Self {
         let mu = config.blinded_polynomial.initial_num_variables();
-        let ell = config.blinding_polynomial.initial_num_variables() - 1;
+        let ell = config
+            .blinding_polynomial
+            .initial_num_variables()
+            .checked_sub(1)
+            .filter(|&e| e > 0)
+            .expect("blinding polynomial must have at least 2 variables (ell >= 1)");
         let rem = mu % ell;
         let num_blinding_vecs = config.blinding_polynomial.initial_committer.num_vectors;
-        let nu = num_blinding_vecs - num_vectors;
+        let nu = num_blinding_vecs
+            .checked_sub(num_vectors)
+            .expect("blinding polynomial must commit more vectors than witness count");
         let size = 1 << mu;
         Self {
             mu,
@@ -40,6 +47,11 @@ impl ProtocolDims {
     /// Number of blinding g-polynomials: ν + 1.
     pub(super) const fn num_g_polys(&self) -> usize {
         self.nu + 1
+    }
+
+    /// Convenience wrapper for [`phi_i_bits`] using this instance's dimensions.
+    pub(super) const fn phi_i_bits(&self, hypercube_idx: usize, phi_index: usize) -> usize {
+        phi_i_bits(hypercube_idx, phi_index, self.mu, self.ell, self.rem)
     }
 }
 
@@ -287,8 +299,6 @@ pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
     dims: ProtocolDims,
 ) -> (Vec<Vec<F>>, Vec<Vec<F>>) {
     let mu = dims.mu;
-    let ell = dims.ell;
-    let rem = dims.rem;
     assert!(
         eq_weights.len().is_power_of_two(),
         "eq_weights length must be a power of 2, got {}",
@@ -307,7 +317,7 @@ pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
             let eq_j = eq_weights[j];
             for sub_idx in 0..sub_poly_len {
                 let full_idx = j * sub_poly_len + sub_idx;
-                let phi_0_idx = phi_i_bits(full_idx, 0, mu, ell, rem);
+                let phi_0_idx = dims.phi_i_bits(full_idx, 0);
 
                 g0_acc[sub_idx] += eq_j * g_polys[0][phi_0_idx];
                 for (i, msk) in masking_polys.iter().enumerate() {
@@ -315,7 +325,7 @@ pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
                 }
 
                 for gi in 1..num_g_polys {
-                    let phi_i_idx = phi_i_bits(full_idx, gi, mu, ell, rem);
+                    let phi_i_idx = dims.phi_i_bits(full_idx, gi);
                     g_acc[gi - 1][sub_idx] += eq_j * g_polys[gi][phi_i_idx];
                 }
             }
@@ -367,7 +377,6 @@ pub(super) fn build_weight_covectors<F: FftField>(
 ) -> Vec<Vec<F>> {
     let num_vectors = dims.num_vectors;
     let num_blinding_vecs = dims.num_blinding_vecs;
-    let half_size = 1usize << dims.ell;
     let full_size = 1usize << (dims.ell + 1);
 
     let mut weight_covectors: Vec<Vec<F>> = Vec::with_capacity(num_blinding_vecs);
@@ -376,9 +385,9 @@ pub(super) fn build_weight_covectors<F: FftField>(
     {
         let mut w0 = vec![F::ZERO; full_size];
         let neg_rho = -rho;
-        for k in 0..half_size {
-            w0[2 * k] = beq_tables[0][k];
-            w0[2 * k + 1] = neg_rho * beq_tables[0][k];
+        for (chunk, &beq) in w0.chunks_exact_mut(2).zip(&beq_tables[0]) {
+            chunk[0] = beq;
+            chunk[1] = neg_rho * beq;
         }
         weight_covectors.push(w0);
     }
@@ -387,8 +396,8 @@ pub(super) fn build_weight_covectors<F: FftField>(
     for &alpha in &alpha_coeffs[1..num_vectors] {
         let mut wi = vec![F::ZERO; full_size];
         let scale = -rho * alpha;
-        for k in 0..half_size {
-            wi[2 * k + 1] = scale * beq_tables[0][k];
+        for (chunk, &beq) in wi.chunks_exact_mut(2).zip(&beq_tables[0]) {
+            chunk[1] = scale * beq;
         }
         weight_covectors.push(wi);
     }
@@ -396,8 +405,8 @@ pub(super) fn build_weight_covectors<F: FftField>(
     // w_{n+j-1} (1 ≤ j ≤ ν): ĝ_j weights
     for beq_table in beq_tables.iter().skip(1) {
         let mut wj = vec![F::ZERO; full_size];
-        for k in 0..half_size {
-            wj[2 * k] = beq_table[k];
+        for (chunk, &beq) in wj.chunks_exact_mut(2).zip(beq_table) {
+            chunk[0] = beq;
         }
         weight_covectors.push(wj);
     }
