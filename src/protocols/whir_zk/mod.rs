@@ -16,6 +16,8 @@
 ///   Step 5: Virtual OOD/STIR queries + remaining WHIR rounds
 ///   Step 6: Γ consistency check — verify [[f̂]] openings match [[H]]
 ///   Step 7: Batched blinding proof via second WHIR instance
+use std::fmt;
+
 use ark_ff::FftField;
 use serde::{Deserialize, Serialize};
 
@@ -29,11 +31,11 @@ mod verifier;
 pub use self::{committer::Witness, verifier::Commitments};
 use crate::{
     algebra::embedding::Identity,
+    bits::Bits,
     parameters::ProtocolParameters,
     protocols::{irs_commit, whir},
 };
 
-#[allow(clippy::trait_duplication_in_bounds)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(bound = "")]
 pub struct Config<F: FftField> {
@@ -44,8 +46,57 @@ pub struct Config<F: FftField> {
     pub blinding_polynomial: whir::Config<Identity<F>>,
 }
 
+impl<F: FftField> fmt::Display for Config<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "zkWHIR 2.0 — Alternative Randomness Sampling")?;
+        writeln!(f, "Blinded polynomial instance:")?;
+        write!(f, "{}", self.blinded_polynomial)?;
+        writeln!(f, "Blinding polynomial instance:")?;
+        write!(f, "{}", self.blinding_polynomial)
+    }
+}
+
 impl<F: FftField> Config<F> {
-    pub fn new(params: &ProtocolParameters, num_variables_main: usize) -> Self {
+    /// Check whether the configured PoW bits exceed the specified maximum.
+    pub fn check_max_pow_bits(&self, bits: Bits) -> bool {
+        self.blinded_polynomial.check_max_pow_bits(bits)
+    }
+
+    /// Disable proof-of-work on both WHIR sub-instances (for testing).
+    #[cfg(test)]
+    pub(crate) fn disable_pow(&mut self) {
+        self.blinded_polynomial.disable_pow();
+        self.blinding_polynomial.disable_pow();
+    }
+
+    /// Return a reference to the embedding used by the blinded polynomial instance.
+    pub fn embedding(&self) -> &Identity<F> {
+        self.blinded_polynomial.embedding()
+    }
+
+    /// Number of variables in the witness polynomial (μ = log₂ of the evaluation domain size).
+    pub fn num_witness_variables(&self) -> usize {
+        self.blinded_polynomial.initial_num_variables()
+    }
+
+    /// Security levels (in bits) for the two WHIR sub-instances.
+    ///
+    /// Returns `(blinded_security, blinding_security)` where:
+    /// - `blinded_security` is for the witness instance (f̂ with `num_vectors` committed polynomials
+    ///   and `num_linear_forms` constraints)
+    /// - `blinding_security` is for the blinding instance (M and ĝ vectors)
+    pub fn security_levels(&self, num_vectors: usize, num_linear_forms: usize) -> (f64, f64) {
+        let num_blinding_vecs = self.blinding_polynomial.initial_committer.num_vectors;
+        let blinded_sec = self
+            .blinded_polynomial
+            .security_level(num_vectors, num_linear_forms);
+        let blinding_sec = self
+            .blinding_polynomial
+            .security_level(num_blinding_vecs, num_blinding_vecs);
+        (blinded_sec, blinding_sec)
+    }
+
+    pub fn new(num_variables_main: usize, params: &ProtocolParameters) -> Self {
         let blinded_config: whir::Config<Identity<F>> =
             whir::Config::new(1 << num_variables_main, params);
         let witness_sec = params.security_level.saturating_sub(params.pow_bits) as f64;
@@ -236,9 +287,8 @@ mod tests {
             batch_size: 1,
             hash_id: hash::SHA2,
         };
-        let mut config = Config::new(&whir_params, TEST_NUM_VARIABLES);
-        config.blinded_polynomial.disable_pow();
-        config.blinding_polynomial.disable_pow();
+        let mut config = Config::new(TEST_NUM_VARIABLES, &whir_params);
+        config.disable_pow();
         config
     }
 
@@ -296,9 +346,13 @@ mod tests {
             .map(|f| f.as_ref() as &dyn LinearForm<F>)
             .collect();
 
+        // Blinded polynomial FinalClaim: verify the linear form RLC.
+        // (Blinding polynomial FinalClaim is verified internally by verify().)
         config
             .verify(&mut verifier_state, &weight_refs, evaluations, &commitments)
-            .expect("verification failed");
+            .expect("verification failed")
+            .verify(weight_refs)
+            .expect("blinded polynomial final claim check failed");
     }
 
     #[test]
@@ -309,7 +363,7 @@ mod tests {
         let vector = vec![F::ONE; TEST_NUM_COEFFS];
         let point = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
         let form = MultilinearExtension { point: point.0 };
-        let evaluation = form.evaluate(config.blinded_polynomial.embedding(), &vector);
+        let evaluation = form.evaluate(config.embedding(), &vector);
 
         prove_and_verify(&config, vec![vector], vec![Box::new(form)], &[evaluation]);
     }
@@ -328,7 +382,7 @@ mod tests {
         let f0 = MultilinearExtension { point: p0.0 };
         let f1 = MultilinearExtension { point: p1.0 };
 
-        let embedding = config.blinded_polynomial.embedding();
+        let embedding = config.embedding();
         let eval0 = f0.evaluate(embedding, &vector);
         let eval1 = f1.evaluate(embedding, &vector);
 
@@ -349,7 +403,7 @@ mod tests {
 
         let point = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
         let mle_form = MultilinearExtension { point: point.0 };
-        let embedding = config.blinded_polynomial.embedding();
+        let embedding = config.embedding();
         let mle_eval = mle_form.evaluate(embedding, &vector);
 
         let cov = Covector::new((0..TEST_NUM_COEFFS).map(|i| F::from(i as u64)).collect());
@@ -374,9 +428,8 @@ mod tests {
             batch_size,
             hash_id: hash::SHA2,
         };
-        let mut config = Config::new(&whir_params, TEST_NUM_VARIABLES);
-        config.blinded_polynomial.disable_pow();
-        config.blinding_polynomial.disable_pow();
+        let mut config = Config::new(TEST_NUM_VARIABLES, &whir_params);
+        config.disable_pow();
         config
     }
 
@@ -395,7 +448,7 @@ mod tests {
         let p0 = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
         let f0 = MultilinearExtension { point: p0.0 };
 
-        let embedding = config.blinded_polynomial.embedding();
+        let embedding = config.embedding();
         // evaluations[j * n + i] = ⟨wⱼ, fᵢ⟩
         // 1 form, 2 vectors: evaluations = [⟨w₀, f₀⟩, ⟨w₀, f₁⟩]
         let eval_0_0 = f0.evaluate(embedding, &v0);
@@ -426,7 +479,7 @@ mod tests {
         let f0 = MultilinearExtension { point: p0.0 };
         let f1 = MultilinearExtension { point: p1.0 };
 
-        let embedding = config.blinded_polynomial.embedding();
+        let embedding = config.embedding();
         // Row-major: evaluations[j * n + i] = ⟨wⱼ, fᵢ⟩
         // 2 forms × 2 vectors = 4 evaluations
         let eval_0_0 = f0.evaluate(embedding, &v0);
@@ -461,7 +514,7 @@ mod tests {
         let f0 = MultilinearExtension { point: p0.0 };
         let f1 = MultilinearExtension { point: p1.0 };
 
-        let embedding = config.blinded_polynomial.embedding();
+        let embedding = config.embedding();
         let evaluations = vec![
             f0.evaluate(embedding, &vector),
             f1.evaluate(embedding, &vector),
@@ -497,12 +550,14 @@ mod tests {
             let commitments = config
                 .receive_commitments(&mut verifier_state)
                 .expect("receive_commitments");
-            config.verify(
-                &mut verifier_state,
-                &weight_refs,
-                &wrong_evaluations,
-                &commitments,
-            )
+            config
+                .verify(
+                    &mut verifier_state,
+                    &weight_refs,
+                    &wrong_evaluations,
+                    &commitments,
+                )?
+                .verify(weight_refs.iter().copied())
         }));
         if let Ok(result) = verify_outcome {
             assert!(
@@ -526,7 +581,7 @@ mod tests {
         let f0 = MultilinearExtension { point: p0.0 };
         let f1 = MultilinearExtension { point: p1.0 };
 
-        let embedding = config.blinded_polynomial.embedding();
+        let embedding = config.embedding();
         let evaluations = vec![
             f0.evaluate(embedding, &vector),
             f1.evaluate(embedding, &vector),
@@ -565,12 +620,14 @@ mod tests {
             let commitments = config
                 .receive_commitments(&mut verifier_state)
                 .expect("receive_commitments");
-            config.verify(
-                &mut verifier_state,
-                &weight_refs,
-                &evaluations,
-                &commitments,
-            )
+            config
+                .verify(
+                    &mut verifier_state,
+                    &weight_refs,
+                    &evaluations,
+                    &commitments,
+                )?
+                .verify(weight_refs.iter().copied())
         }));
         if let Ok(result) = verify_outcome {
             assert!(
@@ -592,7 +649,7 @@ mod tests {
         let vector = vec![F::ONE; TEST_NUM_COEFFS];
         let point = MultilinearPoint::rand(&mut rng, TEST_NUM_VARIABLES);
         let form = MultilinearExtension { point: point.0 };
-        let correct_evaluation = form.evaluate(config.blinded_polynomial.embedding(), &vector);
+        let correct_evaluation = form.evaluate(config.embedding(), &vector);
         let wrong_evaluation = correct_evaluation + F::from(42u64);
 
         let forms: Vec<Box<dyn LinearForm<F>>> = vec![Box::new(form)];
@@ -611,7 +668,7 @@ mod tests {
             let witness = config.commit(&mut prover_state, &[&vector]);
             config.prove(
                 &mut prover_state,
-                vec![Cow::Owned(vector.clone())],
+                vec![Cow::Borrowed(vector.as_slice())],
                 witness,
                 prove_forms,
                 Cow::Owned(vec![wrong_evaluation]),
@@ -622,12 +679,14 @@ mod tests {
             let commitments = config
                 .receive_commitments(&mut verifier_state)
                 .expect("receive_commitments");
-            config.verify(
-                &mut verifier_state,
-                &weight_refs,
-                &[wrong_evaluation],
-                &commitments,
-            )
+            config
+                .verify(
+                    &mut verifier_state,
+                    &weight_refs,
+                    &[wrong_evaluation],
+                    &commitments,
+                )?
+                .verify(weight_refs.iter().copied())
         }));
 
         if let Ok(result) = outcome {

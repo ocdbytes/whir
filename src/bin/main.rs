@@ -258,7 +258,7 @@ where
         hash_id,
     };
 
-    let params = Config::<F>::new(&whir_params, num_variables);
+    let params = Config::<F>::new(num_variables, &whir_params);
 
     let ds = DomainSeparator::protocol(&params)
         .session(&format!("Example at {}:{}", file!(), line!()))
@@ -269,11 +269,8 @@ where
     println!("=========================================");
     println!("Whir (PCS + ZK) 🌪️");
     println!("Field: {:?} and hash: {:?}", args.field, args.hash);
-    println!("{}", params.blinded_polynomial);
-    if !params
-        .blinded_polynomial
-        .check_max_pow_bits(Bits::new(whir_params.pow_bits as f64))
-    {
+    println!("{params}");
+    if !params.check_max_pow_bits(Bits::new(whir_params.pow_bits as f64)) {
         println!("WARN: more PoW bits required than specified.");
     }
 
@@ -314,7 +311,7 @@ where
     let whir_prove_time = Instant::now();
     params.prove(
         &mut prover_state,
-        vec![Cow::Owned(vector.clone())],
+        vec![Cow::Owned(vector)],
         witness,
         prove_linear_forms,
         Cow::Borrowed(&evaluations),
@@ -348,6 +345,8 @@ where
                 &evaluations,
                 &commitments,
             )
+            .unwrap()
+            .verify(weight_dyn_refs.iter().copied())
             .unwrap();
     }
     println!(

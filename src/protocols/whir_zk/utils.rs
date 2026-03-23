@@ -68,6 +68,7 @@ pub(super) const fn phi_i_bits(
     } else {
         (phi_index - 1) * ell + rem
     };
+    assert!(start + ell <= mu, "phi_i_bits: window exceeds mu");
     let shift = mu - start - ell;
     (hypercube_idx >> shift) & ((1 << ell) - 1)
 }
@@ -100,7 +101,7 @@ pub(super) fn discrete_log_pow2<F: FftField>(target: F, gen: F, log_order: u32) 
         gen_inv_power.square_in_place();
     }
 
-    debug_assert_eq!(
+    assert_eq!(
         gen.pow([result as u64]),
         target,
         "discrete log verification failed: target not in ⟨gen⟩ of order 2^{log_order}"
@@ -153,6 +154,11 @@ pub(super) fn build_beq_tables<F: FftField>(
     let rem = dims.rem;
     let num_g_polys = dims.num_g_polys();
     let half_size = 1usize << ell;
+    assert!(
+        eq_weights.len().is_power_of_two(),
+        "eq_weights length must be a power of 2, got {}",
+        eq_weights.len()
+    );
     let num_folding_vars = eq_weights.len().trailing_zeros() as usize;
     assert!(
         num_folding_vars <= ell,
@@ -283,6 +289,11 @@ pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
     let mu = dims.mu;
     let ell = dims.ell;
     let rem = dims.rem;
+    assert!(
+        eq_weights.len().is_power_of_two(),
+        "eq_weights length must be a power of 2, got {}",
+        eq_weights.len()
+    );
     let num_folding_vars = eq_weights.len().trailing_zeros() as usize;
     let num_sub_polys = 1usize << num_folding_vars;
     let sub_poly_len = 1usize << (mu - num_folding_vars);
@@ -406,6 +417,10 @@ pub(super) fn gamma_to_f_hat_indices<F: FftField>(
     gamma_points: &[F],
     config: &super::Config<F>,
 ) -> Vec<usize> {
+    debug_assert!(
+        !config.blinded_polynomial.round_configs.is_empty(),
+        "zkWHIR 2.0 requires at least one WHIR round"
+    );
     let initial_codeword_len = config.blinded_polynomial.initial_committer.codeword_length;
     let round0_codeword_len = config.blinded_polynomial.round_configs[0]
         .irs_committer
@@ -466,6 +481,21 @@ impl<F> LambdaAccumulator<F> {
     #[must_use]
     pub(super) const fn len(&self) -> usize {
         self.z_points.len()
+    }
+
+    /// Retrieve the claim for blinding vector `vec_idx` at Lambda entry `lambda_idx`.
+    ///
+    /// Vectors `0..num_vectors` index into `m_evals`; vectors `num_vectors..` index
+    /// into `g_evals` (shifted by `num_vectors`).
+    pub(super) fn claim(&self, lambda_idx: usize, vec_idx: usize, num_vectors: usize) -> F
+    where
+        F: Copy,
+    {
+        if vec_idx < num_vectors {
+            self.m_evals[lambda_idx][vec_idx]
+        } else {
+            self.g_evals[lambda_idx][vec_idx - num_vectors]
+        }
     }
 }
 

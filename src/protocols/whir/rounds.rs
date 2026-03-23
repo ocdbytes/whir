@@ -48,22 +48,26 @@ pub struct VerifyRoundResult<F: FftField> {
     pub folding_randomness: MultilinearPoint<F>,
 }
 
+/// Result of a single prover round (rounds 1+).
+#[must_use]
+pub struct ProveRoundResult<F: FftField> {
+    pub witness: irs_commit::Witness<F, F>,
+    pub in_domain: irs_commit::Evaluations<F>,
+    pub folding_randomness: MultilinearPoint<F>,
+}
+
 /// Single prover round body for rounds 1+ of the WHIR protocol.
 ///
 /// Commits the current vector, opens the previous round's witness, accumulates
 /// STIR constraints (OOD + in-domain), and runs the round's sumcheck.
-pub fn prove_round<F, H, R>(
+fn prove_round<F, H, R>(
     round_config: &RoundConfig<F>,
     prev_round_config: &RoundConfig<F>,
     prover_state: &mut ProverState<H, R>,
     state: &mut SumcheckState<'_, F>,
     prev_witness: &irs_commit::Witness<F, F>,
     folding_randomness: &MultilinearPoint<F>,
-) -> (
-    irs_commit::Witness<F, F>,
-    irs_commit::Evaluations<F>,
-    MultilinearPoint<F>,
-)
+) -> ProveRoundResult<F>
 where
     F: FftField + Codec<[H::U]>,
     H: DuplexSpongeInterface,
@@ -104,14 +108,18 @@ where
             .prove(prover_state, state.vector, state.covector, state.the_sum);
     debug_assert_eq!(dot(state.vector, state.covector), *state.the_sum);
 
-    (new_witness, in_domain, new_folding)
+    ProveRoundResult {
+        witness: new_witness,
+        in_domain,
+        folding_randomness: new_folding,
+    }
 }
 
 /// Final prover round.
 ///
 /// Sends the (small) final folded vector directly, runs PoW, opens the last
 /// commitment, and runs the final sumcheck.
-pub fn prove_final_round<F, H, R>(
+fn prove_final_round<F, H, R>(
     final_config: &FinalRoundConfig<'_, F>,
     last_round_config: &RoundConfig<F>,
     prover_state: &mut ProverState<H, R>,
@@ -150,7 +158,7 @@ where
 ///
 /// Receives commitment, verifies PoW, opens the previous round's commitment,
 /// accumulates STIR constraints, and runs the round's sumcheck.
-pub fn verify_round<F, H>(
+fn verify_round<F, H>(
     round_config: &RoundConfig<F>,
     prev_round_config: &RoundConfig<F>,
     verifier_state: &mut VerifierState<'_, H>,
@@ -206,7 +214,7 @@ where
 /// in-domain evaluations directly, and runs the final sumcheck.
 ///
 /// Returns `(final_vector, in_domain, final_folding_randomness)`.
-pub fn verify_final_round<F, H>(
+fn verify_final_round<F, H>(
     final_config: &FinalRoundConfig<'_, F>,
     last_round_config: &RoundConfig<F>,
     verifier_state: &mut VerifierState<'_, H>,
@@ -282,7 +290,7 @@ where
 
     for (i, window) in round_configs.windows(2).enumerate() {
         let (prev_rc, rc) = (&window[0], &window[1]);
-        let (new_witness, in_domain, new_folding) = prove_round(
+        let round = prove_round(
             rc,
             prev_rc,
             prover_state,
@@ -291,11 +299,11 @@ where
             &folding_randomness,
         );
         if i == 0 {
-            first_in_domain_points.clone_from(&in_domain.points);
+            first_in_domain_points.clone_from(&round.in_domain.points);
         }
-        folding_randomness = new_folding;
+        folding_randomness = round.folding_randomness;
         round_folding_randomness.push(folding_randomness.clone());
-        prev_witness = new_witness;
+        prev_witness = round.witness;
     }
 
     let last_rc = round_configs.last().unwrap();
@@ -321,9 +329,10 @@ pub struct VerifyRemainingResult<F: FftField> {
     pub first_in_domain: irs_commit::Evaluations<F>,
     /// STIR constraints accumulated during rounds 1..N.
     pub round_constraints: Vec<(Vec<F>, Vec<UnivariateEvaluation<F>>)>,
-    /// Folding randomness from each remaining round + final.
+    /// Folding randomness from rounds 1..N (excludes the final sumcheck).
     pub round_folding_randomness: Vec<MultilinearPoint<F>>,
-    /// Folding randomness from the final sumcheck.
+    /// Folding randomness from the final sumcheck. Stored separately because
+    /// callers need it both in the evaluation point AND for the MLE check.
     pub final_sumcheck_randomness: MultilinearPoint<F>,
 }
 
@@ -384,7 +393,6 @@ where
     )?;
 
     let first_in_domain = first_in_domain.unwrap_or(final_in_domain);
-    round_folding_randomness.push(final_sumcheck_randomness.clone());
 
     Ok(VerifyRemainingResult {
         final_vector,

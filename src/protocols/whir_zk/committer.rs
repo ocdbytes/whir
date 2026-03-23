@@ -15,9 +15,9 @@ use crate::{
 #[allow(clippy::struct_field_names)]
 pub struct Witness<F: FftField> {
     /// IRS-commit witness for [[f̂]] (first WHIR instance).
-    pub(super) blinded_witness: irs_commit::Witness<F, F>,
+    pub(super) f_hat_witness: irs_commit::Witness<F, F>,
     /// IRS-commit witness for [[M]], [[ĝ₁]]..[[ĝ_ν]] (second WHIR instance).
-    pub(super) blinding_witness: irs_commit::Witness<F, F>,
+    pub(super) blinding_poly_witness: irs_commit::Witness<F, F>,
     /// f̂ᵢ = fᵢ + mskᵢ(Φ₀) for each of the n witness polynomials.
     pub(super) f_hat_polys: Vec<Vec<F>>,
     /// Per-witness masking polynomials mskᵢ (ℓ-variate, 2^ℓ coefficients).
@@ -52,10 +52,19 @@ impl<F: FftField> Config<F> {
     {
         let num_polys = polynomials.len();
         assert!(!polynomials.is_empty(), "must have at least one polynomial");
+        let expected_len = polynomials[0].len();
         assert!(
-            polynomials[0].len().is_power_of_two(),
+            expected_len.is_power_of_two(),
             "polynomial length must be a power of 2"
         );
+        for (i, poly) in polynomials.iter().enumerate() {
+            assert_eq!(
+                poly.len(),
+                expected_len,
+                "polynomials[{i}] has length {}, expected {expected_len}",
+                poly.len()
+            );
+        }
         let dims = ProtocolDims::new(self, num_polys);
         let half_size = 1usize << dims.ell;
         let shift = dims.mu - dims.ell; // Φ₀ extracts the top ℓ bits: Φ₀(b) = b >> shift
@@ -79,7 +88,7 @@ impl<F: FftField> Config<F> {
 
         // Step 1b: Commit [[f̂]] via first WHIR instance.
         let f_hat_refs: Vec<&[F]> = f_hat_polys.iter().map(|p| p.as_slice()).collect();
-        let blinded_witness = self.blinded_polynomial.commit(prover_state, &f_hat_refs);
+        let f_hat_witness = self.blinded_polynomial.commit(prover_state, &f_hat_refs);
 
         // Step 1c: Sample ν + 1 random ℓ-variate blinding polynomials ĝ₀..ĝ_ν.
         let num_g_polys = dims.num_g_polys();
@@ -114,13 +123,13 @@ impl<F: FftField> Config<F> {
         }
         let blinding_refs: Vec<&[F]> = blinding_vectors.iter().map(|v| v.as_slice()).collect();
 
-        let blinding_witness = self
+        let blinding_poly_witness = self
             .blinding_polynomial
             .commit(prover_state, &blinding_refs);
 
         Witness {
-            blinded_witness,
-            blinding_witness,
+            f_hat_witness,
+            blinding_poly_witness,
             f_hat_polys,
             masking_polys,
             g_polys,

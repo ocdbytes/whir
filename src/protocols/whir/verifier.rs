@@ -192,6 +192,7 @@ where
 
             round_constraints.extend(remaining.round_constraints);
             round_folding_randomness.extend(remaining.round_folding_randomness);
+            round_folding_randomness.push(remaining.final_sumcheck_randomness.clone());
             (remaining.final_vector, remaining.final_sumcheck_randomness)
         };
 
