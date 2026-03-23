@@ -30,7 +30,7 @@ use crate::{
 };
 
 /// Commitments for blinded and blinding polynomials.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commitments<F: FftField> {
     pub blinded_commitment: whir::Commitment<F>,
     pub blinding_commitment: whir::Commitment<F>,

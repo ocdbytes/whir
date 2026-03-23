@@ -10,7 +10,7 @@ use tracing::instrument;
 use super::{
     utils::{
         build_beq_tables, build_fold_args, build_weight_covectors, compute_eq_weights,
-        compute_rs_fold_blinding_coeffs, gamma_to_f_hat_indices, phi_i_bits, ProtocolDims,
+        compute_rs_fold_blinding_coeffs, gamma_to_f_hat_indices, ProtocolDims,
     },
     Config,
 };
@@ -122,9 +122,6 @@ where
         let num_vectors = self.dims.num_vectors;
         let num_forms = linear_forms.len();
         let size = self.dims.size;
-        let mu = self.dims.mu;
-        let ell = self.dims.ell;
-        let rem = self.dims.rem;
 
         // =====================================================================
         // Step 2: Blinding Polynomial Claim Generation
@@ -139,7 +136,7 @@ where
         let compute_g = |hypercube_idx: usize| -> F {
             let mut sum = F::ZERO;
             for (i, &beta_pow) in beta_powers.iter().enumerate() {
-                let idx = phi_i_bits(hypercube_idx, i, mu, ell, rem);
+                let idx = self.dims.phi_i_bits(hypercube_idx, i);
                 sum += beta_pow * g_polys[i][idx];
             }
             sum

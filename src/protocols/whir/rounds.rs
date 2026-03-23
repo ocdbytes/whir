@@ -290,7 +290,11 @@ where
 
     for (i, window) in round_configs.windows(2).enumerate() {
         let (prev_rc, rc) = (&window[0], &window[1]);
-        let round = prove_round(
+        let ProveRoundResult {
+            witness,
+            in_domain,
+            folding_randomness: new_folding,
+        } = prove_round(
             rc,
             prev_rc,
             prover_state,
@@ -299,11 +303,11 @@ where
             &folding_randomness,
         );
         if i == 0 {
-            first_in_domain_points.clone_from(&round.in_domain.points);
+            first_in_domain_points = in_domain.points;
         }
-        folding_randomness = round.folding_randomness;
-        round_folding_randomness.push(folding_randomness.clone());
-        prev_witness = round.witness;
+        round_folding_randomness.push(new_folding.clone());
+        folding_randomness = new_folding;
+        prev_witness = witness;
     }
 
     let last_rc = round_configs.last().unwrap();
@@ -377,8 +381,9 @@ where
             first_in_domain = Some(result.in_domain);
         }
         round_constraints.push((result.stir_rlc_coeffs, result.stir_challenges));
-        folding_randomness = result.folding_randomness.clone();
-        round_folding_randomness.push(result.folding_randomness);
+        let new_folding = result.folding_randomness;
+        round_folding_randomness.push(new_folding.clone());
+        folding_randomness = new_folding;
         prev_commitment = result.commitment;
     }
 
