@@ -17,4 +17,3 @@ pub mod proof_of_work;
 pub mod sumcheck;
 pub mod whir;
 pub mod whir_zk;
-pub mod whir_zk_2;

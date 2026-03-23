@@ -147,13 +147,7 @@ where
         let rate = message_length as f64 / codeword_length as f64;
 
         // Pick in- and out-of-domain samples.
-        // η = slack to Johnson bound. We pick η = √ρ / 20.
-        // TODO: Optimize picking η.
-        let johnson_slack = if unique_decoding {
-            0.0
-        } else {
-            rate.sqrt() / 20.
-        };
+        let johnson_slack = johnson_slack(unique_decoding, rate);
         #[allow(clippy::cast_sign_loss)]
         let out_domain_samples = if unique_decoding {
             0
@@ -639,6 +633,17 @@ where
     }
 }
 
+/// Compute the Johnson bound slack η = √ρ / 20.
+///
+/// Returns 0 for unique decoding.
+pub(crate) fn johnson_slack(unique_decoding: bool, rate: f64) -> f64 {
+    if unique_decoding {
+        0.0
+    } else {
+        rate.sqrt() / 20.
+    }
+}
+
 /// Return the number of in-domain queries.
 ///
 /// This is used by [`whir_zk`].
@@ -649,21 +654,14 @@ pub(crate) fn num_in_domain_queries(
     security_target: f64,
     rate: f64,
 ) -> usize {
-    // Pick in- and out-of-domain samples.
-    // η = slack to Johnson bound. We pick η = √ρ / 20.
-    // TODO: Optimize picking η.
-    let johnson_slack = if unique_decoding {
-        0.0
-    } else {
-        rate.sqrt() / 20.
-    };
+    let slack = johnson_slack(unique_decoding, rate);
     // Query error is (1 - δ)^q, so we compute 1 - δ
     let per_sample = if unique_decoding {
         // Unique decoding bound: δ = (1 - ρ) / 2
         f64::midpoint(1., rate)
     } else {
         // Johnson bound: δ = 1 - √ρ - η
-        rate.sqrt() + johnson_slack
+        rate.sqrt() + slack
     };
     (security_target / (-per_sample.log2())).ceil() as usize
 }

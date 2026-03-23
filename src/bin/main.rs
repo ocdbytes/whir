@@ -258,7 +258,7 @@ where
         hash_id,
     };
 
-    let params = Config::<F>::new(1 << num_variables, &whir_params, 1);
+    let params = Config::<F>::new(&whir_params, num_variables);
 
     let ds = DomainSeparator::protocol(&params)
         .session(&format!("Example at {}:{}", file!(), line!()))
@@ -269,9 +269,9 @@ where
     println!("=========================================");
     println!("Whir (PCS + ZK) 🌪️");
     println!("Field: {:?} and hash: {:?}", args.field, args.hash);
-    println!("{params}");
+    println!("{}", params.blinded_polynomial);
     if !params
-        .blinded_commitment
+        .blinded_polynomial
         .check_max_pow_bits(Bits::new(whir_params.pow_bits as f64))
     {
         println!("WARN: more PoW bits required than specified.");
@@ -281,7 +281,7 @@ where
     let vector = (0..num_coeffs).map(F::from).collect::<Vec<_>>();
 
     // Allocate constraints
-    let mut linear_forms: Vec<Box<dyn Evaluate<Basefield<F>>>> = Vec::new();
+    let mut linear_forms: Vec<Box<dyn Evaluate<Identity<F>>>> = Vec::new();
     let mut prove_linear_forms: Vec<Box<dyn LinearForm<F>>> = Vec::new();
     let mut evaluations = Vec::new();
 
@@ -312,9 +312,9 @@ where
     let whir_commit_time = whir_commit_time.elapsed();
 
     let whir_prove_time = Instant::now();
-    let _ = params.prove(
+    params.prove(
         &mut prover_state,
-        vec![Cow::Borrowed(&vector)],
+        vec![Cow::Owned(vector.clone())],
         witness,
         prove_linear_forms,
         Cow::Borrowed(&evaluations),
@@ -340,13 +340,13 @@ where
     let whir_verifier_time = Instant::now();
     for _ in 0..reps {
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
-        let commitment = params.receive_commitments(&mut verifier_state, 1).unwrap();
+        let commitments = params.receive_commitments(&mut verifier_state).unwrap();
         params
             .verify(
                 &mut verifier_state,
                 &weight_dyn_refs,
                 &evaluations,
-                &commitment,
+                &commitments,
             )
             .unwrap();
     }
