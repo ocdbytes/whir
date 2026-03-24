@@ -42,10 +42,10 @@ impl<F: FftField> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vector: &[F],
+        mut vector: Vec<F>,
         witness: &irs_commit::Witness<F>,
         mut covector: Vec<F>,
-        sum: F,
+        mut sum: F,
     ) -> (Vec<F>, F)
     where
         H: DuplexSpongeInterface,
@@ -57,14 +57,21 @@ impl<F: FftField> Config<F> {
         Hash: ProverMessage<[H::U]>,
         Standard: Distribution<F>,
     {
-        debug_assert_eq!(dot(vector, &covector), sum);
+        debug_assert_eq!(dot(&vector, &covector), sum);
         if self.size() == 0 {
             return (Vec::new(), F::ZERO);
         }
 
-        // Even more trivial non-zk protocol
+        // Even more trivial non-zk protocol: send f an r directly.
         if !self.masked {
-            unimplemented!()
+            prover_state.prover_messages(&vector);
+            prover_state.prover_messages(&witness.masks);
+            let _ = self.commit.open(prover_state, &[witness]);
+            let point = self
+                .sumcheck
+                .prove(prover_state, &mut vector, &mut covector, &mut sum);
+            assert!(!vector[0].is_zero(), "Proof failed");
+            return (point.0, covector[0]);
         }
 
         // Create masking vector.
@@ -79,6 +86,7 @@ impl<F: FftField> Config<F> {
 
         // RLC the mask with the vector
         let mask_rlc = prover_state.verifier_message::<F>();
+        assert!(!mask_rlc.is_zero(), "Proof failed");
         let mut masked_vector = scalar_mul_add_new(&mask, mask_rlc, &vector);
         prover_state.prover_messages(&masked_vector);
 
@@ -112,7 +120,7 @@ impl<F: FftField> Config<F> {
         &self,
         verifier_state: &mut VerifierState<H>,
         commitment: &irs_commit::Commitment<F>,
-        sum: F,
+        mut sum: F,
     ) -> VerificationResult<(Vec<F>, F)>
     where
         H: DuplexSpongeInterface,
@@ -125,9 +133,31 @@ impl<F: FftField> Config<F> {
         if self.size() == 0 {
             return Ok((Vec::new(), F::ZERO));
         }
+
+        // Unmasked protocol
+        if !self.masked {
+            let vector = verifier_state.prover_messages_vec(self.commit.vector_size)?;
+            let masks = verifier_state.prover_messages_vec(self.commit.mask_length)?;
+            let evals = self.commit.verify(verifier_state, &[&commitment])?;
+            let point = self.sumcheck.verify(verifier_state, &mut sum)?;
+
+            for (&point, value) in zip_strict(&evals.points, evals.values(&[F::ONE])) {
+                // We expected `f(x) + x^l · g(x)` where l = deg(f) + 1, f is the message and g the mask.
+                let expected = univariate_evaluate(&vector, point)
+                    + point.pow([self.commit.message_length() as u64])
+                        * univariate_evaluate(&masks, point);
+                verify!(value == expected);
+            }
+            let mle = multilinear_extend(&vector, &point.0);
+            verify!(!mle.is_zero());
+            let linear_mle = sum / mle;
+            return Ok((point.0, linear_mle));
+        }
+
         let mask_commitment = self.commit.receive_commitment(verifier_state)?;
         let mask_sum: F = verifier_state.prover_message()?;
         let mask_rlc: F = verifier_state.verifier_message();
+        verify!(!mask_rlc.is_zero());
         let masked_vector: Vec<F> = verifier_state.prover_messages_vec(self.commit.vector_size)?;
         let masked_masks: Vec<F> = verifier_state.prover_messages_vec(self.commit.mask_length)?;
 
@@ -162,7 +192,7 @@ impl<F: FftField> Config<F> {
 #[cfg(test)]
 mod tests {
     use ark_std::rand::{rngs::StdRng, SeedableRng};
-    use proptest::{prelude::Strategy, proptest};
+    use proptest::{bool, prelude::Strategy, proptest};
     #[cfg(feature = "tracing")]
     use tracing::instrument;
 
@@ -175,7 +205,7 @@ mod tests {
         pub fn arbitrary(size: usize, mask_length: usize) -> impl Strategy<Value = Self> {
             let commit =
                 irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1);
-            commit.prop_map(move |commit| Self {
+            (commit, bool::weighted(0.8)).prop_map(move |(commit, masked)| Self {
                 commit: irs_commit::Config {
                     out_domain_samples: 0,
                     ..commit
@@ -186,7 +216,7 @@ mod tests {
                     round_pow: proof_of_work::Config::none(),
                     num_rounds: size.next_power_of_two().trailing_zeros() as usize,
                 },
-                masked: true,
+                masked,
             })
         }
     }
@@ -210,8 +240,13 @@ mod tests {
         // Prover
         let mut prover_state = ProverState::new_std(&ds);
         let witness = config.commit.commit(&mut prover_state, &[&vector]);
-        let (point, value) =
-            config.prove(&mut prover_state, &vector, &witness, covector.clone(), sum);
+        let (point, value) = config.prove(
+            &mut prover_state,
+            vector.clone(),
+            &witness,
+            covector.clone(),
+            sum,
+        );
         assert_eq!(multilinear_extend(&covector, &point), value);
         let proof = prover_state.proof();
 
