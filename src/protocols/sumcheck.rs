@@ -174,7 +174,6 @@ mod tests {
     impl<F: Field> Config<F> {
         pub fn arbitrary() -> impl Strategy<Value = Self> {
             (0_usize..(1 << 12), 0_usize..12).prop_map(|(initial_size, num_rounds)| {
-                dbg!(initial_size, num_rounds);
                 let num_rounds =
                     num_rounds.min(initial_size.next_power_of_two().trailing_zeros() as usize);
                 Self {

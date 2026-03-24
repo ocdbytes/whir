@@ -57,6 +57,10 @@ impl<F: FftField> Config<F> {
         Hash: ProverMessage<[H::U]>,
         Standard: Distribution<F>,
     {
+        assert_eq!(self.commit.interleaving_depth, 1);
+        assert_eq!(self.commit.num_vectors, 1);
+        assert_eq!(self.commit.vector_size, self.sumcheck.initial_size);
+        assert_eq!(self.sumcheck.final_size(), 1);
         debug_assert_eq!(dot(&vector, &covector), sum);
         if self.size() == 0 {
             return (Vec::new(), F::ZERO);
@@ -130,6 +134,10 @@ impl<F: FftField> Config<F> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
+        assert_eq!(self.commit.interleaving_depth, 1);
+        assert_eq!(self.commit.num_vectors, 1);
+        assert_eq!(self.commit.vector_size, self.sumcheck.initial_size);
+        assert_eq!(self.sumcheck.final_size(), 1);
         if self.size() == 0 {
             return Ok((Vec::new(), F::ZERO));
         }
@@ -137,7 +145,8 @@ impl<F: FftField> Config<F> {
         // Unmasked protocol
         if !self.masked {
             let vector = verifier_state.prover_messages_vec(self.commit.vector_size)?;
-            let masks = verifier_state.prover_messages_vec(self.commit.mask_length)?;
+            let masks = verifier_state
+                .prover_messages_vec(self.commit.mask_length * self.commit.num_messages())?;
             let evals = self.commit.verify(verifier_state, &[&commitment])?;
             let point = self.sumcheck.verify(verifier_state, &mut sum)?;
 
