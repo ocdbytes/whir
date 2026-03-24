@@ -1,6 +1,6 @@
 //! Base Case Linear Opening Protocol
 //!
-//! It is ZK but it is not Succinct.
+//! It support honest verifier zero-knowledge (HVZK), but is not succinct.
 //!
 //! <https://eprint.iacr.org/2026/391.pdf> § 7.
 
@@ -29,6 +29,9 @@ use crate::{
 pub struct Config<F: FftField> {
     pub commit: irs_commit::Config<Identity<F>>,
     pub sumcheck: sumcheck::Config<F>,
+
+    /// Whether to mask the vectors, whichs adds HVZK.
+    pub masked: bool,
 }
 
 impl<F: FftField> Config<F> {
@@ -59,6 +62,11 @@ impl<F: FftField> Config<F> {
             return (Vec::new(), F::ZERO);
         }
 
+        // Even more trivial non-zk protocol
+        if !self.masked {
+            unimplemented!()
+        }
+
         // Create masking vector.
         let mask = random_vector(prover_state.rng(), vector.len());
 
@@ -71,18 +79,18 @@ impl<F: FftField> Config<F> {
 
         // RLC the mask with the vector
         let mask_rlc = prover_state.verifier_message::<F>();
-        let mut masked_vector = scalar_mul_add_new(vector, mask_rlc, &mask);
+        let mut masked_vector = scalar_mul_add_new(&mask, mask_rlc, &vector);
         prover_state.prover_messages(&masked_vector);
 
         // Send combined IRS randomness. (r^* in paper)
-        let masked_masks = scalar_mul_add_new(&witness.masks, mask_rlc, &mask_witness.masks);
+        let masked_masks = scalar_mul_add_new(&mask_witness.masks, mask_rlc, &witness.masks);
         prover_state.prover_messages(&masked_masks);
 
         // Open the commitment and mask simultaneously.
-        let _ = self.commit.open(prover_state, &[witness, &mask_witness]);
+        let _ = self.commit.open(prover_state, &[&mask_witness, witness]);
 
         // Run sumcheck to reduce linear form claim
-        let mut masked_sum = sum + mask_rlc * mask_sum;
+        let mut masked_sum = mask_sum + mask_rlc * sum;
         let point = self.sumcheck.prove(
             prover_state,
             &mut masked_vector,
@@ -126,7 +134,7 @@ impl<F: FftField> Config<F> {
         // Open the commitment and mask simultaneously.
         let evals = self
             .commit
-            .verify(verifier_state, &[commitment, &mask_commitment])?;
+            .verify(verifier_state, &[&mask_commitment, commitment])?;
 
         // Spot check evaluations.
         for (&point, value) in zip_strict(&evals.points, evals.values(&[F::ONE, mask_rlc])) {
@@ -138,7 +146,7 @@ impl<F: FftField> Config<F> {
         }
 
         // Sumcheck on masked inner product
-        let mut masked_sum = sum + mask_rlc * mask_sum;
+        let mut masked_sum = mask_sum + mask_rlc * sum;
         let point = self.sumcheck.verify(verifier_state, &mut masked_sum)?;
 
         // Compute implied MLE of the linear form
@@ -178,6 +186,7 @@ mod tests {
                     round_pow: proof_of_work::Config::none(),
                     num_rounds: size.next_power_of_two().trailing_zeros() as usize,
                 },
+                masked: true,
             })
         }
     }
