@@ -147,7 +147,7 @@ impl<F: FftField> Config<F> {
             let vector = verifier_state.prover_messages_vec(self.commit.vector_size)?;
             let masks = verifier_state
                 .prover_messages_vec(self.commit.mask_length * self.commit.num_messages())?;
-            let evals = self.commit.verify(verifier_state, &[&commitment])?;
+            let evals = self.commit.verify(verifier_state, &[commitment])?;
             let point = self.sumcheck.verify(verifier_state, &mut sum)?;
 
             for (&point, value) in zip_strict(&evals.points, evals.values(&[F::ONE])) {
