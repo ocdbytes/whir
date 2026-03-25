@@ -1,6 +1,6 @@
 use std::{any::Any, borrow::Cow, mem};
 
-use ark_ff::{AdditiveGroup, FftField, Field};
+use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -25,19 +25,12 @@ use crate::{
     utils::zip_strict,
 };
 
-enum RoundWitness<'a, F: FftField, M: Embedding<Target = F>>
-where
-    M::Source: FftField,
-{
+enum RoundWitness<'a, F: Field, M: Embedding<Target = F>> {
     Initial(Vec<Cow<'a, irs_commit::Witness<M::Source, F>>>),
     Round(irs_commit::Witness<F, F>),
 }
 
-impl<M: Embedding> Config<M>
-where
-    M::Source: FftField,
-    M::Target: FftField,
-{
+impl<M: Embedding> Config<M> {
     /// Prove a WHIR opening.
     ///
     /// * `prover_state` the mutable transcript to write the proof to.

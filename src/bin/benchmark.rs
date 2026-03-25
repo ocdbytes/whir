@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ark_ff::FftField;
 use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use clap::Parser;
 use serde::Serialize;
@@ -109,8 +108,7 @@ fn run_whir<M>(args: &Args)
 where
     Standard: Distribution<M::Source> + Distribution<M::Target>,
     M: Embedding + Default,
-    M::Source: FftField,
-    M::Target: FftField + Codec,
+    M::Target: Codec,
 {
     let security_level = args.security_level;
     let pow_bits = args.pow_bits;

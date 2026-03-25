@@ -1,6 +1,5 @@
 use std::{borrow::Cow, time::Instant};
 
-use ark_ff::FftField;
 use ark_std::rand::distributions::{Distribution, Standard};
 use clap::Parser;
 use whir::{
@@ -96,8 +95,7 @@ fn run_whir<M>(args: &Args)
 where
     Standard: Distribution<M::Source> + Distribution<M::Target>,
     M: Embedding + Default,
-    M::Source: FftField,
-    M::Target: FftField + Codec,
+    M::Target: Codec,
 {
     use whir::protocols::whir::Config;
 
@@ -232,7 +230,7 @@ where
 fn run_whir_zk<F>(args: &Args)
 where
     Standard: Distribution<F>,
-    F: FftField + Codec,
+    F: Field + Codec,
 {
     use whir::protocols::whir_zk::Config;
 

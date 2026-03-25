@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use ark_ff::FftField;
+use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -42,7 +42,7 @@ use crate::{
     feature = "tracing",
     instrument(skip_all, name = "evaluate_gamma_block")
 )]
-fn evaluate_gamma_block<F: FftField>(
+fn evaluate_gamma_block<F: Field>(
     blinding_polynomials: &[BlindingPolynomials<F>],
     h_gammas: &[F],
     masking_challenge: F,
@@ -194,7 +194,7 @@ fn evaluate_gamma_block<F: FftField>(
     (eval_results, beq_weight_accum)
 }
 
-impl<F: FftField> Config<F> {
+impl<F: Field> Config<F> {
     /// Run the zkWHIR prover: prove evaluation claims on blinded polynomials.
     ///
     /// * `vectors` — original (unmasked) coefficient vectors.

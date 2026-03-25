@@ -358,7 +358,7 @@ impl<F: Field> NttEngine<F> {
     }
 }
 
-impl<F: FftField> ReedSolomon<F> for NttEngine<F> {
+impl<F: Field> ReedSolomon<F> for NttEngine<F> {
     fn next_order(&self, size: usize) -> Option<usize> {
         match self.divisors.binary_search(&size) {
             Ok(index) | Err(index) => self.divisors.get(index).copied(),

@@ -6,7 +6,7 @@ mod verifier;
 
 use std::fmt::Debug;
 
-use ark_ff::{FftField, Field};
+use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
@@ -27,13 +27,8 @@ use crate::{
 };
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
-#[serde(bound = "M: Embedding, M::Source: FftField, M::Target: FftField")]
-pub struct Config<M>
-where
-    M: Embedding,
-    M::Source: FftField,
-    M::Target: FftField,
-{
+#[serde(bound = "M: Embedding")]
+pub struct Config<M: Embedding> {
     pub initial_committer: irs_commit::Config<M>,
     pub initial_sumcheck: sumcheck::Config<M::Target>,
     pub initial_skip_pow: proof_of_work::Config,
@@ -43,17 +38,14 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "F: FftField")]
-pub struct RoundConfig<F>
-where
-    F: FftField,
-{
+#[serde(bound = "F: Field")]
+pub struct RoundConfig<F: Field> {
     pub irs_committer: irs_commit::Config<Identity<F>>,
     pub sumcheck: sumcheck::Config<F>,
     pub pow: proof_of_work::Config,
 }
 
-pub type Witness<F: FftField, M: Embedding<Target = F>> = irs_commit::Witness<M::Source, F>;
+pub type Witness<F: Field, M: Embedding<Target = F>> = irs_commit::Witness<M::Source, F>;
 pub type Commitment<F: Field> = irs_commit::Commitment<F>;
 
 #[must_use = "The final claim must be checked if there where any linear forms."]
@@ -81,12 +73,7 @@ impl<F: Field> FinalClaim<F> {
     }
 }
 
-impl<M> Config<M>
-where
-    M: Embedding,
-    M::Source: FftField,
-    M::Target: FftField,
-{
+impl<M: Embedding> Config<M> {
     /// Commit to one or more vectors.
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(size = vectors.first().unwrap().len())))]
     pub fn commit<H, R>(

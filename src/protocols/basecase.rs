@@ -4,7 +4,7 @@
 //!
 //! <https://eprint.iacr.org/2026/391.pdf> § 7.
 
-use ark_ff::FftField;
+use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use spongefish::{Decoding, VerificationResult};
@@ -26,7 +26,7 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct Config<F: FftField> {
+pub struct Config<F: Field> {
     pub commit: irs_commit::Config<Identity<F>>,
     pub sumcheck: sumcheck::Config<F>,
 
@@ -34,7 +34,7 @@ pub struct Config<F: FftField> {
     pub masked: bool,
 }
 
-impl<F: FftField> Config<F> {
+impl<F: Field> Config<F> {
     pub const fn size(&self) -> usize {
         self.sumcheck.initial_size
     }
@@ -210,7 +210,7 @@ mod tests {
         algebra::fields, protocols::proof_of_work, transcript::DomainSeparator, type_info::Type,
     };
 
-    impl<F: FftField> Config<F> {
+    impl<F: Field> Config<F> {
         pub fn arbitrary(size: usize, mask_length: usize) -> impl Strategy<Value = Self> {
             let commit =
                 irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1);
@@ -233,7 +233,7 @@ mod tests {
     #[cfg_attr(feature = "tracing", instrument)]
     fn test_config<F>(seed: u64, config: &Config<F>)
     where
-        F: FftField + Codec,
+        F: Field + Codec,
         Standard: Distribution<F>,
     {
         // Pseudo-random Instance
@@ -273,7 +273,7 @@ mod tests {
         verifier_state.check_eof().unwrap();
     }
 
-    fn test<F: FftField + Codec>()
+    fn test<F: Field + Codec>()
     where
         Standard: Distribution<F>,
     {

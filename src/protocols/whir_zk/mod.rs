@@ -6,7 +6,6 @@ mod verifier;
 
 use std::fmt::Display;
 
-use ark_ff::FftField;
 use serde::{Deserialize, Serialize};
 
 pub use self::committer::{Commitment, Witness};
@@ -35,7 +34,7 @@ pub struct BlindingSizePolicy {
 }
 
 impl BlindingSizePolicy {
-    pub fn from_whir_params<F: FftField>(main_whir_params: &ProtocolParameters) -> Self {
+    pub fn from_whir_params<F: Field>(main_whir_params: &ProtocolParameters) -> Self {
         // TODO: Compute these in a cleaner way?
 
         let protocol_security_level_main = main_whir_params
@@ -74,7 +73,7 @@ pub struct Config<F: FftField> {
     pub blinding_commitment: whir::Config<Identity<F>>,
 }
 
-impl<F: FftField> Config<F> {
+impl<F: Field> Config<F> {
     /// Build a zkWHIR config from the given WHIR parameters.
     pub fn new(size: usize, main_whir_params: &ProtocolParameters, num_polynomials: usize) -> Self {
         let size_policy = BlindingSizePolicy::from_whir_params::<F>(main_whir_params);
@@ -230,7 +229,7 @@ impl<F: FftField> Config<F> {
     }
 }
 
-impl<F: FftField> Display for Config<F> {
+impl<F: Field> Display for Config<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "zkWHIR config: witness and blinding commitments")?;
         writeln!(f, "Witness-side:")?;

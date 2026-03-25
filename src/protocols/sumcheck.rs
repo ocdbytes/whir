@@ -91,7 +91,7 @@ impl<F: Field> Config<F> {
             res.push(folding_randomness);
             *sum = (c2 * folding_randomness + c1) * folding_randomness + c0;
 
-            // Inner rounds
+            // Inner rounds, starting with the fold from the previous round.
             for _ in 1..self.num_rounds {
                 // Fold and compute sumcheck polynomial in one pass.
                 let (c0, c2) = fold_and_compute_polynomial(a, b, folding_randomness);
