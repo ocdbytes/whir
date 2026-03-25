@@ -7,8 +7,9 @@ use crate::{
     algebra::{
         dot,
         embedding::{Embedding, Identity},
+        eq_weights,
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
-        tensor_product, MultilinearPoint,
+        tensor_product,
     },
     hash::Hash,
     protocols::{geometric_challenge::geometric_challenge, irs_commit, whir::FinalClaim},
@@ -127,7 +128,7 @@ where
             let folding_randomness =
                 verifier_state.verifier_message_vec(self.initial_sumcheck.num_rounds);
             self.initial_skip_pow.verify(verifier_state)?;
-            MultilinearPoint(folding_randomness)
+            folding_randomness
         } else {
             self.initial_sumcheck.verify(verifier_state, &mut the_sum)?
         };
@@ -173,7 +174,7 @@ where
                 .values(&[M::Target::ONE])
                 .chain(in_domain.values(&tensor_product(
                     &poly_rlc,
-                    &round_folding_randomness.last().unwrap().eq_weights(),
+                    &eq_weights(round_folding_randomness.last().unwrap()),
                 )))
                 .collect::<Vec<_>>();
             let constraint_rlc_coeffs =
@@ -217,7 +218,7 @@ where
             in_domain.evaluators(final_vector.len()),
             in_domain.values(&tensor_product(
                 &poly_rlc,
-                &round_folding_randomness.last().unwrap().eq_weights(),
+                &eq_weights(round_folding_randomness.last().unwrap()),
             )),
         ) {
             verify!(weights.evaluate(&Identity::<M::Target>::new(), &final_vector) == evals);
@@ -230,11 +231,11 @@ where
         // Compute folding randomness across all rounds
         let evaluation_point = round_folding_randomness
             .into_iter()
-            .flat_map(|poly| poly.0.into_iter())
+            .flat_map(|poly| poly.into_iter())
             .collect::<Vec<_>>();
 
         // Compute the claimed rlc of the linear form mles from the sumcheck invariant.
-        let poly_eval = MultilinearExtension::new(final_sumcheck_randomness.0)
+        let poly_eval = MultilinearExtension::new(final_sumcheck_randomness)
             .evaluate(&Identity::new(), &final_vector);
         let mut linear_form_rlc = the_sum / poly_eval;
 

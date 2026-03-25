@@ -10,11 +10,11 @@ use crate::{
     algebra::{
         dot,
         embedding::Embedding,
-        lift,
+        eq_weights, lift,
         linear_form::{Covector, Evaluate, LinearForm, UnivariateEvaluation},
         mixed_scalar_mul_add,
         sumcheck::fold,
-        tensor_product, MultilinearPoint,
+        tensor_product,
     },
     hash::Hash,
     protocols::{geometric_challenge::geometric_challenge, irs_commit, whir::FinalClaim},
@@ -217,9 +217,9 @@ where
             }
             // Covector must be all zeros.
             covector = vec![M::Target::ZERO; self.initial_sumcheck.final_size()];
-            MultilinearPoint(folding_randomness)
+            folding_randomness
         };
-        let mut evaluation_point = folding_randomness.0.clone();
+        let mut evaluation_point = folding_randomness.clone();
 
         debug_assert_eq!(dot(&vector, &covector), the_sum);
 
@@ -258,7 +258,7 @@ where
                 .values(&[M::Target::ONE])
                 .chain(in_domain.values(&tensor_product(
                     &vector_rlc_coeffs,
-                    &folding_randomness.eq_weights(),
+                    &eq_weights(&folding_randomness),
                 )))
                 .collect::<Vec<_>>();
             let stir_rlc_coeffs = geometric_challenge(prover_state, stir_challenges.len());
@@ -276,7 +276,7 @@ where
                     .sumcheck
                     .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
 
-            evaluation_point.extend(folding_randomness.0.iter().copied());
+            evaluation_point.extend(folding_randomness.iter().copied());
             debug_assert_eq!(dot(&vector, &covector), the_sum);
 
             prev_witness = RoundWitness::Round(new_witness);
@@ -310,7 +310,7 @@ where
         let final_folding_randomness =
             self.final_sumcheck
                 .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
-        evaluation_point.extend(final_folding_randomness.0.iter().copied());
+        evaluation_point.extend(final_folding_randomness.iter().copied());
 
         FinalClaim {
             evaluation_point,

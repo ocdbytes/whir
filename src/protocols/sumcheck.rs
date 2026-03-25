@@ -12,7 +12,6 @@ use crate::{
     algebra::{
         dot,
         sumcheck::{compute_sumcheck_polynomial, fold, fold_and_compute_polynomial},
-        MultilinearPoint,
     },
     protocols::proof_of_work,
     transcript::{
@@ -63,7 +62,7 @@ impl<F: Field> Config<F> {
         a: &mut Vec<F>,
         b: &mut Vec<F>,
         sum: &mut F,
-    ) -> MultilinearPoint<F>
+    ) -> Vec<F>
     where
         H: DuplexSpongeInterface,
         R: CryptoRng + RngCore,
@@ -111,7 +110,7 @@ impl<F: Field> Config<F> {
             fold(b, folding_randomness);
         }
 
-        MultilinearPoint(res)
+        res
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
@@ -119,7 +118,7 @@ impl<F: Field> Config<F> {
         &self,
         verifier_state: &mut VerifierState<H>,
         sum: &mut F,
-    ) -> VerificationResult<MultilinearPoint<F>>
+    ) -> VerificationResult<Vec<F>>
     where
         H: DuplexSpongeInterface,
         F: Codec<[H::U]>,
@@ -147,7 +146,7 @@ impl<F: Field> Config<F> {
             *sum = (c2 * folding_randomness + c1) * folding_randomness + c0;
         }
 
-        Ok(MultilinearPoint(res))
+        Ok(res)
     }
 }
 
@@ -223,8 +222,8 @@ mod tests {
         assert_eq!(covector.len(), config.final_size());
         assert_eq!(dot(&vector, &covector), sum);
         if config.final_size() == 1 {
-            assert_eq!(multilinear_extend(&initial_vector, &point.0), vector[0]);
-            assert_eq!(multilinear_extend(&initial_covector, &point.0), covector[0]);
+            assert_eq!(multilinear_extend(&initial_vector, &point), vector[0]);
+            assert_eq!(multilinear_extend(&initial_covector, &point), covector[0]);
         } else {
             // TODO: Check correct folding.
         }

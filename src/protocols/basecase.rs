@@ -75,7 +75,7 @@ impl<F: FftField> Config<F> {
                 .sumcheck
                 .prove(prover_state, &mut vector, &mut covector, &mut sum);
             assert!(!vector[0].is_zero(), "Proof failed");
-            return (point.0, covector[0]);
+            return (point, covector[0]);
         }
 
         // Create masking vector.
@@ -117,7 +117,7 @@ impl<F: FftField> Config<F> {
         assert!(!masked_vector[0].is_zero(), "Proof failed");
 
         // Return evaluation point and value of the covector.
-        (point.0, covector[0])
+        (point, covector[0])
     }
 
     pub fn verify<H>(
@@ -157,10 +157,10 @@ impl<F: FftField> Config<F> {
                         * univariate_evaluate(&masks, point);
                 verify!(value == expected);
             }
-            let mle = multilinear_extend(&vector, &point.0);
+            let mle = multilinear_extend(&vector, &point);
             verify!(!mle.is_zero());
             let linear_mle = sum / mle;
-            return Ok((point.0, linear_mle));
+            return Ok((point, linear_mle));
         }
 
         let mask_commitment = self.commit.receive_commitment(verifier_state)?;
@@ -190,11 +190,11 @@ impl<F: FftField> Config<F> {
 
         // Compute implied MLE of the linear form
         // f*(r) · l(r) = sum  =>  l(r) = sum / f*(r)
-        let masked_mle = multilinear_extend(&masked_vector, &point.0);
+        let masked_mle = multilinear_extend(&masked_vector, &point);
         verify!(!masked_mle.is_zero());
         let linear_mle = masked_sum / masked_mle;
 
-        Ok((point.0, linear_mle))
+        Ok((point, linear_mle))
     }
 }
 

@@ -150,6 +150,13 @@ pub fn mixed_multilinear_extend<M: Embedding>(
     eval_partial(embedding, evals, point)
 }
 
+/// Computes eq(points, p) on the hypercube for all p ∈ {0,1}^k.
+pub fn eq_weights<F: Field>(point: &[F]) -> Vec<F> {
+    let mut result = vec![F::ZERO; 1 << point.len()];
+    eval_eq(&mut result, point, F::ONE);
+    result
+}
+
 /// Accumulates a scaled evaluation of the equality function.
 ///
 /// Given an evaluation point `point`, the function computes
