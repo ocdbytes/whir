@@ -2,14 +2,12 @@ pub mod embedding;
 pub mod fields;
 pub mod linear_form;
 mod multilinear;
-mod multilinear_point;
 pub mod ntt;
 pub mod sumcheck;
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, Rng};
 pub use multilinear::{eq_weights, eval_eq, mixed_multilinear_extend, multilinear_extend};
-pub use multilinear_point::MultilinearPoint;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -18,9 +16,8 @@ use self::embedding::Embedding;
 use crate::utils::workload_size;
 use crate::utils::zip_strict;
 
-pub fn random_vector<R, F: Field>(rng: &mut R, length: usize) -> Vec<F>
+pub fn random_vector<F: Field>(mut rng: impl Rng, length: usize) -> Vec<F>
 where
-    R: Rng,
     Standard: Distribution<F>,
 {
     (0..length).map(|_| rng.gen()).collect::<Vec<F>>()

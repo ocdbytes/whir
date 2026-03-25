@@ -107,7 +107,7 @@ pub fn fold_and_compute_polynomial<F: Field>(a: &mut Vec<F>, b: &mut Vec<F>, wei
     // TODO: Replace with a single pass implementation.
     fold(a, weight);
     fold(b, weight);
-    compute_sumcheck_polynomial(&a, &b)
+    compute_sumcheck_polynomial(a, b)
 }
 
 /// Evaluate a coefficient vector at a multilinear point in the target field.

@@ -135,7 +135,8 @@ where
 mod tests {
     use std::borrow::Cow;
 
-    use ark_ff::{Field, UniformRand};
+    use ark_ff::Field;
+    use ark_std::rand::thread_rng;
 
     use super::*;
     use crate::{
@@ -143,7 +144,7 @@ mod tests {
             embedding::Basefield,
             fields::{Field64, Field64_3},
             linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
-            MultilinearPoint,
+            random_vector,
         },
         hash,
         parameters::ProtocolParameters,
@@ -159,14 +160,14 @@ mod tests {
 
     /// Build owned linear forms for `prove()` (which consumes them).
     fn build_prove_forms<F: Field>(
-        points: &[MultilinearPoint<F>],
+        points: &[Vec<F>],
         num_variables: usize,
         include_covector: bool,
     ) -> Vec<Box<dyn LinearForm<F>>> {
         let mut forms: Vec<Box<dyn LinearForm<F>>> = Vec::new();
         for point in points {
             forms.push(Box::new(MultilinearExtension {
-                point: point.0.clone(),
+                point: point.clone(),
             }));
         }
         if include_covector {
@@ -196,9 +197,6 @@ mod tests {
         // Number of coefficients in the multilinear polynomial (2^num_variables)
         let num_coeffs = 1 << num_variables;
 
-        // Randomness source
-        let mut rng = ark_std::test_rng();
-
         // Configure the WHIR protocol parameters
         let whir_params = ProtocolParameters {
             security_level: 32,
@@ -224,7 +222,7 @@ mod tests {
 
         // Generate `num_points` random points in the multilinear domain
         let points: Vec<_> = (0..num_points)
-            .map(|_| MultilinearPoint::rand(&mut rng, num_variables))
+            .map(|_| random_vector(thread_rng(), num_variables))
             .collect();
 
         let mut linear_forms: Vec<Box<dyn LinearForm<EF>>> = Vec::new();
@@ -232,7 +230,7 @@ mod tests {
 
         for point in &points {
             let linear_form = MultilinearExtension {
-                point: point.0.clone(),
+                point: point.clone(),
             };
             evaluations.push(linear_form.evaluate(params.embedding(), &vector));
             linear_forms.push(Box::new(linear_form));
@@ -372,7 +370,6 @@ mod tests {
         pow_bits: usize,
     ) {
         let num_coeffs = 1 << num_variables;
-        let mut rng = ark_std::test_rng();
 
         let whir_params = ProtocolParameters {
             security_level: 32,
@@ -399,13 +396,13 @@ mod tests {
         let vec_refs = vectors.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
 
         let points: Vec<_> = (0..num_points_per_poly)
-            .map(|_| MultilinearPoint::rand(&mut rng, num_variables))
+            .map(|_| random_vector(thread_rng(), num_variables))
             .collect();
 
         let mut linear_forms: Vec<Box<dyn Evaluate<Basefield<EF>>>> = Vec::new();
         for point in &points {
             linear_forms.push(Box::new(MultilinearExtension {
-                point: point.0.clone(),
+                point: point.clone(),
             }));
         }
         linear_forms.push(Box::new(Covector {
@@ -541,7 +538,6 @@ mod tests {
         let folding_factor = 2;
         let num_polynomials = 2;
         let num_coeffs = 1 << num_variables;
-        let mut rng = ark_std::test_rng();
 
         let whir_params = ProtocolParameters {
             security_level: 32,
@@ -563,15 +559,15 @@ mod tests {
         let vec_wrong = vec![F::from(999u64); num_coeffs];
 
         let constraint_points: Vec<_> = (0..2)
-            .map(|_| MultilinearPoint::rand(&mut rng, num_variables))
+            .map(|_| random_vector(thread_rng(), num_variables))
             .collect();
 
         let linear_forms: [Box<dyn Evaluate<Basefield<EF>>>; 2] = [
             Box::new(MultilinearExtension {
-                point: constraint_points[0].0.clone(),
+                point: constraint_points[0].clone(),
             }),
             Box::new(MultilinearExtension {
-                point: constraint_points[1].0.clone(),
+                point: constraint_points[1].clone(),
             }),
         ];
         let evaluations = linear_forms
@@ -648,7 +644,6 @@ mod tests {
         pow_bits: usize,
     ) {
         let num_coeffs = 1 << num_variables;
-        let mut rng = ark_std::test_rng();
 
         let whir_params = ProtocolParameters {
             security_level: 32,
@@ -672,13 +667,13 @@ mod tests {
         let vec_refs = all_vectors.iter().map(|p| p.as_slice()).collect::<Vec<_>>();
 
         let points: Vec<_> = (0..num_points_per_poly)
-            .map(|_| MultilinearPoint::rand(&mut rng, num_variables))
+            .map(|_| random_vector(thread_rng(), num_variables))
             .collect();
 
         let mut linear_forms: Vec<Box<dyn Evaluate<Basefield<EF>>>> = Vec::new();
         for point in &points {
             linear_forms.push(Box::new(MultilinearExtension {
-                point: point.0.clone(),
+                point: point.clone(),
             }));
         }
         linear_forms.push(Box::new(Covector {
@@ -769,13 +764,6 @@ mod tests {
         }
     }
 
-    fn random_vector(num_coefficients: usize) -> Vec<F> {
-        let mut store = Vec::<F>::with_capacity(num_coefficients);
-        let mut rng = ark_std::rand::thread_rng();
-        (0..num_coefficients).for_each(|_| store.push(F::rand(&mut rng)));
-        store
-    }
-
     /// Run a complete WHIR proof lifecycle: commit, prove, and verify.
     fn make_batched_whir_things(
         batch_size: usize,
@@ -799,9 +787,6 @@ mod tests {
         // Number of coefficients in the multilinear polynomial (2^num_variables)
         let num_coeffs = 1 << num_variables;
 
-        // Randomness source
-        let mut rng = ark_std::test_rng();
-
         // Configure the WHIR protocol parameters
         let whir_params = ProtocolParameters {
             security_level: 32,
@@ -818,12 +803,14 @@ mod tests {
         let mut params = Config::new(1 << num_variables, &whir_params);
         params.disable_pow();
 
-        let vectors: Vec<Vec<F>> = (0..batch_size).map(|_| random_vector(num_coeffs)).collect();
+        let vectors: Vec<Vec<F>> = (0..batch_size)
+            .map(|_| random_vector(thread_rng(), num_coeffs))
+            .collect();
         let vec_refs = vectors.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
 
         // Generate `num_points` random points in the multilinear domain
         let points: Vec<_> = (0..num_points)
-            .map(|_| MultilinearPoint::rand(&mut rng, num_variables))
+            .map(|_| random_vector(thread_rng(), num_variables))
             .collect();
 
         // Define the Fiat-Shamir IOPattern for committing and proving
@@ -841,7 +828,7 @@ mod tests {
         let mut linear_forms: Vec<Box<dyn Evaluate<Basefield<F>>>> = Vec::new();
         for point in &points {
             linear_forms.push(Box::new(MultilinearExtension {
-                point: point.0.clone(),
+                point: point.clone(),
             }));
         }
         linear_forms.push(Box::new(Covector {

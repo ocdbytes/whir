@@ -8,7 +8,6 @@ use whir::{
         embedding::{Basefield, Embedding, Identity},
         fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
-        MultilinearPoint,
     },
     bits::Bits,
     cmdline_utils::{AvailableFields, AvailableHash},
@@ -172,10 +171,10 @@ where
 
     // Evaluation constraint
     let points: Vec<_> = (0..num_evaluations)
-        .map(|x| MultilinearPoint(vec![M::Target::from(x as u64); num_variables]))
+        .map(|x| vec![M::Target::from(x as u64); num_variables])
         .collect();
     for point in &points {
-        let linear_form = Box::new(MultilinearExtension::new(point.0.clone()));
+        let linear_form = Box::new(MultilinearExtension::new(point.clone()));
         evaluations.push(linear_form.evaluate(params.embedding(), &vector));
         linear_forms.push(linear_form.clone());
         prove_linear_forms.push(linear_form);
