@@ -379,11 +379,14 @@ mod tests {
         }
     }
 
+    fn arb_pow2() -> impl Strategy<Value = usize> {
+        (0..=8).prop_map(|log2_size| 1_usize << log2_size)
+    }
+
     /// Generates random square matrices with sizes that are powers of two.
     #[allow(clippy::cast_sign_loss)]
     fn arb_square_matrix() -> impl Strategy<Value = (Vec<usize>, usize)> {
-        (2usize..=64)
-            .prop_filter("Must be power of two", |&size| size.is_power_of_two())
+        arb_pow2()
             .prop_map(|size| size * size)
             .prop_flat_map(|matrix_size| {
                 prop::collection::vec(0usize..1000, matrix_size)
@@ -393,14 +396,10 @@ mod tests {
 
     /// Generates random rectangular matrices where rows and columns are powers of two.
     fn arb_rect_matrix() -> impl Strategy<Value = (Vec<usize>, usize, usize)> {
-        (2usize..=64, 2usize..=64)
-            .prop_filter("Rows and columns must be power of two", |&(r, c)| {
-                r.is_power_of_two() && c.is_power_of_two()
-            })
-            .prop_flat_map(|(rows, cols)| {
-                prop::collection::vec(0usize..1000, rows * cols)
-                    .prop_map(move |matrix| (matrix, rows, cols))
-            })
+        (arb_pow2(), arb_pow2()).prop_flat_map(|(rows, cols)| {
+            prop::collection::vec(0usize..1000, rows * cols)
+                .prop_map(move |matrix| (matrix, rows, cols))
+        })
     }
 
     proptest! {
