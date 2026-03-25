@@ -11,7 +11,7 @@ use tracing::instrument;
 use crate::{
     algebra::{
         dot,
-        sumcheck::{compute_sumcheck_polynomial, fold},
+        sumcheck::{compute_sumcheck_polynomial, fold, fold_and_compute_polynomial},
         MultilinearPoint,
     },
     protocols::proof_of_work,
@@ -78,26 +78,37 @@ impl<F: Field> Config<F> {
         assert_eq!(b.len(), self.initial_size);
         debug_assert_eq!(dot(a, b), *sum);
 
+        // We do a staggered Sumcheck loop so we can merge the inner fold+compute loops.
         let mut res = Vec::with_capacity(self.num_rounds);
-        for _ in 0..self.num_rounds {
-            debug_assert!(a.len() > 1);
-            // Send sumcheck polynomial c0 and c2
+        if self.num_rounds > 0 {
+            // Compute and send initial sumcheck polynomial c0 and c2
             let (c0, c2) = compute_sumcheck_polynomial(a, b);
             let c1 = *sum - c0.double() - c2;
-            prover_state.prover_message(&c0);
-            prover_state.prover_message(&c2);
+            prover_state.prover_messages(&[c0, c2]);
 
-            // Do Proof of Work (if any)
+            // Receive the random evaluation point and update the sum
             self.round_pow.prove(prover_state);
-
-            // Receive the random evaluation point
-            let folding_randomness = prover_state.verifier_message::<F>();
+            let mut folding_randomness = prover_state.verifier_message::<F>();
             res.push(folding_randomness);
+            *sum = (c2 * folding_randomness + c1) * folding_randomness + c0;
 
-            // Fold the inputs
+            // Inner rounds
+            for _ in 1..self.num_rounds {
+                // Fold and compute sumcheck polynomial in one pass.
+                let (c0, c2) = fold_and_compute_polynomial(a, b, folding_randomness);
+                let c1 = *sum - c0.double() - c2;
+                prover_state.prover_messages(&[c0, c2]);
+
+                // Receive the random evaluation point and update the sum
+                self.round_pow.prove(prover_state);
+                folding_randomness = prover_state.verifier_message::<F>();
+                res.push(folding_randomness);
+                *sum = (c2 * folding_randomness + c1) * folding_randomness + c0;
+            }
+
+            // Final fold of the inputs (no polynomial computation)
             fold(a, folding_randomness);
             fold(b, folding_randomness);
-            *sum = (c2 * folding_randomness + c1) * folding_randomness + c0;
         }
 
         MultilinearPoint(res)
