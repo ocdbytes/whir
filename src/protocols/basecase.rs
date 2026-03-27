@@ -73,7 +73,8 @@ impl<F: Field> Config<F> {
             let _ = self.commit.open(prover_state, &[witness]);
             let point = self
                 .sumcheck
-                .prove(prover_state, &mut vector, &mut covector, &mut sum);
+                .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
+                .0;
             assert!(!vector[0].is_zero(), "Proof failed");
             return (point, covector[0]);
         }
@@ -103,12 +104,16 @@ impl<F: Field> Config<F> {
 
         // Run sumcheck to reduce linear form claim
         let mut masked_sum = mask_sum + mask_rlc * sum;
-        let point = self.sumcheck.prove(
-            prover_state,
-            &mut masked_vector,
-            &mut covector,
-            &mut masked_sum,
-        );
+        let point = self
+            .sumcheck
+            .prove(
+                prover_state,
+                &mut masked_vector,
+                &mut covector,
+                &mut masked_sum,
+                &[],
+            )
+            .0;
 
         // If the MLE of `masked_vector` evaluates to zero, the verifier can not proceed.
         // Basically the sumcheck equation has degenerated to 0 * l(r) = 0, which provides
@@ -224,6 +229,7 @@ mod tests {
                     initial_size: size,
                     round_pow: proof_of_work::Config::none(),
                     num_rounds: size.next_power_of_two().trailing_zeros() as usize,
+                    mask_length: 0,
                 },
                 masked,
             })

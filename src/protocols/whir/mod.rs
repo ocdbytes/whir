@@ -27,7 +27,7 @@ use crate::{
 };
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
-#[serde(bound = "M: Embedding")]
+#[serde(bound = "")]
 pub struct Config<M: Embedding> {
     pub initial_committer: irs_commit::Config<M>,
     pub initial_sumcheck: sumcheck::Config<M::Target>,
@@ -38,7 +38,7 @@ pub struct Config<M: Embedding> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "F: Field")]
+#[serde(bound = "")]
 pub struct RoundConfig<F: Field> {
     pub irs_committer: irs_commit::Config<Identity<F>>,
     pub sumcheck: sumcheck::Config<F>,

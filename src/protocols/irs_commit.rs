@@ -49,7 +49,7 @@ use crate::{
 
 /// Commit to vectors over an fft-friendly field F
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
-#[serde(bound = "M: Embedding")]
+#[serde(bound = "")]
 pub struct Config<M: Embedding> {
     /// Embedding into a (larger) field used for weights and drawing challenges.
     pub embedding: Typed<M>,
