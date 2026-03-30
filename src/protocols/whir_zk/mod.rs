@@ -97,6 +97,13 @@ impl<F: FftField> Config<F> {
     }
 
     pub fn new(num_variables_main: usize, params: &ProtocolParameters) -> Self {
+        assert!(
+            !params.unique_decoding,
+            "zkWHIR 2.0 requires list decoding (unique_decoding must be false). \
+             The protocol relies on OOD queries in Step 5 for blinding claim \
+             generation; unique decoding sets out_domain_samples = 0, making \
+             Commitment::num_vectors() undefined."
+        );
         let blinded_config: whir::Config<Identity<F>> =
             whir::Config::new(1 << num_variables_main, params);
         let witness_sec = params.security_level.saturating_sub(params.pow_bits) as f64;
@@ -138,7 +145,9 @@ impl<F: FftField> Config<F> {
             params.initial_folding_factor
         );
 
-        // nu = ⌊mu/ell⌋ — highest blinding polynomial index (nu+1 total g-polynomials)
+        // nu = ⌊mu/ell⌋ — highest blinding polynomial index (nu+1 total g-polynomials).
+        // batch_size = n + ν: the blinding instance commits n M-polynomials (one per
+        // witness, each embedding g₀ + mskᵢ) plus ν embedded ĝ-polynomials (ĝ₁..ĝ_ν).
         let nu = num_variables_main / ell;
         let blinding_params = ProtocolParameters {
             batch_size: params.batch_size + nu,
@@ -727,5 +736,76 @@ mod tests {
                  (correct={correct_evaluation:?}, claimed={wrong_evaluation:?})"
             );
         }
+    }
+
+    /// Verify that `unique_decoding: true` is rejected at config construction.
+    ///
+    /// zkWHIR 2.0's "Alternative Randomness Sampling" requires OOD queries
+    /// (Step 5d: the prover sends ood_f̂, m_evals, g_evals at each OOD point).
+    /// With unique decoding, `out_domain_samples = 0`, which breaks the
+    /// protocol in two ways:
+    ///
+    /// 1. `Commitment::num_vectors()` derives the vector count from the OOD
+    ///    evaluation matrix as `matrix.len() / points.len()`. With 0 OOD
+    ///    points this division is undefined, silently returning 0.
+    ///
+    /// 2. The verifier uses `num_vectors()` to build `ProtocolDims`, so all
+    ///    subsequent transcript reads are misaligned — the verifier expects
+    ///    0 m_evals per point while the prover sent 1.
+    ///
+    /// This is by design: the paper's ZK construction relies on OOD openings
+    /// to bind the blinding polynomial claims into the Fiat-Shamir transcript.
+    /// Without them the simulator cannot produce indistinguishable transcripts.
+    #[test]
+    #[should_panic(expected = "zkWHIR 2.0 requires list decoding")]
+    fn test_zk2_unique_decoding_unsupported() {
+        let whir_params = ProtocolParameters {
+            unique_decoding: true,
+            security_level: 32,
+            pow_bits: 0,
+            initial_folding_factor: 2,
+            folding_factor: 2,
+            starting_log_inv_rate: 1,
+            batch_size: 1,
+            hash_id: hash::SHA2,
+        };
+        Config::<F>::new(TEST_NUM_VARIABLES, &whir_params);
+    }
+
+    /// Round-trip test where `mu % ell == 0` (rem = 0).
+    ///
+    /// When rem = 0, Φ₀ and Φ₁ extract the same bit window. This exercises
+    /// the overlapping-window path through `build_beq_tables`,
+    /// `build_weight_covectors`, and the Step 7 diagonal check.
+    ///
+    /// Parameters: num_vars=20, security_level=16 → ell=10, rem = 20 % 10 = 0.
+    #[test]
+    fn test_zk2_prove_verify_zero_rem() {
+        const NUM_VARS: usize = 20;
+        const NUM_COEFFS: usize = 1 << NUM_VARS;
+
+        let mut rng = ark_std::test_rng();
+        let whir_params = ProtocolParameters {
+            unique_decoding: false,
+            security_level: 16,
+            pow_bits: 0,
+            initial_folding_factor: 2,
+            folding_factor: 2,
+            starting_log_inv_rate: 1,
+            batch_size: 1,
+            hash_id: hash::SHA2,
+        };
+        let mut config = Config::new(NUM_VARS, &whir_params);
+        config.disable_pow();
+
+        let ell = config.blinding_polynomial.initial_num_variables() - 1;
+        assert_eq!(NUM_VARS % ell, 0, "test requires rem == 0");
+
+        let vector = vec![F::ONE; NUM_COEFFS];
+        let point = MultilinearPoint::rand(&mut rng, NUM_VARS);
+        let form = MultilinearExtension { point: point.0 };
+        let evaluation = form.evaluate(config.embedding(), &vector);
+
+        prove_and_verify(&config, vec![vector], vec![Box::new(form)], &[evaluation]);
     }
 }

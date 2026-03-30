@@ -267,6 +267,45 @@ where
         }
     }
 
+    /// Accumulate STIR constraints from OOD and in-domain evaluations into the
+    /// sumcheck state and transcript.
+    fn accumulate_stir_constraints(
+        prover_state: &mut ProverState<H, R>,
+        state: &mut whir::rounds::SumcheckState<'_, F>,
+        commitment: &irs_commit::Witness<F, F>,
+        in_domain: &irs_commit::Evaluations<F>,
+        initial_size: usize,
+    ) {
+        let stir_challenges: Vec<UnivariateEvaluation<F>> = commitment
+            .out_of_domain()
+            .evaluators(initial_size)
+            .chain(in_domain.evaluators(initial_size))
+            .collect();
+
+        let one_weight = [F::ONE];
+        let ood_evals = commitment.out_of_domain().values(&one_weight);
+        let num_ood = commitment.out_of_domain().points.len();
+        let embedding = Identity::new();
+
+        let stir_evaluations: Vec<F> = ood_evals
+            .chain(
+                stir_challenges[num_ood..]
+                    .iter()
+                    .map(|challenge| challenge.evaluate(&embedding, state.vector)),
+            )
+            .collect();
+
+        let stir_rlc_coeffs: Vec<F> = geometric_challenge(prover_state, stir_challenges.len());
+        UnivariateEvaluation::accumulate_many(&stir_challenges, state.covector, &stir_rlc_coeffs);
+        *state.the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
+
+        debug_assert_eq!(
+            dot(state.vector, state.covector),
+            *state.the_sum,
+            "invariant broken after STIR accumulation"
+        );
+    }
+
     /// Step 5: OOD/STIR queries, STIR constraint accumulation, and remaining WHIR rounds.
     ///
     /// Takes ownership of `f_hat_polys` so it can be freed after OOD evaluations,
@@ -350,33 +389,12 @@ where
             lambda_z_points.push(z);
         }
 
-        // --- STIR constraint accumulation ---
-        let stir_challenges: Vec<UnivariateEvaluation<F>> = folded_f_zk_commitment
-            .out_of_domain()
-            .evaluators(round_config.initial_size())
-            .chain(in_domain.evaluators(round_config.initial_size()))
-            .collect();
-
-        let one_weight = [F::ONE];
-        let ood_evals = folded_f_zk_commitment.out_of_domain().values(&one_weight);
-        let num_ood = folded_f_zk_commitment.out_of_domain().points.len();
-        let embedding = Identity::new();
-
-        let in_domain_evals: Vec<F> = stir_challenges[num_ood..]
-            .iter()
-            .map(|challenge| challenge.evaluate(&embedding, state.vector))
-            .collect();
-
-        let stir_evaluations: Vec<F> = ood_evals.chain(in_domain_evals).collect();
-
-        let stir_rlc_coeffs: Vec<F> = geometric_challenge(self.prover_state, stir_challenges.len());
-        UnivariateEvaluation::accumulate_many(&stir_challenges, state.covector, &stir_rlc_coeffs);
-        *state.the_sum += dot(&stir_rlc_coeffs, &stir_evaluations);
-
-        debug_assert_eq!(
-            dot(state.vector, state.covector),
-            *state.the_sum,
-            "invariant broken after STIR accumulation"
+        Self::accumulate_stir_constraints(
+            self.prover_state,
+            state,
+            &folded_f_zk_commitment,
+            &in_domain,
+            round_config.initial_size(),
         );
 
         // Round 0 sumcheck
