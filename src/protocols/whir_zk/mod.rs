@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zk2_prove_verify_single_point() {
+    fn test_zk_prove_verify_single_point() {
         let mut rng = ark_std::test_rng();
         let config = make_test_config();
 
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zk2_prove_verify_multiple_points() {
+    fn test_zk_prove_verify_multiple_points() {
         let mut rng = ark_std::test_rng();
         let config = make_test_config();
 
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zk2_prove_verify_with_covector() {
+    fn test_zk_prove_verify_with_covector() {
         let mut rng = ark_std::test_rng();
         let config = make_test_config();
 
@@ -443,7 +443,7 @@ mod tests {
     /// exercising the uneven-tiling code path where Φ₀ and Φ₁ extract
     /// different bit windows.
     #[test]
-    fn test_zk2_prove_verify_nonzero_rem() {
+    fn test_zk_prove_verify_nonzero_rem() {
         const NUM_VARS: usize = 14;
         const NUM_COEFFS: usize = 1 << NUM_VARS;
 
@@ -474,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zk2_prove_verify_multi_vector() {
+    fn test_zk_prove_verify_multi_vector() {
         let mut rng = ark_std::test_rng();
         let config = make_test_config_batch(2);
 
@@ -503,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zk2_prove_verify_multi_vector_multi_form() {
+    fn test_zk_prove_verify_multi_vector_multi_form() {
         let mut rng = ark_std::test_rng();
         let config = make_test_config_batch(2);
 
@@ -542,7 +542,7 @@ mod tests {
     /// Verification must reject when the public evaluations are tampered with.
     /// Both `Err` and a panic (from debug transcript checks) count as rejection.
     #[test]
-    fn test_zk2_rejects_wrong_evaluations() {
+    fn test_zk_rejects_wrong_evaluations() {
         let mut rng = ark_std::test_rng();
         let config = make_test_config();
 
@@ -609,7 +609,7 @@ mod tests {
 
     /// Verification must reject when the proof transcript is corrupted.
     #[test]
-    fn test_zk2_rejects_tampered_proof() {
+    fn test_zk_rejects_tampered_proof() {
         let mut rng = ark_std::test_rng();
         let config = make_test_config();
 
@@ -682,7 +682,7 @@ mod tests {
     /// must be rejected. If verify() accepts, it means the prover can forge
     /// arbitrary evaluation claims.
     #[test]
-    fn test_zk2_malicious_prover_wrong_evaluation() {
+    fn test_zk_malicious_prover_wrong_evaluation() {
         let mut rng = ark_std::test_rng();
         let config = make_test_config();
 
@@ -758,7 +758,7 @@ mod tests {
     /// Without them the simulator cannot produce indistinguishable transcripts.
     #[test]
     #[should_panic(expected = "zkWHIR 2.0 requires list decoding")]
-    fn test_zk2_unique_decoding_unsupported() {
+    fn test_zk_unique_decoding_unsupported() {
         let whir_params = ProtocolParameters {
             unique_decoding: true,
             security_level: 32,
@@ -780,7 +780,7 @@ mod tests {
     ///
     /// Parameters: num_vars=20, security_level=16 → ell=10, rem = 20 % 10 = 0.
     #[test]
-    fn test_zk2_prove_verify_zero_rem() {
+    fn test_zk_prove_verify_zero_rem() {
         const NUM_VARS: usize = 20;
         const NUM_COEFFS: usize = 1 << NUM_VARS;
 
