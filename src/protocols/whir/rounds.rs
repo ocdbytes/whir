@@ -26,13 +26,15 @@ use crate::{
 };
 
 /// Mutable sumcheck accumulation state threaded through WHIR prover rounds.
+#[derive(Debug)]
 pub struct SumcheckState<'a, F> {
-    pub vector: &'a mut Vec<F>,
-    pub covector: &'a mut Vec<F>,
-    pub the_sum: &'a mut F,
+    pub(crate) vector: &'a mut Vec<F>,
+    pub(crate) covector: &'a mut Vec<F>,
+    pub(crate) the_sum: &'a mut F,
 }
 
 /// Configuration for the final WHIR round (sumcheck + proof-of-work).
+#[derive(Debug)]
 pub struct FinalRoundConfig<'a, F: FftField> {
     pub sumcheck: &'a sumcheck::Config<F>,
     pub pow: &'a proof_of_work::Config,
@@ -40,6 +42,7 @@ pub struct FinalRoundConfig<'a, F: FftField> {
 
 /// Result of a single verifier round (rounds 1+).
 #[must_use]
+#[derive(Debug)]
 pub struct VerifyRoundResult<F: FftField> {
     pub commitment: irs_commit::Commitment<F>,
     pub in_domain: irs_commit::Evaluations<F>,
@@ -50,6 +53,7 @@ pub struct VerifyRoundResult<F: FftField> {
 
 /// Result of a single prover round (rounds 1+).
 #[must_use]
+#[derive(Debug)]
 pub struct ProveRoundResult<F: FftField> {
     pub witness: irs_commit::Witness<F, F>,
     pub in_domain: irs_commit::Evaluations<F>,
@@ -253,6 +257,7 @@ where
 
 /// Result of running remaining prover rounds (rounds 1..N + final round).
 #[must_use]
+#[derive(Debug)]
 pub struct ProveRemainingResult<F> {
     /// In-domain points from the first opening after round 0.
     pub first_in_domain_points: Vec<F>,
@@ -326,6 +331,7 @@ where
 
 /// Result of running remaining verifier rounds (rounds 1..N + final round).
 #[must_use]
+#[derive(Debug)]
 pub struct VerifyRemainingResult<F: FftField> {
     /// The final folded vector sent by the prover.
     pub final_vector: Vec<F>,

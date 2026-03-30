@@ -40,14 +40,14 @@ use crate::{
 fn send_blinding_evals<F, H, R>(
     prover_state: &mut ProverState<H, R>,
     z: F,
-    m_coeffs_all: &[Vec<F>],
+    masking_coeffs_all: &[Vec<F>],
     g_i_coeffs: &[Vec<F>],
 ) where
     F: FftField + Codec<[H::U]>,
     H: DuplexSpongeInterface,
     R: RngCore + CryptoRng,
 {
-    for m_coeffs in m_coeffs_all {
+    for m_coeffs in masking_coeffs_all {
         let m_eval = univariate_evaluate(m_coeffs, z);
         prover_state.prover_message(&m_eval);
     }
@@ -61,6 +61,7 @@ fn send_blinding_evals<F, H, R>(
 ///
 /// Carries the values needed by Step 7 (blinding polynomial proof).
 #[must_use]
+#[derive(Debug)]
 struct BlindedProveResult<F> {
     lambda_z_points: Vec<F>,
     eq_weights: Vec<F>,
@@ -71,6 +72,7 @@ struct BlindedProveResult<F> {
 
 /// Result of Steps 2-4 (blinding claims, batching, f_zk formation, initial sumcheck).
 #[must_use]
+#[derive(Debug)]
 struct PrepareResult<F> {
     f_zk: Vec<F>,
     covector: Vec<F>,
@@ -82,10 +84,11 @@ struct PrepareResult<F> {
 
 /// Result of Step 5 (OOD/STIR queries and remaining WHIR rounds).
 #[must_use]
+#[derive(Debug)]
 struct OodStirResult<F> {
     lambda_z_points: Vec<F>,
     eq_weights: Vec<F>,
-    m_coeffs_all: Vec<Vec<F>>,
+    masking_coeffs_all: Vec<Vec<F>>,
     g_i_coeffs: Vec<Vec<F>>,
     gamma_points: Vec<F>,
 }
@@ -155,14 +158,13 @@ where
         // G_j = ⟨w_j, g⟩ for each linear form (g is shared across all witnesses)
         let g_claims: Vec<F> = {
             let mut buf = vec![F::ZERO; size];
-            linear_forms
-                .iter()
-                .map(|w| {
-                    buf.fill(F::ZERO);
-                    w.accumulate(&mut buf, F::ONE);
-                    dot(&buf, &g_poly)
-                })
-                .collect()
+            let mut claims = Vec::with_capacity(linear_forms.len());
+            for w in linear_forms {
+                buf.fill(F::ZERO);
+                w.accumulate(&mut buf, F::ONE);
+                claims.push(dot(&buf, &g_poly));
+            }
+            claims
         };
 
         for g_claim in &g_claims {
@@ -185,9 +187,8 @@ where
         // and proves: ρ·F + G = Σ_{b̄} w(f_zk(b̄), b̄)
         // =====================================================================
         let rho: F = self.prover_state.verifier_message();
-        debug_assert_ne!(
-            rho,
-            F::ZERO,
+        assert!(
+            rho != F::ZERO,
             "rho must not be zero (negligible probability)"
         );
 
@@ -299,7 +300,7 @@ where
         let r_bar = folding_randomness.0;
         let eq_weights = compute_eq_weights(&r_bar);
         let RsFoldCoeffs {
-            m_coeffs_all,
+            masking_coeffs_all,
             g_i_coeffs,
         } = compute_rs_fold_blinding_coeffs(
             &eq_weights,
@@ -335,7 +336,7 @@ where
             let fold_point = build_fold_args(&r_bar, z, mu);
             let ood_f_hat = multilinear_extend(&f_hat_combined, &fold_point);
             self.prover_state.prover_message(&ood_f_hat);
-            send_blinding_evals(self.prover_state, z, &m_coeffs_all, &g_i_coeffs);
+            send_blinding_evals(self.prover_state, z, &masking_coeffs_all, &g_i_coeffs);
             lambda_z_points.push(z);
         }
 
@@ -345,7 +346,7 @@ where
 
         // --- STIR responses ---
         for &z in &in_domain.points {
-            send_blinding_evals(self.prover_state, z, &m_coeffs_all, &g_i_coeffs);
+            send_blinding_evals(self.prover_state, z, &masking_coeffs_all, &g_i_coeffs);
             lambda_z_points.push(z);
         }
 
@@ -402,7 +403,7 @@ where
         OodStirResult {
             lambda_z_points,
             eq_weights,
-            m_coeffs_all,
+            masking_coeffs_all,
             g_i_coeffs,
             gamma_points: remaining.first_in_domain_points,
         }
@@ -414,12 +415,12 @@ where
     fn gamma_check(
         &mut self,
         f_hat_witness: &irs_commit::Witness<F, F>,
-        m_coeffs_all: &[Vec<F>],
+        masking_coeffs_all: &[Vec<F>],
         g_i_coeffs: &[Vec<F>],
-        gamma_points: Vec<F>,
+        gamma_points: &[F],
         lambda_z_points: &mut Vec<F>,
     ) {
-        let gamma_f_hat_indices = gamma_to_f_hat_indices(&gamma_points, self.config);
+        let gamma_f_hat_indices = gamma_to_f_hat_indices(gamma_points, self.config);
 
         // Writes [[f̂]] openings at Γ indices to the transcript.
         // The verifier uses these to reconstruct fold(r̄, [[f̂]])(γ).
@@ -430,8 +431,8 @@ where
             .initial_committer
             .open_at_indices(self.prover_state, &[f_hat_witness], &gamma_f_hat_indices);
 
-        for gamma in gamma_points {
-            send_blinding_evals(self.prover_state, gamma, m_coeffs_all, g_i_coeffs);
+        for &gamma in gamma_points {
+            send_blinding_evals(self.prover_state, gamma, masking_coeffs_all, g_i_coeffs);
             lambda_z_points.push(gamma);
         }
     }
@@ -502,7 +503,7 @@ impl<F: FftField> Config<F> {
         let OodStirResult {
             mut lambda_z_points,
             eq_weights,
-            m_coeffs_all,
+            masking_coeffs_all,
             g_i_coeffs,
             gamma_points,
         } = ctx.ood_stir_and_rounds(
@@ -525,9 +526,9 @@ impl<F: FftField> Config<F> {
 
         ctx.gamma_check(
             f_hat_witness,
-            &m_coeffs_all,
+            &masking_coeffs_all,
             &g_i_coeffs,
-            gamma_points,
+            &gamma_points,
             &mut lambda_z_points,
         );
 
@@ -627,9 +628,7 @@ impl<F: FftField> Config<F> {
             f_hat_witness,
             blinding_poly_witness,
             f_hat_polys,
-            masking_polys,
-            g_polys,
-            blinding_vectors,
+            secrets,
         } = witness;
 
         // Steps 2-6: blinded polynomial proof.
@@ -638,22 +637,20 @@ impl<F: FftField> Config<F> {
             vectors,
             &f_hat_witness,
             f_hat_polys,
-            &masking_polys,
-            &g_polys,
+            &secrets.masking_polys,
+            &secrets.g_polys,
             &linear_forms,
             &evaluations,
         );
 
         // Free fields only needed during Steps 2-6, before Step 7.
         drop(f_hat_witness);
-        drop(masking_polys);
-        drop(g_polys);
         drop(linear_forms);
 
         // Step 7: batched blinding polynomial proof.
         self.prove_blinding_polynomial(
             prover_state,
-            &blinding_vectors,
+            &secrets.blinding_vectors,
             &blinding_poly_witness,
             &blinded,
         );

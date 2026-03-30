@@ -430,7 +430,7 @@ where
         R: RngCore + CryptoRng,
         Hash: ProverMessage<[H::U]>,
     {
-        debug_assert!(
+        assert!(
             indices.iter().all(|&i| i < self.codeword_length),
             "index out of bounds: all indices must be < codeword_length ({})",
             self.codeword_length
@@ -455,7 +455,7 @@ where
         u8: Decoding<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        debug_assert!(
+        assert!(
             indices.iter().all(|&i| i < self.codeword_length),
             "index out of bounds: all indices must be < codeword_length ({})",
             self.codeword_length

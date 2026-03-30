@@ -1,5 +1,6 @@
 use ark_ff::FftField;
 use spongefish::{Codec, DuplexSpongeInterface};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::{utils::ProtocolDims, Config};
 use crate::{
@@ -8,10 +9,29 @@ use crate::{
     transcript::{ProverMessage, ProverState},
 };
 
+/// Secret blinding randomness that must be scrubbed from memory on drop.
+///
+/// Wrapping these fields in a separate struct lets `Witness` remain
+/// destructurable (no custom `Drop`) while guaranteeing zeroization
+/// of the secret data regardless of how the witness is consumed.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(super) struct BlindingSecrets<F: FftField> {
+    /// Per-witness masking polynomials mskᵢ (ℓ-variate, 2^ℓ coefficients).
+    pub(super) masking_polys: Vec<Vec<F>>,
+    /// Blinding polynomials ĝ₀..ĝ_ν (ℓ-variate, 2^ℓ coefficients each).
+    pub(super) g_polys: Vec<Vec<F>>,
+    /// Interleaved blinding vectors [M₀, ..., M_{n-1}, ĝ₁, ..., ĝ_ν] as committed.
+    pub(super) blinding_vectors: Vec<Vec<F>>,
+}
+
 /// Prover-side witness produced by Step 1 (Commitment).
 ///
 /// Contains the IRS-commit witnesses for both WHIR instances, plus the raw
 /// polynomial data needed by Steps 2-7.
+///
+/// Secret blinding randomness is held in [`BlindingSecrets`] which implements
+/// [`ZeroizeOnDrop`], ensuring it is scrubbed from memory even if the witness
+/// is destructured for early field-level drops.
 #[allow(clippy::struct_field_names)]
 pub struct Witness<F: FftField> {
     /// IRS-commit witness for [[f̂]] (first WHIR instance).
@@ -20,13 +40,8 @@ pub struct Witness<F: FftField> {
     pub(super) blinding_poly_witness: irs_commit::Witness<F, F>,
     /// f̂ᵢ = fᵢ + mskᵢ(Φ₀) for each of the n witness polynomials.
     pub(super) f_hat_polys: Vec<Vec<F>>,
-    /// Per-witness masking polynomials mskᵢ (ℓ-variate, 2^ℓ coefficients).
-    pub(super) masking_polys: Vec<Vec<F>>,
-    /// Blinding polynomials ĝ₀..ĝ_ν (ℓ-variate, 2^ℓ coefficients each).
-    pub(super) g_polys: Vec<Vec<F>>,
-    /// Interleaved blinding vectors [M₀, ..., M_{n-1}, ĝ₁, ..., ĝ_ν] as committed.
-    /// Stored to avoid reconstruction in Step 7.
-    pub(super) blinding_vectors: Vec<Vec<F>>,
+    /// Secret blinding randomness (zeroized on drop).
+    pub(super) secrets: BlindingSecrets<F>,
 }
 
 impl<F: FftField> Config<F> {
@@ -66,7 +81,7 @@ impl<F: FftField> Config<F> {
             );
         }
         let dims = ProtocolDims::new(self, num_polys);
-        let half_size = 1usize << dims.ell;
+        let ell_variate_size = 1usize << dims.ell;
         let shift = dims.mu - dims.ell; // Φ₀ extracts the top ℓ bits: Φ₀(b) = b >> shift
 
         // Step 1a-1b: Sample n masking polynomials, compute f̂ᵢ = fᵢ + mskᵢ(Φ₀(x̄))
@@ -74,7 +89,7 @@ impl<F: FftField> Config<F> {
         let mut masking_polys = Vec::with_capacity(num_polys);
         let mut f_hat_polys = Vec::with_capacity(num_polys);
         for poly in polynomials {
-            let masking_poly: Vec<F> = (0..half_size)
+            let masking_poly: Vec<F> = (0..ell_variate_size)
                 .map(|_| F::rand(prover_state.rng()))
                 .collect();
             let f_hat_poly: Vec<F> = poly
@@ -91,11 +106,11 @@ impl<F: FftField> Config<F> {
         let f_hat_witness = self.blinded_polynomial.commit(prover_state, &f_hat_refs);
 
         // Step 1c: Sample ν + 1 random ℓ-variate blinding polynomials ĝ₀..ĝ_ν.
-        let num_g_polys = dims.num_g_polys();
-        let mut g_polys = Vec::with_capacity(num_g_polys);
-        for _ in 0..num_g_polys {
+        let num_blinding_polys = dims.num_g_polys();
+        let mut g_polys = Vec::with_capacity(num_blinding_polys);
+        for _ in 0..num_blinding_polys {
             g_polys.push(
-                (0..half_size)
+                (0..ell_variate_size)
                     .map(|_| F::rand(prover_state.rng()))
                     .collect::<Vec<_>>(),
             );
@@ -103,7 +118,7 @@ impl<F: FftField> Config<F> {
 
         // Step 1d: Build committed vectors for second WHIR instance.
         // Mᵢ(ȳ, t) = ĝ₀(ȳ) + t·mskᵢ(ȳ), stored as interleaved [g₀[k], mskᵢ[k]].
-        let m_polys: Vec<Vec<F>> = masking_polys
+        let interleaved_blinding_vectors: Vec<Vec<F>> = masking_polys
             .iter()
             .map(|msk| {
                 g_polys[0]
@@ -117,7 +132,7 @@ impl<F: FftField> Config<F> {
         // Assemble blinding vectors: [M₀, ..., M_{n-1}, ĝ₁, ..., ĝ_ν].
         // ĝⱼ are ℓ-variate but committed as (ℓ+1)-variate with t-coefficient = 0,
         // stored as interleaved [gⱼ[k], 0] (coefficient for t is zero).
-        let mut blinding_vectors: Vec<Vec<F>> = m_polys;
+        let mut blinding_vectors: Vec<Vec<F>> = interleaved_blinding_vectors;
         for g in &g_polys[1..] {
             blinding_vectors.push(g.iter().flat_map(|&c| [c, F::ZERO]).collect());
         }
@@ -131,9 +146,11 @@ impl<F: FftField> Config<F> {
             f_hat_witness,
             blinding_poly_witness,
             f_hat_polys,
-            masking_polys,
-            g_polys,
-            blinding_vectors,
+            secrets: BlindingSecrets {
+                masking_polys,
+                g_polys,
+                blinding_vectors,
+            },
         }
     }
 }
