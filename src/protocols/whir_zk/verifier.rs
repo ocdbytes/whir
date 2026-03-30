@@ -32,8 +32,8 @@ use crate::{
 /// Commitments for blinded and blinding polynomials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commitments<F: FftField> {
-    pub blinded_commitment: whir::Commitment<F>,
-    pub blinding_commitment: whir::Commitment<F>,
+    pub(crate) blinded_commitment: whir::Commitment<F>,
+    pub(crate) blinding_commitment: whir::Commitment<F>,
 }
 
 /// Intermediate result from verifying the blinded polynomial (Steps 2-6).
@@ -41,6 +41,7 @@ pub struct Commitments<F: FftField> {
 /// Carries the values needed by [`Config::verify_blinding_polynomial`] (Step 7)
 /// and the blinded polynomial's deferred `FinalClaim`.
 #[must_use]
+#[derive(Debug)]
 struct BlindedVerifyResult<F: FftField> {
     lambda: LambdaAccumulator<F>,
     eq_weights: Vec<F>,
@@ -53,6 +54,7 @@ struct BlindedVerifyResult<F: FftField> {
 
 /// Result of Steps 2-4 (blinding claims, batching, combined claims, initial sumcheck).
 #[must_use]
+#[derive(Debug)]
 struct VerifyPrepareResult<F> {
     beta_powers: Vec<F>,
     constraint_rlc_coeffs: Vec<F>,
@@ -66,6 +68,7 @@ struct VerifyPrepareResult<F> {
 
 /// Result of Step 5 (OOD/STIR queries, remaining WHIR rounds, linear form RLC).
 #[must_use]
+#[derive(Debug)]
 struct VerifyOodStirResult<F> {
     lambda: LambdaAccumulator<F>,
     gamma_points: Vec<F>,
@@ -214,6 +217,7 @@ where
         let ood_h_evals: Vec<F> = commitment_h.out_of_domain().values(&one_weight).collect();
 
         for &z in &commitment_h.out_of_domain().points {
+            // SECURITY
             // Consumed for Fiat-Shamir transcript binding only — NOT directly
             // verified. The prover sends MLE(f̂_combined, fold_args(r̄, z)),
             // which differs from the univariate fold evaluation fold(r̄, f̂)(z).
@@ -246,7 +250,7 @@ where
             .values(&prepare.batching_weights)
             .zip(in_domain_m_evals.iter().zip(in_domain_g_evals.iter()))
             .map(|(f_hat_combined_fold, (m_evals, g_evals))| {
-                // m_combined includes the g₀ contribution (absorbed into m_coeffs_all[0]),
+                // m_combined includes the g₀ contribution (absorbed into masking_coeffs_all[0]),
                 // so g_evals here are g₁..g_ν, weighted by β¹..β^ν (not β⁰).
                 let m_combined: F = m_evals.iter().copied().sum();
                 let g_sum: F = g_evals

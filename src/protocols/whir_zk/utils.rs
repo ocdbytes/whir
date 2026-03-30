@@ -7,7 +7,7 @@ use crate::algebra::{geometric_accumulate, geometric_sequence, MultilinearPoint}
 ///
 /// Computed once from the config and reused across prover/verifier steps
 /// to avoid recomputing (and passing individually) the same derived values.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct ProtocolDims {
     pub(super) mu: usize,
     pub(super) ell: usize,
@@ -68,7 +68,7 @@ impl ProtocolDims {
 ///   index = x_0 · 2^{μ-1} + x_1 · 2^{μ-2} + ... + x_{μ-1} · 2^0
 ///
 /// The result is: `(b >> (μ - start - ℓ)) & ((1 << ℓ) - 1)`
-pub(super) const fn phi_i_bits(
+const fn phi_i_bits(
     hypercube_idx: usize,
     phi_index: usize,
     mu: usize,
@@ -88,12 +88,20 @@ pub(super) const fn phi_i_bits(
 /// Compute the discrete logarithm of `target` w.r.t. `gen` in a cyclic group
 /// of order `2^log_order`, using the Pohlig-Hellman algorithm.
 ///
+/// `gen_inv` must equal `gen⁻¹`. Accepting it as a parameter lets callers
+/// precompute the inverse once when computing multiple discrete logs with the
+/// same generator.
+///
 /// Returns `i` such that `target == gen^i`, where `0 ≤ i < 2^log_order`.
-/// Panics (in debug builds) if `target` is not in `⟨gen⟩`.
+/// Panics if `target` is not in `⟨gen⟩`.
 ///
 /// Complexity: O(log_order²) field multiplications — vs O(2^log_order) for linear scan.
-pub(super) fn discrete_log_pow2<F: FftField>(target: F, gen: F, log_order: u32) -> usize {
-    let gen_inv = gen.inverse().expect("generator must be invertible");
+pub(super) fn discrete_log_pow2<F: FftField>(
+    target: F,
+    gen: F,
+    gen_inv: F,
+    log_order: u32,
+) -> usize {
     let mut result = 0usize;
     let mut current = target;
     let mut gen_inv_power = gen_inv; // gen^{-2^bit} accumulator
@@ -272,8 +280,9 @@ pub(super) fn build_beq_tables<F: FftField>(
 ///
 /// Produced by [`compute_rs_fold_blinding_coeffs`]; consumed when evaluating
 /// m̃(r̄, z, ρ) and g̃ᵢ(r̄, z) at OOD/STIR/Γ points.
+#[derive(Debug)]
 pub(super) struct RsFoldCoeffs<F> {
-    pub(super) m_coeffs_all: Vec<Vec<F>>,
+    pub(super) masking_coeffs_all: Vec<Vec<F>>,
     pub(super) g_i_coeffs: Vec<Vec<F>>,
 }
 
@@ -293,8 +302,8 @@ pub(super) struct RsFoldCoeffs<F> {
 /// via Φ_i projections: `lifted[b] = table[Φ_i_bits(b)]`.
 ///
 /// With multi-polynomial batching (n witness polynomials, batching coefficients α):
-/// - `m_coeffs_all[0][m] = Σ_j eq · [ĝ₀[Φ₀(j·M+m)] + (-ρ)·msk₀[Φ₀(j·M+m)]]`
-/// - `m_coeffs_all[i][m] = (-ρ·αⁱ) · Σ_j eq · mskᵢ[Φ₀(j·M+m)]`  for i = 1..n-1
+/// - `masking_coeffs_all[0][m] = Σ_j eq · [ĝ₀[Φ₀(j·M+m)] + (-ρ)·msk₀[Φ₀(j·M+m)]]`
+/// - `masking_coeffs_all[i][m] = (-ρ·αⁱ) · Σ_j eq · mskᵢ[Φ₀(j·M+m)]`  for i = 1..n-1
 /// - `g_i_coeffs[i][m] = Σ_j eq · ĝ_{i+1}[Φ_{i+1}(j·M+m)]`  for i = 0..ν-1
 ///
 /// Returns [`RsFoldCoeffs`] where each inner vector has length M.
@@ -321,56 +330,58 @@ pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
     let neg_rho = -rho;
 
     // Accumulate g₀ fold coeffs, per-masking fold coeffs, and g_i fold coeffs
-    let accumulate_j =
-        |g0_acc: &mut Vec<F>, msk_accs: &mut Vec<Vec<F>>, g_acc: &mut Vec<Vec<F>>, j: usize| {
-            let eq_j = eq_weights[j];
-            for sub_idx in 0..sub_poly_len {
-                let full_idx = j * sub_poly_len + sub_idx;
-                let phi_0_idx = dims.phi_i_bits(full_idx, 0);
+    let accumulate_j = |g0_fold_accumulator: &mut Vec<F>,
+                        masking_fold_accumulators: &mut Vec<Vec<F>>,
+                        g_polys_fold_accumulator: &mut Vec<Vec<F>>,
+                        j: usize| {
+        let eq_j = eq_weights[j];
+        for sub_idx in 0..sub_poly_len {
+            let full_idx = j * sub_poly_len + sub_idx;
+            let phi_0_idx = dims.phi_i_bits(full_idx, 0);
 
-                g0_acc[sub_idx] += eq_j * g_polys[0][phi_0_idx];
-                for (i, msk) in masking_polys.iter().enumerate() {
-                    msk_accs[i][sub_idx] += eq_j * msk[phi_0_idx];
-                }
-
-                for gi in 1..num_g_polys {
-                    let phi_i_idx = dims.phi_i_bits(full_idx, gi);
-                    g_acc[gi - 1][sub_idx] += eq_j * g_polys[gi][phi_i_idx];
-                }
+            g0_fold_accumulator[sub_idx] += eq_j * g_polys[0][phi_0_idx];
+            for (i, msk) in masking_polys.iter().enumerate() {
+                masking_fold_accumulators[i][sub_idx] += eq_j * msk[phi_0_idx];
             }
-        };
 
-    // Assemble m_coeffs_all from raw g₀ fold and masking folds
+            for (gi_idx, g_poly) in g_polys[1..].iter().enumerate() {
+                let phi_i_idx = dims.phi_i_bits(full_idx, gi_idx + 1);
+                g_polys_fold_accumulator[gi_idx][sub_idx] += eq_j * g_poly[phi_i_idx];
+            }
+        }
+    };
+
+    // Assemble masking_coeffs_all from raw g₀ fold and masking folds
     let assemble =
-        |g0_fold: Vec<F>, msk_folds: Vec<Vec<F>>, g_i_coeffs: Vec<Vec<F>>| -> RsFoldCoeffs<F> {
-            let mut m_coeffs_all = Vec::with_capacity(num_masking);
+        |g0_fold: Vec<F>, masking_folds: Vec<Vec<F>>, g_i_coeffs: Vec<Vec<F>>| -> RsFoldCoeffs<F> {
+            let mut masking_coeffs_all = Vec::with_capacity(num_masking);
             // m₀ = g₀_fold + (-ρ) · msk₀_fold
             let m0: Vec<F> = g0_fold
                 .iter()
-                .zip(msk_folds[0].iter())
+                .zip(masking_folds[0].iter())
                 .map(|(&g, &msk)| g + neg_rho * msk)
                 .collect();
-            m_coeffs_all.push(m0);
+            masking_coeffs_all.push(m0);
             // mᵢ = (-ρ·αⁱ) · mskᵢ_fold for i ≥ 1
             for i in 1..num_masking {
                 let scale = neg_rho * alpha_coeffs[i];
-                let mi: Vec<F> = msk_folds[i].iter().map(|&v| scale * v).collect();
-                m_coeffs_all.push(mi);
+                let mi: Vec<F> = masking_folds[i].iter().map(|&v| scale * v).collect();
+                masking_coeffs_all.push(mi);
             }
             RsFoldCoeffs {
-                m_coeffs_all,
+                masking_coeffs_all,
                 g_i_coeffs,
             }
         };
 
     let mut g0_fold = vec![F::ZERO; sub_poly_len];
-    let mut msk_folds = vec![vec![F::ZERO; sub_poly_len]; num_masking];
+    let mut masking_folds = vec![vec![F::ZERO; sub_poly_len]; num_masking];
     let mut g_i_coeffs = vec![vec![F::ZERO; sub_poly_len]; num_g_polys - 1];
     for j in 0..num_sub_polys {
-        accumulate_j(&mut g0_fold, &mut msk_folds, &mut g_i_coeffs, j);
+        accumulate_j(&mut g0_fold, &mut masking_folds, &mut g_i_coeffs, j);
     }
 
-    assemble(g0_fold, msk_folds, g_i_coeffs)
+    assemble(g0_fold, masking_folds, g_i_coeffs)
 }
 
 /// Build weight covectors for Step 7's batched blinding proof.
@@ -436,7 +447,7 @@ pub(super) fn gamma_to_f_hat_indices<F: FftField>(
     gamma_points: &[F],
     config: &super::Config<F>,
 ) -> Vec<usize> {
-    debug_assert!(
+    assert!(
         !config.blinded_polynomial.round_configs.is_empty(),
         "zkWHIR 2.0 requires at least one WHIR round"
     );
@@ -448,11 +459,12 @@ pub(super) fn gamma_to_f_hat_indices<F: FftField>(
     let gen_h = config.blinded_polynomial.round_configs[0]
         .irs_committer
         .generator();
+    let gen_h_inv = gen_h.inverse().expect("generator must be invertible");
     let log_round0_len = round0_codeword_len.trailing_zeros();
 
     gamma_points
         .iter()
-        .map(|&gamma| discrete_log_pow2(gamma, gen_h, log_round0_len) * stride)
+        .map(|&gamma| discrete_log_pow2(gamma, gen_h, gen_h_inv, log_round0_len) * stride)
         .collect()
 }
 
@@ -464,6 +476,7 @@ pub(super) fn compute_eq_weights<F: FftField>(r_bar: &[F]) -> Vec<F> {
 /// Accumulator for blinding polynomial claims across OOD, STIR, and Γ queries.
 ///
 /// Collects (z, m_evals, g_evals) tuples during Steps 5-6 for use in Step 7.
+#[derive(Debug)]
 pub(super) struct LambdaAccumulator<F> {
     pub(super) z_points: Vec<F>,
     pub(super) m_evals: Vec<Vec<F>>,
@@ -480,13 +493,13 @@ impl<F> LambdaAccumulator<F> {
     }
 
     pub(super) fn push(&mut self, z: F, m: Vec<F>, g: Vec<F>) {
-        debug_assert!(
+        assert!(
             self.m_evals.is_empty() || m.len() == self.m_evals[0].len(),
             "m_evals length mismatch: expected {}, got {}",
             self.m_evals.first().map_or(0, Vec::len),
             m.len()
         );
-        debug_assert!(
+        assert!(
             self.g_evals.is_empty() || g.len() == self.g_evals[0].len(),
             "g_evals length mismatch: expected {}, got {}",
             self.g_evals.first().map_or(0, Vec::len),
@@ -642,6 +655,12 @@ mod tests {
     // discrete_log_pow2 unit tests
     // ---------------------------------------------------------------
 
+    /// Test helper: calls discrete_log_pow2 with an auto-computed inverse.
+    fn dlog(target: Field64, gen: Field64, log_order: u32) -> usize {
+        let gen_inv = gen.inverse().expect("generator must be invertible");
+        discrete_log_pow2(target, gen, gen_inv, log_order)
+    }
+
     /// Get a generator of the multiplicative subgroup of order 2^k in Field64.
     fn subgroup_gen(log_order: u32) -> Field64 {
         // Field64: p = 2^64 - 2^32 + 1, two-adic valuation = 32
@@ -661,7 +680,7 @@ mod tests {
         for log_order in 1..=8 {
             let gen = subgroup_gen(log_order);
             assert_eq!(
-                discrete_log_pow2(Field64::ONE, gen, log_order),
+                dlog(Field64::ONE, gen, log_order),
                 0,
                 "dlog(1, gen, {log_order}) should be 0"
             );
@@ -673,7 +692,7 @@ mod tests {
         for log_order in 1..=8 {
             let gen = subgroup_gen(log_order);
             assert_eq!(
-                discrete_log_pow2(gen, gen, log_order),
+                dlog(gen, gen, log_order),
                 1,
                 "dlog(gen, gen, {log_order}) should be 1"
             );
@@ -688,7 +707,7 @@ mod tests {
         for i in 0..16usize {
             let target = gen.pow([i as u64]);
             assert_eq!(
-                discrete_log_pow2(target, gen, log_order),
+                dlog(target, gen, log_order),
                 i,
                 "dlog(gen^{i}, gen, {log_order}) should be {i}"
             );
@@ -699,8 +718,8 @@ mod tests {
     fn dlog_order_1() {
         // Group of order 2^1 = 2: elements are {1, -1}
         let gen = subgroup_gen(1);
-        assert_eq!(discrete_log_pow2(Field64::ONE, gen, 1), 0);
-        assert_eq!(discrete_log_pow2(gen, gen, 1), 1);
+        assert_eq!(dlog(Field64::ONE, gen, 1), 0);
+        assert_eq!(dlog(gen, gen, 1), 1);
     }
 
     #[test]
@@ -711,11 +730,7 @@ mod tests {
         // Check a handful of indices including edge cases
         for &i in &[0, 1, 2, 511, 512, 1023] {
             let target = gen.pow([i as u64]);
-            assert_eq!(
-                discrete_log_pow2(target, gen, log_order),
-                i,
-                "failed for i={i}"
-            );
+            assert_eq!(dlog(target, gen, log_order), i, "failed for i={i}");
         }
     }
 
@@ -731,7 +746,7 @@ mod tests {
             let i = (idx % order) as usize;
             let gen = subgroup_gen(log_order);
             let target = gen.pow([i as u64]);
-            let result = discrete_log_pow2(target, gen, log_order);
+            let result = dlog(target, gen, log_order);
             prop_assert_eq!(result, i, "dlog roundtrip failed for log_order={}, i={}", log_order, i);
         }
 

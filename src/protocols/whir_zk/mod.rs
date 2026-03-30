@@ -1,7 +1,7 @@
 /// zkWHIR 2.0 — Zero-Knowledge WHIR with poly-logarithmic overhead.
 ///
 /// Uses the "Alternative Randomness Sampling" approach which samples only
-/// ν = ⌊μ/ℓ⌋ + 1 blinding polynomials (instead of μ + 1), reducing proof
+/// ν + 1 = ⌊μ/ℓ⌋ + 1 blinding polynomials (instead of μ + 1), reducing proof
 /// size to (ν + 1) · q(δ) field elements.
 ///
 /// Two WHIR instances run as sub-protocols:
@@ -112,31 +112,33 @@ impl<F: FftField> Config<F> {
             num_variables_main,
         );
         witness_leak.t_delta = witness_t_delta;
-        // For the blinding instance, T(δ) is approximated as q(δ) since its config
-        // depends on ℓ, which we're computing here (conservative upper bound).
+
+        // Blinding leak: use μ for num_variables (conservative, per paper §"Query Complexity
+        // Computation": q_ub ≤ leak(δ₁,k₁,μ,d) + leak(δ₂,k₂,μ,3)). Using the witness IRS
+        // config for ood_delta is also conservative since the blinding instance is smaller.
         let blinding_leak = InstanceLeak::new(
             params,
             blinding_sec,
             &blinded_config.initial_committer,
             num_variables_main,
         );
-
-        let q_ub = query_upper_bound(&witness_leak, &blinding_leak);
-
-        // ell = smallest integer such that 2^ell > q_ub
-        let ell = (usize::BITS - q_ub.leading_zeros()) as usize;
+        let ell = ell_from_q_ub(query_upper_bound(&witness_leak, &blinding_leak));
         assert!(
             ell + 1 < num_variables_main,
             "blinding variables ell+1={} must be < mu={num_variables_main}",
             ell + 1
         );
-        debug_assert!(
-            (1usize << ell) > q_ub,
-            "2^ell ({}) must exceed q_ub ({q_ub})",
-            1usize << ell
+        // Configuration validation: if ell < initial_folding_factor, build_beq_tables
+        // will underflow when computing m_cap. Catch misconfiguration here with a
+        // clear message instead of a confusing panic deep in the proving path.
+        assert!(
+            ell >= params.initial_folding_factor,
+            "ell={ell} must be >= initial_folding_factor={} \
+             (parameters too aggressive for ZK sizing)",
+            params.initial_folding_factor
         );
 
-        // nu = ⌊mu/ell⌋ — number of blinding polynomials (alternative sampling)
+        // nu = ⌊mu/ell⌋ — highest blinding polynomial index (nu+1 total g-polynomials)
         let nu = num_variables_main / ell;
         let blinding_params = ProtocolParameters {
             batch_size: params.batch_size + nu,
@@ -216,10 +218,11 @@ impl InstanceLeak {
 
     /// `leak(δ, k, μ, d) := k · [q(δ) + stir(δ)] + T(δ) + ood(δ) + (d+1) · μ`
     const fn leak(&self) -> usize {
-        self.k * (self.q_delta + self.stir_delta)
-            + self.t_delta
-            + self.ood_delta
-            + (self.d + 1) * self.mu
+        self.k
+            .saturating_mul(self.q_delta.saturating_add(self.stir_delta))
+            .saturating_add(self.t_delta)
+            .saturating_add(self.ood_delta)
+            .saturating_add(self.d.saturating_add(1).saturating_mul(self.mu))
     }
 
     /// Compute `q(δ)` and `stir(δ)` for a given security target and rate.
@@ -250,7 +253,13 @@ impl InstanceLeak {
 ///
 /// `q_ub ≤ leak(δ₁, k₁, μ, d) + leak(δ₂, k₂, μ, 3)`
 const fn query_upper_bound(witness: &InstanceLeak, blinding: &InstanceLeak) -> usize {
-    witness.leak() + blinding.leak()
+    witness.leak().saturating_add(blinding.leak())
+}
+
+/// Smallest `ell` such that `2^ell > q_ub`.
+const fn ell_from_q_ub(q_ub: usize) -> usize {
+    assert!(q_ub > 0, "query upper bound must be positive");
+    (usize::BITS - q_ub.leading_zeros()) as usize
 }
 
 #[cfg(test)]
@@ -277,19 +286,7 @@ mod tests {
     const TEST_NUM_COEFFS: usize = 1 << TEST_NUM_VARIABLES;
 
     fn make_test_config() -> Config<F> {
-        let whir_params = ProtocolParameters {
-            unique_decoding: false,
-            security_level: 16,
-            pow_bits: 0,
-            initial_folding_factor: 2,
-            folding_factor: 2,
-            starting_log_inv_rate: 1,
-            batch_size: 1,
-            hash_id: hash::SHA2,
-        };
-        let mut config = Config::new(TEST_NUM_VARIABLES, &whir_params);
-        config.disable_pow();
-        config
+        make_test_config_batch(1)
     }
 
     /// Materialize linear forms into Covectors for the prover.
@@ -431,6 +428,40 @@ mod tests {
         let mut config = Config::new(TEST_NUM_VARIABLES, &whir_params);
         config.disable_pow();
         config
+    }
+
+    /// Round-trip test with `num_variables` chosen so that `mu % ell != 0`,
+    /// exercising the uneven-tiling code path where Φ₀ and Φ₁ extract
+    /// different bit windows.
+    #[test]
+    fn test_zk2_prove_verify_nonzero_rem() {
+        const NUM_VARS: usize = 14;
+        const NUM_COEFFS: usize = 1 << NUM_VARS;
+
+        let mut rng = ark_std::test_rng();
+        let whir_params = ProtocolParameters {
+            unique_decoding: false,
+            security_level: 16,
+            pow_bits: 0,
+            initial_folding_factor: 2,
+            folding_factor: 2,
+            starting_log_inv_rate: 1,
+            batch_size: 1,
+            hash_id: hash::SHA2,
+        };
+        let mut config = Config::new(NUM_VARS, &whir_params);
+        config.disable_pow();
+
+        // Verify rem != 0 for this parameter set.
+        let ell = config.blinding_polynomial.initial_num_variables() - 1;
+        assert_ne!(NUM_VARS % ell, 0, "test requires non-zero rem");
+
+        let vector = vec![F::ONE; NUM_COEFFS];
+        let point = MultilinearPoint::rand(&mut rng, NUM_VARS);
+        let form = MultilinearExtension { point: point.0 };
+        let evaluation = form.evaluate(config.embedding(), &vector);
+
+        prove_and_verify(&config, vec![vector], vec![Box::new(form)], &[evaluation]);
     }
 
     #[test]
