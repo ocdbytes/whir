@@ -1,7 +1,7 @@
 use ark_ff::FftField;
 
 use super::Config;
-use crate::algebra::{geometric_accumulate, geometric_sequence, MultilinearPoint};
+use crate::algebra::{geometric_accumulate, geometric_sequence};
 
 /// Derived protocol dimensions for a single zkWHIR 2.0 execution.
 ///
@@ -12,6 +12,7 @@ pub(super) struct ProtocolDims {
     pub(super) mu: usize,
     pub(super) ell: usize,
     pub(super) rem: usize,
+    /// ν blinding polynomials excluding g₀; total g-polynomials = ν + 1 = `num_g_polys()`.
     pub(super) nu: usize,
     pub(super) size: usize,
     pub(super) num_vectors: usize,
@@ -102,6 +103,7 @@ pub(super) fn discrete_log_pow2<F: FftField>(
     gen_inv: F,
     log_order: u32,
 ) -> usize {
+    debug_assert_eq!(gen * gen_inv, F::ONE, "gen_inv must be the inverse of gen");
     let mut result = 0usize;
     let mut current = target;
     let mut gen_inv_power = gen_inv; // gen^{-2^bit} accumulator
@@ -330,6 +332,7 @@ pub(super) fn compute_rs_fold_blinding_coeffs<F: FftField>(
     let neg_rho = -rho;
 
     // Accumulate g₀ fold coeffs, per-masking fold coeffs, and g_i fold coeffs
+    #[allow(clippy::needless_range_loop)]
     let accumulate_j = |g0_fold_accumulator: &mut Vec<F>,
                         masking_fold_accumulators: &mut Vec<Vec<F>>,
                         g_polys_fold_accumulator: &mut Vec<Vec<F>>,
@@ -470,7 +473,16 @@ pub(super) fn gamma_to_f_hat_indices<F: FftField>(
 
 /// Compute eq_weights from r_bar. Shared helper to avoid redundant computation.
 pub(super) fn compute_eq_weights<F: FftField>(r_bar: &[F]) -> Vec<F> {
-    MultilinearPoint(r_bar.to_vec()).eq_weights()
+    let len = 1usize << r_bar.len();
+    let mut buf = vec![F::ONE; len];
+    for (i, &r) in r_bar.iter().enumerate() {
+        let half = 1 << i;
+        for j in (0..half).rev() {
+            buf[2 * j + 1] = buf[j] * r;
+            buf[2 * j] = buf[j] - buf[2 * j + 1];
+        }
+    }
+    buf
 }
 
 /// Accumulator for blinding polynomial claims across OOD, STIR, and Γ queries.
@@ -478,9 +490,9 @@ pub(super) fn compute_eq_weights<F: FftField>(r_bar: &[F]) -> Vec<F> {
 /// Collects (z, m_evals, g_evals) tuples during Steps 5-6 for use in Step 7.
 #[derive(Debug)]
 pub(super) struct LambdaAccumulator<F> {
-    pub(super) z_points: Vec<F>,
-    pub(super) m_evals: Vec<Vec<F>>,
-    pub(super) g_evals: Vec<Vec<F>>,
+    z_points: Vec<F>,
+    m_evals: Vec<Vec<F>>,
+    g_evals: Vec<Vec<F>>,
 }
 
 impl<F> LambdaAccumulator<F> {
@@ -490,6 +502,10 @@ impl<F> LambdaAccumulator<F> {
             m_evals: Vec::new(),
             g_evals: Vec::new(),
         }
+    }
+
+    pub(super) fn z_points(&self) -> &[F] {
+        &self.z_points
     }
 
     pub(super) fn push(&mut self, z: F, m: Vec<F>, g: Vec<F>) {

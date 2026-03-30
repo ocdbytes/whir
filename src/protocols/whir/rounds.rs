@@ -36,8 +36,8 @@ pub struct SumcheckState<'a, F> {
 /// Configuration for the final WHIR round (sumcheck + proof-of-work).
 #[derive(Debug)]
 pub struct FinalRoundConfig<'a, F: FftField> {
-    pub sumcheck: &'a sumcheck::Config<F>,
-    pub pow: &'a proof_of_work::Config,
+    pub(crate) sumcheck: &'a sumcheck::Config<F>,
+    pub(crate) pow: &'a proof_of_work::Config,
 }
 
 /// Result of a single verifier round (rounds 1+).
@@ -310,8 +310,8 @@ where
         if i == 0 {
             first_in_domain_points = in_domain.points;
         }
-        round_folding_randomness.push(new_folding.clone());
-        folding_randomness = new_folding;
+        folding_randomness = new_folding.clone();
+        round_folding_randomness.push(new_folding);
         prev_witness = witness;
     }
 
@@ -388,8 +388,8 @@ where
         }
         round_constraints.push((result.stir_rlc_coeffs, result.stir_challenges));
         let new_folding = result.folding_randomness;
-        round_folding_randomness.push(new_folding.clone());
-        folding_randomness = new_folding;
+        folding_randomness = new_folding.clone();
+        round_folding_randomness.push(new_folding);
         prev_commitment = result.commitment;
     }
 

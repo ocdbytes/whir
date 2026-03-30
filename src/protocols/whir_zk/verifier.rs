@@ -1,5 +1,3 @@
-use std::mem;
-
 use ark_ff::FftField;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -67,6 +65,10 @@ struct VerifyPrepareResult<F> {
 }
 
 /// Result of Step 5 (OOD/STIR queries, remaining WHIR rounds, linear form RLC).
+///
+/// Includes all state forwarded from [`VerifyPrepareResult`] that Step 6 needs,
+/// so that `ood_stir_and_rounds` consumes `prepare` by value — preventing
+/// accidental reads of `Default`-valued fields after `mem::take`.
 #[must_use]
 #[derive(Debug)]
 struct VerifyOodStirResult<F> {
@@ -79,6 +81,12 @@ struct VerifyOodStirResult<F> {
     constraint_rlc_coeffs: Vec<F>,
     /// Claimed RLC value of the linear form MLEs at `evaluation_point`.
     linear_form_rlc: F,
+    // Forwarded from `VerifyPrepareResult` for `gamma_check` (Step 6).
+    batching_weights: Vec<F>,
+    beta_powers: Vec<F>,
+    rho: F,
+    eq_weights: Vec<F>,
+    alpha_coeffs: Vec<F>,
 }
 
 /// Context for verifying the blinded polynomial (Steps 2-6).
@@ -180,10 +188,14 @@ where
     }
 
     /// Step 5: Virtual OOD and STIR queries, remaining WHIR rounds, linear form RLC check.
+    ///
+    /// Consumes `prepare` by value so that gamma_check receives all fields
+    /// through the returned [`VerifyOodStirResult`] rather than reading a
+    /// partially-hollowed struct.
     #[allow(clippy::too_many_lines)]
     fn ood_stir_and_rounds(
         &mut self,
-        prepare: &mut VerifyPrepareResult<F>,
+        mut prepare: VerifyPrepareResult<F>,
         weights: &[&dyn LinearForm<F>],
     ) -> VerificationResult<VerifyOodStirResult<F>> {
         let nu = self.dims.nu;
@@ -295,7 +307,7 @@ where
         let folding_randomness = round_config
             .sumcheck
             .verify(self.verifier_state, &mut prepare.the_sum)?;
-        let mut round_folding_randomness = vec![mem::take(&mut prepare.folding_randomness)];
+        let mut round_folding_randomness = vec![prepare.folding_randomness];
 
         // =====================================================================
         // Step 5 (continued): Remaining standard WHIR rounds
@@ -378,15 +390,19 @@ where
             gamma_points,
             gamma_h_values,
             evaluation_point,
-            constraint_rlc_coeffs: mem::take(&mut prepare.constraint_rlc_coeffs),
+            constraint_rlc_coeffs: prepare.constraint_rlc_coeffs,
             linear_form_rlc,
+            batching_weights: prepare.batching_weights,
+            beta_powers: prepare.beta_powers,
+            rho: prepare.rho,
+            eq_weights: prepare.eq_weights,
+            alpha_coeffs: prepare.alpha_coeffs,
         })
     }
 
     /// Step 6: Verifier Consistency Check — Γ point decomposition.
     fn gamma_check(
         &mut self,
-        prepare: VerifyPrepareResult<F>,
         mut ood: VerifyOodStirResult<F>,
     ) -> VerificationResult<BlindedVerifyResult<F>> {
         let num_vectors = self.dims.num_vectors;
@@ -412,9 +428,7 @@ where
             )?;
 
         // fold(r̄, [[f̂_combined]])(γ) uses tensor_product(α, eq_weights)
-        let f_hat_fold_at_gamma: Vec<F> = gamma_f_hat_evals
-            .values(&prepare.batching_weights)
-            .collect();
+        let f_hat_fold_at_gamma: Vec<F> = gamma_f_hat_evals.values(&ood.batching_weights).collect();
 
         // Read blinding claims and check decomposition
         for (idx, &gamma) in ood.gamma_points.iter().enumerate() {
@@ -426,9 +440,9 @@ where
             let g_sum: F = g_evals
                 .iter()
                 .enumerate()
-                .map(|(i, &g)| prepare.beta_powers[i + 1] * g)
+                .map(|(i, &g)| ood.beta_powers[i + 1] * g)
                 .sum();
-            let l_gamma = prepare.rho * f_hat_fold_at_gamma[idx] + m_combined + g_sum;
+            let l_gamma = ood.rho * f_hat_fold_at_gamma[idx] + m_combined + g_sum;
             verify!(l_gamma == ood.gamma_h_values[idx]);
 
             ood.lambda.push(gamma, m_evals, g_evals);
@@ -436,9 +450,9 @@ where
 
         Ok(BlindedVerifyResult {
             lambda: ood.lambda,
-            eq_weights: prepare.eq_weights,
-            rho: prepare.rho,
-            alpha_coeffs: prepare.alpha_coeffs,
+            eq_weights: ood.eq_weights,
+            rho: ood.rho,
+            alpha_coeffs: ood.alpha_coeffs,
             dims: self.dims,
             blinded_final_claim: whir::FinalClaim {
                 evaluation_point: ood.evaluation_point,
@@ -498,9 +512,9 @@ impl<F: FftField> Config<F> {
             commitments,
             dims: protocol_dims,
         };
-        let mut prepare = ctx.prepare_and_sumcheck(weights, evaluations)?;
-        let ood = ctx.ood_stir_and_rounds(&mut prepare, weights)?;
-        ctx.gamma_check(prepare, ood)
+        let prepare = ctx.prepare_and_sumcheck(weights, evaluations)?;
+        let ood = ctx.ood_stir_and_rounds(prepare, weights)?;
+        ctx.gamma_check(ood)
     }
 
     /// Step 7: Batched Proof on Blinding Polynomials.
@@ -529,7 +543,8 @@ impl<F: FftField> Config<F> {
         let blinded_final_claim = blinded.blinded_final_claim;
         let tau: F = verifier_state.verifier_message();
 
-        let beq_tables = build_beq_tables(&blinded.lambda.z_points, &blinded.eq_weights, tau, dims);
+        let beq_tables =
+            build_beq_tables(blinded.lambda.z_points(), &blinded.eq_weights, tau, dims);
 
         let weight_covectors =
             build_weight_covectors(&beq_tables, blinded.rho, &blinded.alpha_coeffs, dims);

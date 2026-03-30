@@ -29,9 +29,10 @@ pub(super) struct BlindingSecrets<F: FftField> {
 /// Contains the IRS-commit witnesses for both WHIR instances, plus the raw
 /// polynomial data needed by Steps 2-7.
 ///
-/// Secret blinding randomness is held in [`BlindingSecrets`] which implements
-/// [`ZeroizeOnDrop`], ensuring it is scrubbed from memory even if the witness
+/// Secret blinding randomness is held in `BlindingSecrets` which implements
+/// `ZeroizeOnDrop`, ensuring it is scrubbed from memory even if the witness
 /// is destructured for early field-level drops.
+#[must_use]
 #[allow(clippy::struct_field_names)]
 pub struct Witness<F: FftField> {
     /// IRS-commit witness for [[f̂]] (first WHIR instance).
@@ -53,7 +54,6 @@ impl<F: FftField> Config<F> {
     ///   1c. Sample ν + 1 random ℓ-variate blinding polynomials ĝ₀..ĝ_ν
     ///   1d. Build committed vectors: n M-polynomials Mᵢ(ȳ,t) = ĝ₀(ȳ) + t·mskᵢ(ȳ)
     ///       and ν embedded ĝ-polynomials, then commit [[M]], [[ĝ₁]]..[[ĝ_ν]]
-    #[must_use]
     pub fn commit<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
