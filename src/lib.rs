@@ -2,6 +2,8 @@ pub mod algebra;
 pub mod ark_serde;
 pub mod bits;
 pub mod cmdline_utils;
+#[cfg(feature = "counters")]
+pub mod counters;
 pub mod engines;
 pub mod hash;
 pub mod parameters;

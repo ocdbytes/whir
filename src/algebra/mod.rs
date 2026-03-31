@@ -70,6 +70,9 @@ pub fn mixed_scalar_mul_add<M: Embedding>(
     vector: &[M::Source],
 ) {
     assert_eq!(accumulator.len(), vector.len());
+
+    #[cfg(feature = "counters")]
+    crate::counters::record_scalar_mul_add(accumulator.len());
     for (accumulator, value) in accumulator.iter_mut().zip(vector) {
         *accumulator += embedding.mixed_mul(weight, *value);
     }
@@ -112,6 +115,9 @@ pub fn mixed_dot<F: Field, G: Field>(
     b: &[F],
 ) -> G {
     assert_eq!(a.len(), b.len());
+
+    #[cfg(feature = "counters")]
+    crate::counters::record_dot(a.len());
 
     #[cfg(feature = "parallel")]
     if a.len() > workload_size::<G>() {

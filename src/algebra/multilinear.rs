@@ -90,6 +90,13 @@ pub fn mixed_multilinear_extend<M: Embedding>(
 ///
 /// where `z_i` are the  points.
 pub fn eval_eq<F: Field>(accumulator: &mut [F], point: &[F], scalar: F) {
+    #[cfg(feature = "counters")]
+    crate::counters::record_eval_eq(accumulator.len());
+
+    eval_eq_inner(accumulator, point, scalar);
+}
+
+fn eval_eq_inner<F: Field>(accumulator: &mut [F], point: &[F], scalar: F) {
     assert_eq!(accumulator.len(), 1 << point.len());
     if let [x0, xs @ ..] = point {
         let (acc_0, acc_1) = accumulator.split_at_mut(1 << xs.len());
@@ -100,12 +107,15 @@ pub fn eval_eq<F: Field>(accumulator: &mut [F], point: &[F], scalar: F) {
         {
             use crate::utils::workload_size;
             if acc_0.len() > workload_size::<F>() {
-                rayon::join(|| eval_eq(acc_0, xs, s0), || eval_eq(acc_1, xs, s1));
+                rayon::join(
+                    || eval_eq_inner(acc_0, xs, s0),
+                    || eval_eq_inner(acc_1, xs, s1),
+                );
                 return;
             }
         }
-        eval_eq(acc_0, xs, s0);
-        eval_eq(acc_1, xs, s1);
+        eval_eq_inner(acc_0, xs, s0);
+        eval_eq_inner(acc_1, xs, s1);
     } else {
         accumulator[0] += scalar;
     }

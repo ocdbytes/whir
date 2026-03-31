@@ -430,6 +430,9 @@ impl<F: FftField> Config<F> {
             );
         }
 
+        #[cfg(feature = "counters")]
+        crate::counters::print_summary();
+
         result
     }
 }

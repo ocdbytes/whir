@@ -46,6 +46,8 @@ pub fn compute_sumcheck_polynomial<F: Field>(a: &[F], b: &[F]) -> (F, F) {
 
 /// Folds evaluations by linear interpolation at the given weight, in place.
 pub fn fold<F: Field>(values: &mut Vec<F>, weight: F) {
+    #[cfg(feature = "counters")]
+    crate::counters::record_fold(values.len());
     fn recurse<F: Field>(low: &mut [F], high: &[F], weight: F) {
         #[cfg(feature = "parallel")]
         if low.len() > workload_size::<F>() {

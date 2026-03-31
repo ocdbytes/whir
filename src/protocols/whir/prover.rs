@@ -311,6 +311,9 @@ where
                 .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
         evaluation_point.extend(final_folding_randomness.0.iter().copied());
 
+        #[cfg(feature = "counters")]
+        crate::counters::print_summary();
+
         FinalClaim {
             evaluation_point,
             rlc_coefficients: initial_forms_rlc_coeffs.to_vec(),
