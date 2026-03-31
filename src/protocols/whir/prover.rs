@@ -1,6 +1,6 @@
 use std::{any::Any, borrow::Cow, mem};
 
-use ark_ff::{AdditiveGroup, FftField, Field};
+use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -10,11 +10,11 @@ use crate::{
     algebra::{
         dot,
         embedding::Embedding,
-        lift,
+        eq_weights, lift,
         linear_form::{Covector, Evaluate, LinearForm, UnivariateEvaluation},
         mixed_scalar_mul_add,
         sumcheck::fold,
-        tensor_product, MultilinearPoint,
+        tensor_product,
     },
     hash::Hash,
     protocols::{geometric_challenge::geometric_challenge, irs_commit, whir::FinalClaim},
@@ -25,19 +25,12 @@ use crate::{
     utils::zip_strict,
 };
 
-enum RoundWitness<'a, F: FftField, M: Embedding<Target = F>>
-where
-    M::Source: FftField,
-{
+enum RoundWitness<'a, F: Field, M: Embedding<Target = F>> {
     Initial(Vec<Cow<'a, irs_commit::Witness<M::Source, F>>>),
     Round(irs_commit::Witness<F, F>),
 }
 
-impl<M: Embedding> Config<M>
-where
-    M::Source: FftField,
-    M::Target: FftField,
-{
+impl<M: Embedding> Config<M> {
     /// Prove a WHIR opening.
     ///
     /// * `prover_state` the mutable transcript to write the proof to.
@@ -202,7 +195,8 @@ where
         // Run initial sumcheck on batched vectors with combined statement
         let mut folding_randomness = if has_constraints {
             self.initial_sumcheck
-                .prove(prover_state, &mut vector, &mut covector, &mut the_sum)
+                .prove(prover_state, &mut vector, &mut covector, &mut the_sum, &[])
+                .0
         } else {
             // There are no constraints yet, so we can skip the sumcheck.
             // (If we did run it, all sumcheck vectors would be constant zero)
@@ -217,9 +211,9 @@ where
             }
             // Covector must be all zeros.
             covector = vec![M::Target::ZERO; self.initial_sumcheck.final_size()];
-            MultilinearPoint(folding_randomness)
+            folding_randomness
         };
-        let mut evaluation_point = folding_randomness.0.clone();
+        let mut evaluation_point = folding_randomness.clone();
 
         debug_assert_eq!(dot(&vector, &covector), the_sum);
 
@@ -258,7 +252,7 @@ where
                 .values(&[M::Target::ONE])
                 .chain(in_domain.values(&tensor_product(
                     &vector_rlc_coeffs,
-                    &folding_randomness.eq_weights(),
+                    &eq_weights(&folding_randomness),
                 )))
                 .collect::<Vec<_>>();
             let stir_rlc_coeffs = geometric_challenge(prover_state, stir_challenges.len());
@@ -271,12 +265,12 @@ where
             debug_assert_eq!(dot(&vector, &covector), the_sum);
 
             // Run sumcheck for this round
-            folding_randomness =
-                round_config
-                    .sumcheck
-                    .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
+            folding_randomness = round_config
+                .sumcheck
+                .prove(prover_state, &mut vector, &mut covector, &mut the_sum, &[])
+                .0;
 
-            evaluation_point.extend(folding_randomness.0.iter().copied());
+            evaluation_point.extend(folding_randomness.iter().copied());
             debug_assert_eq!(dot(&vector, &covector), the_sum);
 
             prev_witness = RoundWitness::Round(new_witness);
@@ -307,10 +301,11 @@ where
         }
 
         // Final sumcheck
-        let final_folding_randomness =
-            self.final_sumcheck
-                .prove(prover_state, &mut vector, &mut covector, &mut the_sum);
-        evaluation_point.extend(final_folding_randomness.0.iter().copied());
+        let final_folding_randomness = self
+            .final_sumcheck
+            .prove(prover_state, &mut vector, &mut covector, &mut the_sum, &[])
+            .0;
+        evaluation_point.extend(final_folding_randomness.iter().copied());
 
         FinalClaim {
             evaluation_point,

@@ -1,6 +1,7 @@
 use std::{borrow::Cow, time::Instant};
 
-use ark_ff::FftField;
+#[cfg(feature = "rs_in_order")]
+use ark_ff::Field;
 use ark_std::rand::distributions::{Distribution, Standard};
 use clap::Parser;
 use whir::{
@@ -8,7 +9,6 @@ use whir::{
         embedding::{Basefield, Embedding, Identity},
         fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
         linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
-        MultilinearPoint,
     },
     bits::Bits,
     cmdline_utils::{AvailableFields, AvailableHash},
@@ -97,8 +97,7 @@ fn run_whir<M>(args: &Args)
 where
     Standard: Distribution<M::Source> + Distribution<M::Target>,
     M: Embedding + Default,
-    M::Source: FftField,
-    M::Target: FftField + Codec,
+    M::Target: Codec,
 {
     use whir::protocols::whir::Config;
 
@@ -172,10 +171,10 @@ where
 
     // Evaluation constraint
     let points: Vec<_> = (0..num_evaluations)
-        .map(|x| MultilinearPoint(vec![M::Target::from(x as u64); num_variables]))
+        .map(|x| vec![M::Target::from(x as u64); num_variables])
         .collect();
     for point in &points {
-        let linear_form = Box::new(MultilinearExtension::new(point.0.clone()));
+        let linear_form = Box::new(MultilinearExtension::new(point.clone()));
         evaluations.push(linear_form.evaluate(params.embedding(), &vector));
         linear_forms.push(linear_form.clone());
         prove_linear_forms.push(linear_form);
@@ -233,7 +232,7 @@ where
 fn run_whir_zk<F>(args: &Args)
 where
     Standard: Distribution<F>,
-    F: FftField + Codec,
+    F: Field + Codec,
 {
     use whir::protocols::whir_zk::Config;
 
@@ -305,10 +304,10 @@ where
 
     // Evaluation constraint
     let points: Vec<_> = (0..num_evaluations)
-        .map(|x| MultilinearPoint(vec![F::from(x as u64); num_variables]))
+        .map(|x| vec![F::from(x as u64); num_variables])
         .collect();
     for point in &points {
-        let linear_form = Box::new(MultilinearExtension::new(point.0.clone()));
+        let linear_form = Box::new(MultilinearExtension::new(point.clone()));
         evaluations.push(linear_form.evaluate(&embedding, &vector));
         linear_forms.push(linear_form.clone());
         prove_linear_forms.push(linear_form);

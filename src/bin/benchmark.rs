@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ark_ff::FftField;
 use ark_std::rand::{distributions::Standard, prelude::Distribution};
 use clap::Parser;
 use serde::Serialize;
@@ -14,7 +13,6 @@ use whir::{
         embedding::{Basefield, Embedding, Identity},
         fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
         linear_form::{Evaluate, LinearForm, MultilinearExtension},
-        MultilinearPoint,
     },
     bits::Bits,
     cmdline_utils::{AvailableFields, AvailableHash},
@@ -110,8 +108,7 @@ fn run_whir<M>(args: &Args)
 where
     Standard: Distribution<M::Source> + Distribution<M::Target>,
     M: Embedding + Default,
-    M::Source: FftField,
-    M::Target: FftField + Codec,
+    M::Target: Codec,
 {
     let security_level = args.security_level;
     let pow_bits = args.pow_bits;
@@ -226,14 +223,14 @@ where
         let mut prover_state = ProverState::new_std(&ds);
 
         let points: Vec<_> = (0..args.num_evaluations)
-            .map(|i| MultilinearPoint(vec![M::Target::from(i as u64); num_variables]))
+            .map(|i| vec![M::Target::from(i as u64); num_variables])
             .collect();
 
         let mut weights: Vec<Box<dyn Evaluate<M>>> = Vec::new();
         let mut evaluations = Vec::new();
 
         for point in &points {
-            let linear_form = MultilinearExtension::new(point.0.clone());
+            let linear_form = MultilinearExtension::new(point.clone());
             evaluations.push(linear_form.evaluate(params.embedding(), &vector));
             weights.push(Box::new(linear_form));
         }
@@ -246,7 +243,7 @@ where
         let prove_linear_forms: Vec<Box<dyn LinearForm<M::Target>>> = points
             .iter()
             .map(|p| {
-                Box::new(MultilinearExtension::new(p.0.clone())) as Box<dyn LinearForm<M::Target>>
+                Box::new(MultilinearExtension::new(p.clone())) as Box<dyn LinearForm<M::Target>>
             })
             .collect();
 

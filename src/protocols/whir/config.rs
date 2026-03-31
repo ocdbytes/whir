@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use ark_ff::FftField;
+use ark_ff::Field;
 
 use super::{Config, RoundConfig};
 use crate::{
@@ -11,11 +11,7 @@ use crate::{
     type_info::Type,
 };
 
-impl<M: Embedding> Config<M>
-where
-    M::Source: FftField,
-    M::Target: FftField,
-{
+impl<M: Embedding> Config<M> {
     #[allow(clippy::too_many_lines)]
     pub fn new(size: usize, whir_parameters: &ProtocolParameters) -> Self
     where
@@ -112,6 +108,7 @@ where
                     initial_size: 1 << num_variables,
                     round_pow: pow(folding_pow_bits),
                     num_rounds: whir_parameters.folding_factor,
+                    mask_length: 0,
                 },
                 pow: pow(pow_bits),
             };
@@ -139,6 +136,7 @@ where
                 initial_size: size,
                 round_pow: pow(starting_folding_pow_bits),
                 num_rounds: whir_parameters.initial_folding_factor,
+                mask_length: 0,
             },
             initial_skip_pow: pow(initial_skip_pow_bits),
             round_configs,
@@ -147,6 +145,7 @@ where
                 initial_size: 1 << num_variables,
                 round_pow: pow(final_folding_pow_bits),
                 num_rounds: num_variables,
+                mask_length: 0,
             },
             final_pow: pow(final_pow_bits),
         }
@@ -284,11 +283,7 @@ where
     }
 }
 
-impl<M: Embedding> Display for Config<M>
-where
-    M::Source: FftField,
-    M::Target: FftField,
-{
+impl<M: Embedding> Display for Config<M> {
     #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
@@ -437,7 +432,7 @@ where
     }
 }
 
-impl<F: FftField> RoundConfig<F> {
+impl<F: Field> RoundConfig<F> {
     pub fn initial_size(&self) -> usize {
         assert_eq!(self.irs_committer.vector_size, self.sumcheck.initial_size);
         self.sumcheck.initial_size
@@ -457,10 +452,7 @@ impl<F: FftField> RoundConfig<F> {
     }
 }
 
-impl<F> Display for RoundConfig<F>
-where
-    F: FftField,
-{
+impl<F: Field> Display for RoundConfig<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "  commit   {}", self.irs_committer)?;
         writeln!(f, "  pow      {:.2} bits", self.pow.difficulty())?;
@@ -552,6 +544,7 @@ mod tests {
                     initial_size: 1 << 10,
                     round_pow: proof_of_work::Config::from_difficulty(Bits::new(19.0)),
                     num_rounds: 2,
+                    mask_length: 0,
                 },
                 pow: proof_of_work::Config::from_difficulty(Bits::new(17.0)),
             },
@@ -574,6 +567,7 @@ mod tests {
                     initial_size: 1 << 10,
                     round_pow: proof_of_work::Config::from_difficulty(Bits::new(19.5)),
                     num_rounds: 2,
+                    mask_length: 0,
                 },
                 pow: proof_of_work::Config::from_difficulty(Bits::new(18.0)),
             },

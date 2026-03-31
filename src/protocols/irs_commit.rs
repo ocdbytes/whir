@@ -23,7 +23,7 @@ use std::{
     ops::Neg,
 };
 
-use ark_ff::{AdditiveGroup, FftField, Field};
+use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -48,13 +48,9 @@ use crate::{
 };
 
 /// Commit to vectors over an fft-friendly field F
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(bound = "M: Embedding, M::Source: FftField")]
-pub struct Config<M>
-where
-    M: Embedding,
-    M::Source: FftField,
-{
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct Config<M: Embedding> {
     /// Embedding into a (larger) field used for weights and drawing challenges.
     pub embedding: Typed<M>,
 
@@ -96,7 +92,7 @@ where
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
 #[must_use]
-pub struct Witness<F: FftField, G = F>
+pub struct Witness<F: Field, G = F>
 where
     G: Field,
 {
@@ -125,10 +121,7 @@ pub struct Evaluations<F> {
     pub matrix: Vec<F>,
 }
 
-impl<M: Embedding> Config<M>
-where
-    M::Source: FftField,
-{
+impl<M: Embedding> Config<M> {
     pub fn new(
         security_target: f64,
         unique_decoding: bool,
@@ -523,7 +516,7 @@ impl<G: Field> Commitment<G> {
     }
 }
 
-impl<F: FftField, G: Field> Witness<F, G> {
+impl<F: Field, G: Field> Witness<F, G> {
     /// Returns the out-of-domain evaluations.
     pub const fn out_of_domain(&self) -> &Evaluations<G> {
         &self.out_of_domain
@@ -572,10 +565,7 @@ impl<F: Field> Evaluations<F> {
     }
 }
 
-impl<M: Embedding> fmt::Display for Config<M>
-where
-    M::Source: FftField,
-{
+impl<M: Embedding> fmt::Display for Config<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -640,10 +630,7 @@ pub(crate) mod tests {
         transcript::{codecs::U64, DomainSeparator},
     };
 
-    impl<M: Embedding> Config<M>
-    where
-        M::Source: FftField,
-    {
+    impl<M: Embedding> Config<M> {
         pub fn arbitrary(
             embedding: M,
             num_vectors: usize,
@@ -702,7 +689,7 @@ pub(crate) mod tests {
 
     fn test<M: Embedding>(seed: u64, config: &Config<M>)
     where
-        M::Source: FftField + ProverMessage,
+        M::Source: ProverMessage,
         M::Target: Codec,
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
@@ -801,8 +788,8 @@ pub(crate) mod tests {
 
     fn proptest<M: Embedding>(embedding: &M)
     where
-        M::Source: FftField + ProverMessage,
-        M::Target: FftField + Codec,
+        M::Source: ProverMessage,
+        M::Target: Codec,
         Standard: Distribution<M::Source> + Distribution<M::Target>,
     {
         let valid_sizes = (1..=1024)

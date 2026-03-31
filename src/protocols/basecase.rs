@@ -4,7 +4,7 @@
 //!
 //! <https://eprint.iacr.org/2026/391.pdf> § 7.
 
-use ark_ff::FftField;
+use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use spongefish::{Decoding, VerificationResult};
@@ -26,7 +26,7 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct Config<F: FftField> {
+pub struct Config<F: Field> {
     pub commit: irs_commit::Config<Identity<F>>,
     pub sumcheck: sumcheck::Config<F>,
 
@@ -34,7 +34,7 @@ pub struct Config<F: FftField> {
     pub masked: bool,
 }
 
-impl<F: FftField> Config<F> {
+impl<F: Field> Config<F> {
     pub const fn size(&self) -> usize {
         self.sumcheck.initial_size
     }
@@ -73,9 +73,10 @@ impl<F: FftField> Config<F> {
             let _ = self.commit.open(prover_state, &[witness]);
             let point = self
                 .sumcheck
-                .prove(prover_state, &mut vector, &mut covector, &mut sum);
+                .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
+                .0;
             assert!(!vector[0].is_zero(), "Proof failed");
-            return (point.0, covector[0]);
+            return (point, covector[0]);
         }
 
         // Create masking vector.
@@ -103,12 +104,16 @@ impl<F: FftField> Config<F> {
 
         // Run sumcheck to reduce linear form claim
         let mut masked_sum = mask_sum + mask_rlc * sum;
-        let point = self.sumcheck.prove(
-            prover_state,
-            &mut masked_vector,
-            &mut covector,
-            &mut masked_sum,
-        );
+        let point = self
+            .sumcheck
+            .prove(
+                prover_state,
+                &mut masked_vector,
+                &mut covector,
+                &mut masked_sum,
+                &[],
+            )
+            .0;
 
         // If the MLE of `masked_vector` evaluates to zero, the verifier can not proceed.
         // Basically the sumcheck equation has degenerated to 0 * l(r) = 0, which provides
@@ -117,7 +122,7 @@ impl<F: FftField> Config<F> {
         assert!(!masked_vector[0].is_zero(), "Proof failed");
 
         // Return evaluation point and value of the covector.
-        (point.0, covector[0])
+        (point, covector[0])
     }
 
     pub fn verify<H>(
@@ -148,7 +153,7 @@ impl<F: FftField> Config<F> {
             let masks = verifier_state
                 .prover_messages_vec(self.commit.mask_length * self.commit.num_messages())?;
             let evals = self.commit.verify(verifier_state, &[commitment])?;
-            let point = self.sumcheck.verify(verifier_state, &mut sum)?;
+            let point = self.sumcheck.verify(verifier_state, &mut sum)?.0;
 
             for (&point, value) in zip_strict(&evals.points, evals.values(&[F::ONE])) {
                 // We expected `f(x) + x^l · g(x)` where l = deg(f) + 1, f is the message and g the mask.
@@ -157,10 +162,10 @@ impl<F: FftField> Config<F> {
                         * univariate_evaluate(&masks, point);
                 verify!(value == expected);
             }
-            let mle = multilinear_extend(&vector, &point.0);
+            let mle = multilinear_extend(&vector, &point);
             verify!(!mle.is_zero());
             let linear_mle = sum / mle;
-            return Ok((point.0, linear_mle));
+            return Ok((point, linear_mle));
         }
 
         let mask_commitment = self.commit.receive_commitment(verifier_state)?;
@@ -186,15 +191,15 @@ impl<F: FftField> Config<F> {
 
         // Sumcheck on masked inner product
         let mut masked_sum = mask_sum + mask_rlc * sum;
-        let point = self.sumcheck.verify(verifier_state, &mut masked_sum)?;
+        let point = self.sumcheck.verify(verifier_state, &mut masked_sum)?.0;
 
         // Compute implied MLE of the linear form
         // f*(r) · l(r) = sum  =>  l(r) = sum / f*(r)
-        let masked_mle = multilinear_extend(&masked_vector, &point.0);
+        let masked_mle = multilinear_extend(&masked_vector, &point);
         verify!(!masked_mle.is_zero());
         let linear_mle = masked_sum / masked_mle;
 
-        Ok((point.0, linear_mle))
+        Ok((point, linear_mle))
     }
 }
 
@@ -210,7 +215,7 @@ mod tests {
         algebra::fields, protocols::proof_of_work, transcript::DomainSeparator, type_info::Type,
     };
 
-    impl<F: FftField> Config<F> {
+    impl<F: Field> Config<F> {
         pub fn arbitrary(size: usize, mask_length: usize) -> impl Strategy<Value = Self> {
             let commit =
                 irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1);
@@ -224,6 +229,7 @@ mod tests {
                     initial_size: size,
                     round_pow: proof_of_work::Config::none(),
                     num_rounds: size.next_power_of_two().trailing_zeros() as usize,
+                    mask_length: 0,
                 },
                 masked,
             })
@@ -233,7 +239,7 @@ mod tests {
     #[cfg_attr(feature = "tracing", instrument)]
     fn test_config<F>(seed: u64, config: &Config<F>)
     where
-        F: FftField + Codec,
+        F: Field + Codec,
         Standard: Distribution<F>,
     {
         // Pseudo-random Instance
@@ -273,7 +279,7 @@ mod tests {
         verifier_state.check_eof().unwrap();
     }
 
-    fn test<F: FftField + Codec>()
+    fn test<F: Field + Codec>()
     where
         Standard: Distribution<F>,
     {
