@@ -6,6 +6,8 @@
 use std::sync::{RwLock, RwLockReadGuard};
 
 use ark_ff::{FftField, Field};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 #[cfg(feature = "parallel")]
 use {crate::utils::workload_size, rayon::prelude::*, std::cmp::max};
 
@@ -365,6 +367,11 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         }
     }
 
+    fn generator(&self, codeword_length: usize) -> F {
+        self.omega_order
+            .pow([(self.order / codeword_length) as u64])
+    }
+
     fn evaluation_points(
         &self,
         masked_message_length: usize,
@@ -374,9 +381,7 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         assert!(masked_message_length <= codeword_length);
         assert!(self.order.is_multiple_of(codeword_length));
         let mut result = Vec::new();
-        let generator = self
-            .omega_order
-            .pow([(self.order / codeword_length) as u64]);
+        let generator = self.generator(codeword_length);
 
         // Coset transformation
         let mut coset_size = self.next_order(masked_message_length).unwrap();
@@ -396,6 +401,13 @@ impl<F: Field> ReedSolomon<F> for NttEngine<F> {
         result
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, messages, masks), fields(
+        num_messages = messages.len(),
+        message_len = messages.first().map(|c| c.len()),
+        codeword_length = codeword_length,
+        mask_len = masks.len().checked_div(messages.len())
+
+    )))]
     fn interleaved_encode(&self, messages: &[&[F]], masks: &[F], codeword_length: usize) -> Vec<F> {
         assert!(self.order.is_multiple_of(codeword_length));
         if messages.is_empty() {
