@@ -149,23 +149,15 @@ impl<M: Embedding> Config<M> {
         } else {
             rate.sqrt() / 20.
         };
-        #[allow(clippy::cast_sign_loss)]
-        let out_domain_samples = if unique_decoding {
-            0
-        } else {
-            let field_size_bits = M::Target::field_size_bits();
-            // Johnson list size bound 1 / (2 η √ρ)
+        let out_domain_samples = {
             let list_size = 1. / (2. * johnson_slack * rate.sqrt());
-
-            // The list size error is (L choose 2) * [(d - 1) / |𝔽|]^s
-            // See [STIR] lemma 4.5.
-            // We want to find s such that the error is less than security_target.
-            let l_choose_2 = list_size * (list_size - 1.) / 2.;
-            let log_per_sample = field_size_bits - ((vector_size - 1) as f64).log2();
-            assert!(log_per_sample > 0.);
-            ((security_target + l_choose_2.log2()) / log_per_sample)
-                .ceil()
-                .max(1.) as usize
+            num_ood_samples(
+                unique_decoding,
+                security_target,
+                M::Target::field_size_bits(),
+                list_size,
+                vector_size,
+            )
         };
         #[allow(clippy::cast_sign_loss)]
         let in_domain_samples = {
@@ -579,6 +571,30 @@ impl<M: Embedding> fmt::Display for Config<M> {
             self.in_domain_samples, self.out_domain_samples
         )
     }
+}
+
+/// Return the number of OOD samples needed.
+///
+/// Solves `(L choose 2) · ((degree - 1) / |F|)^s ≤ 2^{-security_target}`
+/// where `L` is the list size and `degree` is the polynomial degree bound.
+/// See [STIR] Lemma 4.5.
+#[allow(clippy::cast_sign_loss)]
+pub(crate) fn num_ood_samples(
+    unique_decoding: bool,
+    security_target: f64,
+    field_size_bits: f64,
+    list_size: f64,
+    degree: usize,
+) -> usize {
+    if unique_decoding {
+        return 0;
+    }
+    let l_choose_2 = list_size * (list_size - 1.) / 2.;
+    let log_per_sample = field_size_bits - ((degree - 1) as f64).log2();
+    assert!(log_per_sample > 0.);
+    ((security_target + l_choose_2.log2()) / log_per_sample)
+        .ceil()
+        .max(1.) as usize
 }
 
 /// Return the number of in-domain queries.
