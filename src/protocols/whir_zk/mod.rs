@@ -106,6 +106,11 @@ impl<F: FftField> Config<F> {
         );
         let blinded_config: whir::Config<Identity<F>> =
             whir::Config::new(1 << num_variables_main, params);
+        assert!(
+            !blinded_config.round_configs.is_empty(),
+            "zkWHIR 2.0 requires at least one WHIR round \
+             (num_variables_main too small for folding_factor)"
+        );
         let witness_sec = params.security_level.saturating_sub(params.pow_bits) as f64;
         let blinding_sec = params.security_level as f64;
 

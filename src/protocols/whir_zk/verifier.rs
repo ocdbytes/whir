@@ -364,6 +364,7 @@ where
 
         let poly_eval = MultilinearExtension::new(remaining.final_sumcheck_randomness.0)
             .evaluate(&Identity::new(), &remaining.final_vector);
+        verify!(poly_eval != F::ZERO);
         let mut linear_form_rlc = prepare.the_sum / poly_eval;
 
         for (idx, (rlc_coeffs, stir_weights)) in round_constraints.into_iter().enumerate() {
