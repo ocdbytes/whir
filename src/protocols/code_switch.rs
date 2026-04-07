@@ -510,7 +510,7 @@ mod tests {
 
         // Decision phase formula (p.55): μ' = ν_1·μ + message_contribution + mask_contribution
         assert_eq!(msg_sum + mask_sum, c.mu_prime - c.original_sl_coeff * r.mu);
-        // Thm 9.6 (p.54): ze has 1 + t_ood + t·ι coefficients
+        // Theorem 9.6 (p.54): ze has 1 + t_ood + t·ι coefficients
         assert_eq!(
             c.constraint_rlc_coeffs.len(),
             t + c.source_weights.in_domain.len()
