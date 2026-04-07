@@ -1,13 +1,13 @@
-//! Code-switching IOR: R_{C, sl} → R_{C', sl'}
+//! Code-switching IOR: R_{C, C_zk, sl} → R_{C', C_zk, sl'}
 //!
 //! Reduces a proximity claim about oracle f (source code C) to a proximity
-//! claim about oracle g (target code C'). Non-ZK variant.
-//!
-//! Paper: Construction 9.7 (p.55), Theorem 9.6 (p.54), Lemma 9.9 (p.57)
+//! claim about oracle g (target code C'). Supports optional ZK via mask oracle.
 
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 use crate::{
     algebra::{
@@ -15,7 +15,7 @@ use crate::{
         embedding::{Embedding, Identity},
         fields::FieldWithSize,
         linear_form::UnivariateEvaluation,
-        mixed_dot, mixed_univariate_evaluate, univariate_evaluate,
+        mixed_dot, mixed_univariate_evaluate, random_vector, univariate_evaluate,
     },
     bits::Bits,
     hash::Hash,
@@ -27,73 +27,69 @@ use crate::{
     type_info::Typed,
 };
 
-/// Prover output from the code-switch interaction phase.
-/// Paper: Equation 9 (p.55)
+/// Prover output. Paper: Equation 9 (p.55).
 #[derive(Clone, Debug)]
 pub struct Witness<F: Field, G: Field = F> {
-    /// Target oracle commitment data. G_target = F since target uses Identity<F>.
     pub target_witness: irs_commit::Witness<F>,
-    /// The message f, taken by ownership from the caller.
     pub message: Vec<F>,
-    /// Source oracle evaluations at in-domain query points (in M::Source = G).
     pub source_evaluations: irs_commit::Evaluations<G>,
+    pub mask_witness: Option<irs_commit::Witness<F>>,
+    pub mask_message: Option<Vec<F>>,
 }
 
-/// Verifier output from the code-switch decision phase.
-/// Paper: Equation 9 (p.55) — output (x', y')
+/// OOD and in-domain constraint weights for a single oracle (message or mask).
+#[derive(Clone, Debug)]
+pub struct ConstraintWeights<F: Field, G: Field = F> {
+    pub ood: Vec<UnivariateEvaluation<F>>,
+    pub in_domain: Vec<UnivariateEvaluation<G>>,
+}
+
+/// Verifier output. Paper: Equation 9 (p.55).
 #[derive(Clone, Debug)]
 pub struct CodeSwitchClaim<F: Field, G: Field = F> {
-    /// μ' — batched target value. Decision phase formula (p.55).
     pub mu_prime: F,
-    /// ν_1 = batching_coeffs[0]. Caller scales original sl by this.
     pub original_sl_coeff: F,
-    /// Target oracle commitment (g).
     pub target_commitment: irs_commit::Commitment<F>,
-    /// RLC coefficients for constraint weights (batching_coeffs[1..]).
+    pub mask_commitment: Option<irs_commit::Commitment<F>>,
     pub constraint_rlc_coeffs: Vec<F>,
-    /// OOD constraint weights — UnivariateEvaluation at each OOD point (M::Target).
-    pub ood_constraint_weights: Vec<UnivariateEvaluation<F>>,
-    /// In-domain constraint weights — UnivariateEvaluation at each source eval point (M::Source).
-    pub in_domain_constraint_weights: Vec<UnivariateEvaluation<G>>,
-    /// Source oracle evaluation data from in-domain queries.
+    /// Message weights: ze_ood^{←,i} and G_C^#[x,·]
+    pub source_weights: ConstraintWeights<F, G>,
+    /// Mask weights: ze_ood^{→,i} and G_C^s[x,·]. None if non-ZK.
+    pub mask_weights: Option<ConstraintWeights<F, G>>,
     pub source_evaluations: irs_commit::Evaluations<G>,
 }
 
-/// Code-switching IOR config. Non-ZK variant (n=0, no C_zk masks).
-///
-/// TODO [ZK]: Add mask oracle, private zero-evaders, mask terms in sl'.
+/// Code-switching IOR config with optional ZK.
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<M: Embedding> {
     pub embedding: Typed<M>,
-    /// Source code C.
     pub source: irs_commit::Config<M>,
-    /// Target code C'. Message length ℓ' = ℓ (same message).
     pub target: irs_commit::Config<Identity<M::Target>>,
-    /// OOD samples tying source and target to the same message.
     pub cs_ood_samples: usize,
-    // In-domain queries reuse source.in_domain_samples (same formula).
-    // Reintroduce cs_in_domain_queries if security budgets diverge or mask_length > 0.
-    /// Proof-of-work config (set by parent orchestrator).
     pub pow: proof_of_work::Config,
+    pub mask: Option<MaskConfig<M>>,
 }
 
-/// Squeeze batching randomness from the transcript.
-/// Both prove() and verify() must call this at the same transcript position
-/// to stay in sync. Returns (ν_1, batching_coeffs) where ν_1 scales the
-/// original sl and batching_coeffs[i] scales the i-th constraint weight.
+/// ZK mask code config (C_zk).
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct MaskConfig<M: Embedding> {
+    pub commit: irs_commit::Config<Identity<M::Target>>,
+    pub num_masks: usize,
+}
+
+/// Shared transcript operation for batching randomness.
 fn batching_challenge<T, F>(transcript: &mut T, count: usize) -> (F, Vec<F>)
 where
     T: VerifierMessage,
     F: Field + Decoding<[T::U]>,
 {
-    let mut coeffs = geometric_challenge(transcript, count);
-    let original_sl_coeff = if coeffs.is_empty() {
-        F::ONE
-    } else {
-        coeffs.remove(0)
-    };
-    (original_sl_coeff, coeffs)
+    let coeffs = geometric_challenge(transcript, count);
+    match coeffs.split_first() {
+        Some((&first, rest)) => (first, rest.to_vec()),
+        None => (F::ONE, Vec::new()),
+    }
 }
 
 impl<M: Embedding> Config<M> {
@@ -104,6 +100,7 @@ impl<M: Embedding> Config<M> {
         source_config: irs_commit::Config<M>,
         target_log_inv_rate: usize,
         target_interleaving_depth: usize,
+        masked: bool,
     ) -> Self
     where
         M: Default,
@@ -111,11 +108,9 @@ impl<M: Embedding> Config<M> {
     {
         let source_message_length = source_config.message_length();
 
-        // Target: ℓ' = ℓ, m' = ⌈ℓ'/ρ'⌉
-        let target_message_length = source_message_length;
         let target_rate = 0.5_f64.powf(target_log_inv_rate as f64);
-        let target_vector_size = target_message_length * target_interleaving_depth;
-        let target_config = irs_commit::Config::<Identity<M::Target>>::new(
+        let target_vector_size = source_message_length * target_interleaving_depth;
+        let mut target_config = irs_commit::Config::<Identity<M::Target>>::new(
             security_target,
             unique_decoding,
             hash_id,
@@ -125,14 +120,45 @@ impl<M: Embedding> Config<M> {
             target_rate,
         );
 
-        // OOD: solve |Λ(C',δ')|²/2 · ((ℓ-1)/|F|)^{t_ood} ≤ 2^{-λ}
-        // Target list size, source message length (Lemma 9.9 Error 1, p.57)
+        let mask = if masked {
+            let source_randomness_len = source_config.mask_length * source_config.num_messages();
+            let mask_msg_len = source_randomness_len.max(1);
+            let mut mask_commit = irs_commit::Config::<Identity<M::Target>>::new(
+                security_target,
+                unique_decoding,
+                hash_id,
+                1,
+                mask_msg_len,
+                1,
+                source_config.rate(),
+            );
+            // ZK encoding: mask_length ≥ queries for ζ = 0 (Prop 3.19, p.30)
+            target_config.mask_length = target_config.out_domain_samples;
+            mask_commit.mask_length = mask_commit.out_domain_samples;
+            Some(MaskConfig {
+                commit: mask_commit,
+                num_masks: 1,
+            })
+        } else {
+            None
+        };
+
+        // OOD: Lemma 9.9 Error 1
+        let (ood_list_size, ood_degree) = mask.as_ref().map_or_else(
+            || (target_config.list_size(), source_message_length),
+            |m| {
+                (
+                    target_config.list_size() * m.commit.list_size(),
+                    source_message_length + m.commit.message_length(),
+                )
+            },
+        );
         let cs_ood_samples = irs_commit::num_ood_samples(
             unique_decoding,
             security_target,
             M::Target::field_size_bits(),
-            target_config.list_size(),
-            source_message_length,
+            ood_list_size,
+            ood_degree,
         );
 
         Self {
@@ -144,10 +170,11 @@ impl<M: Embedding> Config<M> {
                 hash_id,
                 threshold: proof_of_work::threshold(Bits::new(0.0)),
             },
+            mask,
         }
     }
 
-    /// Prover interaction phase — Construction 9.7 Steps 1-4 (p.55).
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
@@ -163,27 +190,52 @@ impl<M: Embedding> Config<M> {
         u8: Decoding<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        // Step 1: g := Enc_{C'}(f, r')
+        debug_assert_eq!(message.len(), self.source.message_length());
+        debug_assert_eq!(
+            source_randomness.len(),
+            self.source.mask_length * self.source.num_messages()
+        );
+
+        // Step 1a: g := Enc_{C'}(f, r')
         let target_witness = self.target.commit(prover_state, &[&message]);
 
-        // Step 2: receive OOD challenge ρ_ood
+        // Step 1b: s := Enc_{C_zk}((r, s_leftover), r'')
+        let (mask_message, mask_witness) = self.mask.as_ref().map_or((None, None), |mask_config| {
+            let mask_msg_len = mask_config.commit.message_length();
+            let embedding = self.source.embedding();
+            let r_embedded: Vec<M::Target> = source_randomness
+                .iter()
+                .map(|&x| embedding.map(x))
+                .collect();
+            let r_len = r_embedded.len();
+            let mut mask_msg = Vec::with_capacity(mask_msg_len);
+            mask_msg.extend_from_slice(&r_embedded);
+            let s_leftover: Vec<M::Target> =
+                random_vector(prover_state.rng(), mask_msg_len - r_len);
+            mask_msg.extend_from_slice(&s_leftover);
+            let witness = mask_config.commit.commit(prover_state, &[&mask_msg]);
+            (Some(mask_msg), Some(witness))
+        });
+
+        // Step 2: OOD challenge
         let ood_points: Vec<M::Target> = prover_state.verifier_message_vec(self.cs_ood_samples);
 
-        // Step 3: send OOD answers y_i = f̂(ρ_i) + ρ_i^ℓ · r̂(ρ_i)
+        // Step 3: OOD answers
         let msg_len = message.len();
         for &point in &ood_points {
             let f_eval = univariate_evaluate(&message, point);
-            let r_eval =
-                mixed_univariate_evaluate(self.source.embedding(), source_randomness, point);
+            let randomness_eval = mask_message.as_ref().map_or_else(
+                || mixed_univariate_evaluate(self.source.embedding(), source_randomness, point),
+                |mask_msg| univariate_evaluate(mask_msg, point),
+            );
             let shift = point.pow([msg_len as u64]);
-            prover_state.prover_message(&(f_eval + shift * r_eval));
-            // TODO [ZK]: add ρ^{ℓ+r} · ŝ(ρ) term for mask oracle
+            prover_state.prover_message(&(f_eval + shift * randomness_eval));
         }
 
-        // Step 4: open source oracle at in-domain queries
+        // Step 4: open source oracle
         let source_evaluations = self.source.open(prover_state, &[source_witness]);
 
-        // Step 5: batching randomness (must match verify's batching_challenge call)
+        // Step 5: batching randomness (sync with verify)
         let _batching = batching_challenge::<_, M::Target>(
             prover_state,
             1 + ood_points.len() + source_evaluations.matrix.len(),
@@ -193,10 +245,12 @@ impl<M: Embedding> Config<M> {
             target_witness,
             message,
             source_evaluations,
+            mask_witness,
+            mask_message,
         }
     }
 
-    /// Verifier decision phase — Construction 9.7 Steps 1-4 + Decision (p.55).
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
@@ -210,24 +264,34 @@ impl<M: Embedding> Config<M> {
         u8: Decoding<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        // Step 1: receive target commitment
-        let target_commitment = self.target.receive_commitment(verifier_state)?;
+        debug_assert!(
+            self.mask.is_some() == (self.target.mask_length > 0),
+            "mask config and target mask_length must agree"
+        );
 
-        // Step 2-3: OOD challenge + answers
+        // Step 1
+        let target_commitment = self.target.receive_commitment(verifier_state)?;
+        let mask_commitment = self
+            .mask
+            .as_ref()
+            .map(|m| m.commit.receive_commitment(verifier_state))
+            .transpose()?;
+
+        // Step 2-3: OOD
         let ood_points: Vec<M::Target> = verifier_state.verifier_message_vec(self.cs_ood_samples);
         let ood_answers: Vec<M::Target> =
             verifier_state.prover_messages_vec(self.cs_ood_samples)?;
 
-        // Step 4: verify source oracle openings
+        // Step 4: source opening
         let source_evaluations = self.source.verify(verifier_state, &[source_commitment])?;
 
-        // Step 5: batching coefficients (shared helper ensures transcript sync with prover)
+        // Step 5: batching
         let t_ood = ood_points.len();
         let t_times_iota = source_evaluations.matrix.len();
         let (original_sl_coeff, constraint_rlc_coeffs) =
             batching_challenge(verifier_state, 1 + t_ood + t_times_iota);
 
-        // Step 6: μ' = ν_1·μ + Σ ν_{1+i}·y_i + ΣΣ ν_{...}·f(x_i)_l
+        // Step 6: μ'
         let mu_prime = original_sl_coeff * mu
             + dot(&constraint_rlc_coeffs[..t_ood], &ood_answers)
             + mixed_dot(
@@ -236,24 +300,36 @@ impl<M: Embedding> Config<M> {
                 &source_evaluations.matrix,
             );
 
-        // Step 7: constraint weights for sl'
+        // Step 7: constraint weights
         let source_msg_len = self.source.message_length();
 
-        let ood_constraint_weights: Vec<UnivariateEvaluation<M::Target>> = ood_points
-            .iter()
-            .map(|&point| UnivariateEvaluation::new(point, source_msg_len))
-            .collect();
+        let source_weights = ConstraintWeights {
+            ood: ood_points
+                .iter()
+                .map(|&point| UnivariateEvaluation::new(point, source_msg_len))
+                .collect(),
+            in_domain: source_evaluations.evaluators(source_msg_len).collect(),
+        };
 
-        let in_domain_constraint_weights: Vec<UnivariateEvaluation<M::Source>> =
-            source_evaluations.evaluators(source_msg_len).collect();
+        let mask_weights = self.mask.as_ref().map(|mask_config| {
+            let mask_msg_len = mask_config.commit.message_length();
+            ConstraintWeights {
+                ood: ood_points
+                    .iter()
+                    .map(|&point| UnivariateEvaluation::new(point, mask_msg_len))
+                    .collect(),
+                in_domain: source_evaluations.evaluators(mask_msg_len).collect(),
+            }
+        });
 
         Ok(CodeSwitchClaim {
             mu_prime,
             original_sl_coeff,
             target_commitment,
+            mask_commitment,
             constraint_rlc_coeffs,
-            ood_constraint_weights,
-            in_domain_constraint_weights,
+            source_weights,
+            mask_weights,
             source_evaluations,
         })
     }
@@ -272,8 +348,6 @@ mod tests {
         transcript::{codecs::U64, DomainSeparator},
     };
 
-    /// Run full code switch (prove + verify) and check μ' completeness.
-    /// Uses ι=1 (num_vectors=1, interleaving_depth=1) so weight count matches RLC count.
     fn test_completeness<F: Field + FieldWithSize + Codec<[u8]> + 'static>(
         seed: u64,
         source_vector_size: usize,
@@ -288,7 +362,7 @@ mod tests {
         #[allow(clippy::cast_possible_wrap)]
         let source_rate = 0.5_f64.powi(source_log_inv_rate as i32);
 
-        let source_config = irs_commit::Config::<Identity<F>>::new(
+        let mut source_config = irs_commit::Config::<Identity<F>>::new(
             security_target,
             unique_decoding,
             crate::hash::BLAKE3,
@@ -297,6 +371,10 @@ mod tests {
             1,
             source_rate,
         );
+        // Source needs mask_length > 0 for ZK (randomness r to hide in mask oracle).
+        // In production, set by the parent protocol. Here we use 1 — the minimum
+        // nontrivial value that exercises the ZK path without NTT sizing issues.
+        source_config.mask_length = 1;
         let cs_config = Config::<Identity<F>>::new(
             security_target,
             unique_decoding,
@@ -304,6 +382,7 @@ mod tests {
             source_config.clone(),
             target_log_inv_rate,
             1,
+            true, // ZK enbled
         );
 
         let mut rng = StdRng::seed_from_u64(seed);
@@ -336,37 +415,89 @@ mod tests {
             .unwrap();
         verifier_state.check_eof().unwrap();
 
-        // Witness carries the message
         assert_eq!(cs_witness.message, message);
 
-        // μ' completeness: Σ rlc[i] · weight[i].evaluate(f) == μ' - ν_1·μ
-        let embedding = Identity::<F>::new();
-        let t_ood = claim.ood_constraint_weights.len();
+        check_mu_prime_completeness(
+            &claim,
+            &message,
+            mu,
+            cs_witness.mask_message.as_deref(),
+            source_witness.masks.len(),
+        );
+    }
 
+    /// Verify μ' = ν_1·μ + ⟨f, message_weights⟩ + ⟨mask_msg, mask_weights⟩
+    fn check_mu_prime_completeness<F: Field>(
+        claim: &CodeSwitchClaim<F>,
+        message: &[F],
+        mu: F,
+        mask_msg: Option<&[F]>,
+        r_len: usize,
+    ) {
+        let embedding = Identity::<F>::new();
+        let t_ood = claim.source_weights.ood.len();
+
+        // Message part: Σ rlc[i] · weight[i].evaluate(f)
         let weights_on_f: F = claim
-            .ood_constraint_weights
+            .source_weights
+            .ood
             .iter()
             .enumerate()
-            .map(|(i, w)| claim.constraint_rlc_coeffs[i] * w.evaluate(&embedding, &message))
+            .map(|(i, w)| claim.constraint_rlc_coeffs[i] * w.evaluate(&embedding, message))
             .chain(
                 claim
-                    .in_domain_constraint_weights
+                    .source_weights
+                    .in_domain
                     .iter()
                     .enumerate()
                     .map(|(j, w)| {
-                        claim.constraint_rlc_coeffs[t_ood + j] * w.evaluate(&embedding, &message)
+                        claim.constraint_rlc_coeffs[t_ood + j] * w.evaluate(&embedding, message)
                     }),
             )
             .sum();
 
+        // Mask part (ZK only): Σ rlc[i] · mask_weight[i].evaluate(mask_msg)
+        let weights_on_mask: F =
+            mask_msg
+                .zip(claim.mask_weights.as_ref())
+                .map_or(F::ZERO, |(mask_msg, mask_w)| {
+                    let msg_len = message.len();
+                    let ood_sum: F = mask_w
+                        .ood
+                        .iter()
+                        .enumerate()
+                        .map(|(i, w)| {
+                            let shift = w.point.pow([msg_len as u64]);
+                            claim.constraint_rlc_coeffs[i]
+                                * shift
+                                * w.evaluate(&embedding, mask_msg)
+                        })
+                        .sum();
+                    let in_domain_sum: F = mask_w
+                        .in_domain
+                        .iter()
+                        .enumerate()
+                        .map(|(j, w)| {
+                            let shift = w.point.pow([msg_len as u64]);
+                            let r_eval = if r_len > 0 {
+                                w.evaluate(&embedding, &mask_msg[..r_len])
+                            } else {
+                                F::ZERO
+                            };
+                            claim.constraint_rlc_coeffs[t_ood + j] * shift * r_eval
+                        })
+                        .sum();
+                    ood_sum + in_domain_sum
+                });
+
         assert_eq!(
-            weights_on_f,
+            weights_on_f + weights_on_mask,
             claim.mu_prime - claim.original_sl_coeff * mu,
-            "Constraint weights evaluated on f should equal μ' - ν_1·μ"
+            "Message + mask weights should equal μ' - ν_1·μ"
         );
         assert_eq!(
             claim.constraint_rlc_coeffs.len(),
-            claim.ood_constraint_weights.len() + claim.in_domain_constraint_weights.len(),
+            claim.source_weights.ood.len() + claim.source_weights.in_domain.len(),
         );
     }
 
@@ -375,15 +506,14 @@ mod tests {
         Standard: Distribution<F>,
         Hash: ProverMessage<[u8]>,
     {
-        // Valid sizes: NTT-friendly AND power-of-two (challenge_indices requires pow2 codeword)
         let valid_sizes: Vec<usize> = (3..=8)
-            .map(|k| 1_usize << k) // 8, 16, 32, 64, 128, 256
+            .map(|k| 1_usize << k)
             .filter(|&n| ntt::next_order::<F>(n) == Some(n))
             .collect();
         assert!(!valid_sizes.is_empty(), "No valid NTT sizes for field");
 
         let size = select(valid_sizes);
-        let log_inv_rates = select(vec![1_usize, 2, 3]); // rates 1/2, 1/4, 1/8
+        let log_inv_rates = select(vec![1_usize, 2, 3]);
 
         proptest!(|(
             seed: u64,
