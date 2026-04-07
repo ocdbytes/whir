@@ -324,6 +324,8 @@ impl<M: Embedding> Config<M> {
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
 
         // Handle out-of-domain points and values
+        // TODO : Remove this logic after main whir protocol is updated
+        // as this is not required in the new construction.
         let oods_points: Vec<M::Target> =
             prover_state.verifier_message_vec(self.out_domain_samples);
         let mut oods_matrix = Vec::with_capacity(self.out_domain_samples * self.num_vectors);
