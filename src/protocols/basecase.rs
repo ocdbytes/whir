@@ -229,7 +229,7 @@ mod tests {
                     initial_size: size,
                     round_pow: proof_of_work::Config::none(),
                     num_rounds: size.next_power_of_two().trailing_zeros() as usize,
-                    mask_length: 0,
+                    mask_config: None,
                 },
                 masked,
             })

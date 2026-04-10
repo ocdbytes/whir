@@ -129,11 +129,10 @@ where
     F: Field + Decoding<[T::U]>,
 {
     assert!(count > 0, "batching requires at least one coefficient");
-    let coeffs = geometric_challenge(transcript, count);
-    let (&first, rest) = coeffs
-        .split_first()
-        .expect("count > 0 guarantees non-empty coefficients");
-    (first, rest.to_vec())
+    let mut coeffs = geometric_challenge(transcript, count);
+    let first = coeffs[0];
+    let rest = coeffs.split_off(1);
+    (first, rest)
 }
 
 impl<M: Embedding> Config<M> {
@@ -144,7 +143,6 @@ impl<M: Embedding> Config<M> {
         hash_id: crate::engines::EngineId,
         source_config: IrsConfig<M>,
         target_log_inv_rate: usize,
-        target_interleaving_depth: usize,
         zk: Option<ZkQueryBudget>,
     ) -> Self
     where
@@ -152,19 +150,17 @@ impl<M: Embedding> Config<M> {
         M::Target: Default,
     {
         assert!(target_log_inv_rate > 0);
-        assert!(target_interleaving_depth > 0);
 
         let source_message_length = source_config.message_length();
         let target_rate = 0.5_f64.powf(target_log_inv_rate as f64);
-        let target_vector_size = source_message_length * target_interleaving_depth;
 
         let mut target_config = IrsConfig::<Identity<M::Target>>::new(
             security_target,
             unique_decoding,
             hash_id,
             1,
-            target_vector_size,
-            target_interleaving_depth,
+            source_message_length,
+            1,
             target_rate,
         );
 
@@ -179,6 +175,8 @@ impl<M: Embedding> Config<M> {
                 source_randomness_len > 0,
                 "ZK code-switch requires source_config.mask_length > 0"
             );
+            // TODO : move this config out as this will be a shared C_zk config
+            // across the protocol
             let mut mask_config = IrsConfig::<Identity<M::Target>>::new(
                 security_target,
                 unique_decoding,
@@ -193,30 +191,67 @@ impl<M: Embedding> Config<M> {
             mask_config
         });
 
-        let (list_size, degree) = mask_commit.as_ref().map_or_else(
-            || (target_config.list_size(), source_message_length),
-            |mask_cfg| {
-                (
-                    target_config.list_size() * mask_cfg.list_size(),
-                    source_message_length + mask_cfg.message_length(),
-                )
-            },
-        );
-        let cs_ood_samples = num_ood_samples(
+        let mut config = Self {
+            embedding: Typed::<M>::default(),
+            source: source_config,
+            target: target_config,
+            cs_ood_samples: 0,
+            mask_commit,
+        };
+        let (list_size, degree) = config.list_size_and_degree();
+        config.cs_ood_samples = num_ood_samples(
             unique_decoding,
             security_target,
             M::Target::field_size_bits(),
             list_size,
             degree,
         );
+        config
+    }
 
-        Self {
-            embedding: Typed::<M>::default(),
-            source: source_config,
-            target: target_config,
-            cs_ood_samples,
-            mask_commit,
+    /// RBR soundness of the OOD round in bits (Lemma 9.9 Error 1).
+    pub fn rbr_ood(&self) -> f64 {
+        if self.cs_ood_samples == 0 {
+            return f64::INFINITY;
         }
+        let (list_size, degree) = self.list_size_and_degree();
+        let l_choose_2 = list_size * (list_size - 1.) / 2.;
+        let log_per_sample = M::Target::field_size_bits() - ((degree - 1) as f64).log2();
+        -l_choose_2.log2() + self.cs_ood_samples as f64 * log_per_sample
+    }
+
+    /// RBR soundness of the in-domain round in bits (Lemma 9.9 Error 2).
+    pub fn rbr_in_domain(&self) -> f64 {
+        self.source.rbr_queries()
+    }
+
+    /// RBR soundness of the batching round in bits (Lemma 9.9 Error 3).
+    /// `n` = number of input mask oracles from previous stages.
+    /// Total mask oracles = n + 1 (input + new s), interleaved as C_zk^{≡n+1}.
+    pub fn rbr_batching(&self, n: usize) -> f64 {
+        let field_bits = M::Target::field_size_bits();
+        let target_log_list = self.target.list_size().log2();
+
+        // Mask interleaving: |Λ(C_zk^{≡n+1}, δ_zk)| ≤ (n+1) · |Λ(C_zk, δ_zk)| (Lemma 3.15)
+        let mask_log_list = self.mask_commit.as_ref().map_or(0., |m| {
+            let k = (n + 1) as f64;
+            (k * m.list_size()).log2()
+        });
+
+        field_bits - target_log_list - mask_log_list
+    }
+
+    /// Combined list-size bound and polynomial degree for OOD sampling.
+    fn list_size_and_degree(&self) -> (f64, usize) {
+        self.mask_commit.as_ref().map_or_else(
+            || (self.target.list_size(), self.source.message_length()),
+            |m| {
+                (
+                    self.target.list_size() * m.list_size(),
+                    self.source.message_length() + m.message_length(),
+                )
+            },
+        )
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
@@ -469,7 +504,6 @@ mod tests {
             crate::hash::BLAKE3,
             source_config.clone(),
             tgt_lir,
-            1,
             zk,
         );
 
