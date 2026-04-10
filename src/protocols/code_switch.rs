@@ -16,7 +16,7 @@ use crate::{
         fields::FieldWithSize,
         lift,
         linear_form::UnivariateEvaluation,
-        mixed_dot, mixed_univariate_evaluate, random_vector, univariate_evaluate,
+        mixed_dot, random_vector, univariate_evaluate,
     },
     hash::Hash,
     protocols::{
@@ -55,8 +55,8 @@ pub struct ConstraintWeights<F: Field, G: Field = F> {
 #[derive(Clone, Debug)]
 pub struct MaskClaimInfo<F: Field, G: Field = F> {
     pub commitment: IrsCommitment<F>,
-    /// RLC coefficients with shift ρ^ℓ baked in.
-    pub rlc_coeffs: Vec<F>,
+    pub ood_rlc_coeffs: Vec<F>,
+    pub in_domain_rlc_coeffs: Vec<F>,
     pub weights: ConstraintWeights<F, G>,
     pub source_randomness_len: usize,
 }
@@ -68,14 +68,18 @@ impl<F: Field, G: Field> MaskClaimInfo<F, G> {
         embedding: &impl Embedding<Source = G, Target = F>,
         mask_msg: &[F],
     ) -> F {
-        let num_ood = self.weights.ood.len();
-        let ood_sum: F = self.rlc_coeffs[..num_ood]
+        // OOD: ⟨(r,s), ze^{→,i}_ood(ρ)⟩ = ρ^ℓ · (r,s)^(ρ)
+        let ood_sum: F = self
+            .ood_rlc_coeffs
             .iter()
             .zip(&self.weights.ood)
             .map(|(&c, w)| c * univariate_evaluate(mask_msg, w.point))
             .sum();
+
+        // In-domain: ⟨(r,s), (G^s_C[x,·], 0)⟩ = φ(x)^ℓ · r̂(φ(x))
         let r_slice = &mask_msg[..self.source_randomness_len];
-        let in_domain_sum: F = self.rlc_coeffs[num_ood..]
+        let in_domain_sum: F = self
+            .in_domain_rlc_coeffs
             .iter()
             .zip(&self.weights.in_domain)
             .map(|(&c, w)| c * univariate_evaluate(r_slice, embedding.map(w.point)))
@@ -91,7 +95,8 @@ pub struct CodeSwitchClaim<F: Field, G: Field = F> {
     pub mu_prime: F,
     pub original_sl_coeff: F,
     pub target_commitment: IrsCommitment<F>,
-    pub constraint_rlc_coeffs: Vec<F>,
+    pub ood_rlc_coeffs: Vec<F>,
+    pub in_domain_rlc_coeffs: Vec<F>,
     pub source_weights: ConstraintWeights<F, G>,
     pub mask_info: Option<MaskClaimInfo<F, G>>,
     pub source_evaluations: IrsEvaluations<G>,
@@ -260,17 +265,23 @@ impl<M: Embedding> Config<M> {
                     (Some(mask_msg), Some(witness))
                 });
 
-        // Step 2-3: OOD challenge + answers (y_i = f̂(ρ) + ρ^ℓ · r̂(ρ))
+        // Step 2-3: OOD challenge + answers
         let ood_points: Vec<M::Target> = prover_state.verifier_message_vec(self.cs_ood_samples);
         let msg_len = message.len();
         for &point in &ood_points {
             let f_eval = univariate_evaluate(&message, point);
-            let randomness_eval = mask_message.as_ref().map_or_else(
-                || mixed_univariate_evaluate(self.source.embedding(), source_randomness, point),
-                |mask_msg| univariate_evaluate(mask_msg, point),
-            );
-            let shift = point.pow([msg_len as u64]);
-            prover_state.prover_message(&(f_eval + shift * randomness_eval));
+            if source_randomness.is_empty() {
+                // Non-ZK: codeword encodes only f, so y_i = f̂(ρ)
+                prover_state.prover_message(&f_eval);
+            } else {
+                // ZK: codeword encodes h(X) = f̂(X) + X^ℓ · r̂(X), so y_i = h(ρ)
+                let mask_msg = mask_message
+                    .as_ref()
+                    .expect("ZK code-switch requires mask_message");
+                let randomness_eval = univariate_evaluate(mask_msg, point);
+                let shift = point.pow([msg_len as u64]);
+                prover_state.prover_message(&(f_eval + shift * randomness_eval));
+            }
         }
 
         // Step 4: in-domain queries
@@ -329,15 +340,16 @@ impl<M: Embedding> Config<M> {
         // Step 5: batching
         let num_ood = ood_points.len();
         let num_in_domain = source_evaluations.matrix.len();
-        let (original_sl_coeff, constraint_rlc_coeffs) =
+        let (original_sl_coeff, all_rlc_coeffs) =
             batching_challenge(verifier_state, 1 + num_ood + num_in_domain);
+        let (ood_rlc_coeffs, in_domain_rlc_coeffs) = all_rlc_coeffs.split_at(num_ood);
 
         // Step 6: μ'
         let mu_prime = original_sl_coeff * mu
-            + dot(&constraint_rlc_coeffs[..num_ood], &ood_answers)
+            + dot(ood_rlc_coeffs, &ood_answers)
             + mixed_dot(
                 self.source.embedding(),
-                &constraint_rlc_coeffs[num_ood..],
+                in_domain_rlc_coeffs,
                 &source_evaluations.matrix,
             );
 
@@ -365,21 +377,21 @@ impl<M: Embedding> Config<M> {
                     .collect(),
             };
             let embedding = self.source.embedding();
-            let rlc_coeffs: Vec<M::Target> = constraint_rlc_coeffs[..num_ood]
+            let mask_ood_rlc_coeffs: Vec<M::Target> = ood_rlc_coeffs
                 .iter()
                 .zip(&weights.ood)
                 .map(|(&c, w)| c * w.point.pow([source_msg_len as u64]))
-                .chain(
-                    constraint_rlc_coeffs[num_ood..]
-                        .iter()
-                        .zip(&weights.in_domain)
-                        .map(|(&c, w)| c * embedding.map(w.point.pow([source_msg_len as u64]))),
-                )
+                .collect();
+            let mask_in_domain_rlc_coeffs: Vec<M::Target> = in_domain_rlc_coeffs
+                .iter()
+                .zip(&weights.in_domain)
+                .map(|(&c, w)| c * embedding.map(w.point.pow([source_msg_len as u64])))
                 .collect();
 
             MaskClaimInfo {
                 commitment: mask_commitment.expect("mask commitment must exist when masked"),
-                rlc_coeffs,
+                ood_rlc_coeffs: mask_ood_rlc_coeffs,
+                in_domain_rlc_coeffs: mask_in_domain_rlc_coeffs,
                 weights,
                 source_randomness_len,
             }
@@ -389,7 +401,8 @@ impl<M: Embedding> Config<M> {
             mu_prime,
             original_sl_coeff,
             target_commitment,
-            constraint_rlc_coeffs,
+            ood_rlc_coeffs: ood_rlc_coeffs.to_vec(),
+            in_domain_rlc_coeffs: in_domain_rlc_coeffs.to_vec(),
             source_weights,
             mask_info,
             source_evaluations,
@@ -499,15 +512,14 @@ mod tests {
     /// Completeness check (p.56): μ' = ν_1·μ + ⟨f, source_weights⟩ + ⟨mask_msg, mask_weights⟩
     fn check_completeness<F: Field>(result: &TestResult<F>, masked: bool) {
         let claim = &result.claim;
-        let num_ood = claim.source_weights.ood.len();
 
         // ⟨f, ze_ood^{←,i}⟩ + ⟨f, G_C^#[x,·]⟩ (message part of μ' decomposition)
         let msg_sum = weighted_eval(
-            &claim.constraint_rlc_coeffs[..num_ood],
+            &claim.ood_rlc_coeffs,
             &claim.source_weights.ood,
             &result.message,
         ) + weighted_eval(
-            &claim.constraint_rlc_coeffs[num_ood..],
+            &claim.in_domain_rlc_coeffs,
             &claim.source_weights.in_domain,
             &result.message,
         );
@@ -526,18 +538,19 @@ mod tests {
             msg_sum + mask_sum,
             claim.mu_prime - claim.original_sl_coeff * result.target_mu
         );
-        // Theorem 9.6 (p.54): ze has 1 + t_ood + t·ι coefficients
+        // Coefficient counts match weight counts
+        assert_eq!(claim.ood_rlc_coeffs.len(), claim.source_weights.ood.len());
         assert_eq!(
-            claim.constraint_rlc_coeffs.len(),
-            num_ood + claim.source_weights.in_domain.len()
+            claim.in_domain_rlc_coeffs.len(),
+            claim.source_weights.in_domain.len()
         );
         // ZK structure: mask_info present iff ZK mode
         assert_eq!(claim.mask_info.is_some(), masked);
         if let Some(ref info) = claim.mask_info {
-            // Mask RLC count must cover all mask weights (OOD + in-domain)
+            assert_eq!(info.ood_rlc_coeffs.len(), info.weights.ood.len());
             assert_eq!(
-                info.rlc_coeffs.len(),
-                info.weights.ood.len() + info.weights.in_domain.len()
+                info.in_domain_rlc_coeffs.len(),
+                info.weights.in_domain.len()
             );
         }
     }
