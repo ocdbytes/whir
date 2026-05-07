@@ -8,6 +8,10 @@ pub struct SecuritySpec<M: Embedding> {
     pub mode: Mode,
     /// Target security bits
     pub target_security_bits: u32,
+    /// Use the unique-decoding regime (`true`) instead of the Johnson regime.
+    /// ZK mode requires Johnson — Construction 9.7 / Bound 2 needs OOD queries,
+    /// and `num_ood_samples` returns 0 in unique-decoding.
+    pub unique_decoding: bool,
     /// Size of the input witness / vector
     pub vector_size: usize,
     /// Starting log inverse rate for RS code

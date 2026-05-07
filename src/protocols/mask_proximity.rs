@@ -171,7 +171,7 @@ impl<F: Field> Config<F> {
 
         // Step 2: compute and send combined polynomials + IRS randomness
         let irs_masks_per_vector =
-            self.c_zk_commit.mask_length * self.c_zk_commit.interleaving_depth;
+            self.c_zk_commit.mask_length() * self.c_zk_commit.interleaving_depth;
         assert_eq!(
             witness.mask_witness.masks.len(),
             2 * self.num_masks * irs_masks_per_vector
@@ -220,7 +220,7 @@ impl<F: Field> Config<F> {
         // Step 2: read combined polynomials + IRS randomness
         let msg_len = self.c_zk_commit.message_length();
         let irs_masks_per_vector =
-            self.c_zk_commit.mask_length * self.c_zk_commit.interleaving_depth;
+            self.c_zk_commit.mask_length() * self.c_zk_commit.interleaving_depth;
         let has_irs_masks = irs_masks_per_vector > 0;
         let mut combined_msgs = Vec::with_capacity(self.num_masks);
         let mut combined_rs: Option<Vec<Vec<F>>> =
@@ -442,7 +442,7 @@ mod tests {
 
         let gamma: F = prover_state.verifier_message();
         let irs_masks_per_vector =
-            config.c_zk_commit.mask_length * config.c_zk_commit.interleaving_depth;
+            config.c_zk_commit.mask_length() * config.c_zk_commit.interleaving_depth;
 
         for (i, (orig_msg, fresh_msg)) in original_msgs
             .iter()

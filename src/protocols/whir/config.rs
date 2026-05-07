@@ -8,7 +8,7 @@ use crate::{
     bits::Bits,
     parameters::ProtocolParameters,
     protocols::{
-        irs_commit::{self, num_ood_samples},
+        irs_commit::{self, num_ood_samples, IrsMode},
         proof_of_work, sumcheck,
     },
 };
@@ -61,7 +61,7 @@ impl<M: Embedding> Config<M> {
             size,
             1 << whir_parameters.initial_folding_factor,
             0.5_f64.powi(whir_parameters.starting_log_inv_rate as i32),
-            0,
+            IrsMode::Standard,
         );
         let initial_out_domain_samples = num_ood_samples(
             whir_parameters.unique_decoding,
@@ -109,7 +109,7 @@ impl<M: Embedding> Config<M> {
                 1 << num_variables,
                 1 << whir_parameters.folding_factor,
                 0.5_f64.powi(next_rate as i32),
-                0,
+                IrsMode::Standard,
             );
             let round_out_domain_samples = num_ood_samples(
                 whir_parameters.unique_decoding,
@@ -580,7 +580,7 @@ mod tests {
                     embedding: Typed::new(embedding::Identity::new()),
                     num_vectors: 1,
                     vector_size: 1 << 10,
-                    mask_length: 0,
+                    mode: IrsMode::Standard,
                     codeword_length: 1 << (10 + 3 - 2),
                     interleaving_depth: 1 << 2,
                     matrix_commit: matrix_commit::Config::<Field64_3>::new(0, 0),
@@ -602,7 +602,7 @@ mod tests {
                     embedding: Typed::new(embedding::Identity::new()),
                     num_vectors: 1,
                     vector_size: 1 << 10,
-                    mask_length: 0,
+                    mode: IrsMode::Standard,
                     codeword_length: 1 << (10 + 4 - 2),
                     interleaving_depth: 1 << 2,
                     matrix_commit: matrix_commit::Config::<Field64_3>::new(0, 0),

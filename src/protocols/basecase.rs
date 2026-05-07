@@ -169,7 +169,7 @@ impl<F: Field> Config<F> {
         if !self.masked {
             let vector = verifier_state.prover_messages_vec(self.commit.vector_size)?;
             let masks = verifier_state
-                .prover_messages_vec(self.commit.mask_length * self.commit.num_messages())?;
+                .prover_messages_vec(self.commit.mask_length() * self.commit.num_messages())?;
             let evals = self.commit.verify(verifier_state, &[commitment])?;
             let point = self
                 .sumcheck
@@ -197,7 +197,7 @@ impl<F: Field> Config<F> {
         let mask_rlc: F = verifier_state.verifier_message();
         verify!(!mask_rlc.is_zero());
         let masked_vector: Vec<F> = verifier_state.prover_messages_vec(self.commit.vector_size)?;
-        let masked_masks: Vec<F> = verifier_state.prover_messages_vec(self.commit.mask_length)?;
+        let masked_masks: Vec<F> = verifier_state.prover_messages_vec(self.commit.mask_length())?;
 
         // Open the commitment and mask simultaneously.
         let evals = self
@@ -248,7 +248,7 @@ mod tests {
             let commit =
                 irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1);
             (commit, bool::weighted(0.8)).prop_map(move |(commit, masked)| Self {
-                commit: irs_commit::Config { ..commit },
+                commit,
                 sumcheck: sumcheck::Config::new(
                     size,
                     proof_of_work::Config::none(),

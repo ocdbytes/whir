@@ -75,7 +75,7 @@ impl<F: Field> Config<F> {
         }
     }
 
-    fn mask_length(&self) -> usize {
+    const fn mask_length(&self) -> usize {
         match &self.mode {
             SumcheckMode::Standard => 0,
             SumcheckMode::ZeroKnowledge { mask_length } => *mask_length,
@@ -338,7 +338,7 @@ mod tests {
                 |(initial_size, num_rounds, mode)| {
                     let num_rounds =
                         num_rounds.min(initial_size.next_power_of_two().trailing_zeros() as usize);
-                    Config::new(
+                    Self::new(
                         initial_size,
                         proof_of_work::Config::none(),
                         num_rounds,

@@ -93,25 +93,25 @@ impl<M: Embedding> Config<M> {
         // Theorem 9.6: ℓ_zk ≥ r (mask oracle must cover source randomness).
         if message_mask_length > 0 {
             assert!(
-                message_mask_length >= source_config.mask_length,
+                message_mask_length >= source_config.mask_length(),
                 "message_mask_length ({message_mask_length}) must be >= source randomness length ({})",
-                source_config.mask_length,
+                source_config.mask_length(),
             );
             assert!(
-                message_mask_length - source_config.mask_length >= out_domain_samples,
+                message_mask_length - source_config.mask_length() >= out_domain_samples,
                 "the sampled randomness (s) length must be covering all the out of domain sample requests"
             );
             // t' = (in-domain queries to g via target IRS)
             //    + (OOD queries to g via Construction 9.7's OOD step, count = out_domain_samples).
             // Lemma 9.5 perfect-ZK: t' ≤ r' = target.mask_length.
             assert!(
-                target_config.mask_length
+                target_config.mask_length()
                     >= target_config.in_domain_samples + out_domain_samples,
                 "target encoder violates: t' > r', number of queries should be covered by random mask"
             );
         }
         assert!(
-            source_config.mask_length == 0 || message_mask_length > 0,
+            source_config.mask_length() == 0 || message_mask_length > 0,
             "source with mask_length > 0 (IRS randomness) requires ZK mode (message_mask_length > 0)"
         );
         assert!(
@@ -427,7 +427,7 @@ mod tests {
                                     }
                                     // r = post-fold randomness length (ι_s parallel
                                     // masks fold to a single length-mask_length chunk).
-                                    let r = source.mask_length;
+                                    let r = source.mask_length();
                                     let message_mask_length = if zk { r + fresh_s_len } else { 0 };
                                     Self::new(source.clone(), target, ood, message_mask_length)
                                 })
@@ -486,7 +486,7 @@ mod tests {
         // Lift ι parallel masks (total length source.mask_length × ι) and fold
         // chunks of length source.mask_length down to a single chunk.
         let raw = lift(config.source.embedding(), &source_witness.masks);
-        let mut mask = fold_chunks(&raw, config.source.mask_length, folding_randomness);
+        let mut mask = fold_chunks(&raw, config.source.mask_length(), folding_randomness);
         // Append fresh padding s of length message_mask_length - source.mask_length.
         mask.extend(random_vector::<F>(
             rng,
@@ -748,7 +748,7 @@ mod tests {
             "non-ZK with ood > 0",
             |config| {
                 config.message_mask_length == 0
-                    && config.source.mask_length == 0
+                    && config.source.mask_length() == 0
                     && config.out_domain_samples > 0
             },
         );

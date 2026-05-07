@@ -11,11 +11,7 @@
 //! them using the [`matrix_commit`] protocol. Sampling is done with replacement, so may produce
 //! fewer than `in_domain_samples` distinct rows.
 //!
-use std::{
-    f64::{self, consts::LOG2_10},
-    fmt,
-    ops::Neg,
-};
+use std::{f64, fmt};
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
@@ -26,12 +22,18 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        dot, embedding::Embedding, fields::FieldWithSize, lift, linear_form::UnivariateEvaluation,
+        dot, embedding::Embedding, lift, linear_form::UnivariateEvaluation,
         mixed_univariate_evaluate, ntt, random_vector,
     },
     engines::EngineId,
     hash::Hash,
-    protocols::{challenge_indices::challenge_indices, matrix_commit},
+    protocols::{
+        challenge_indices::challenge_indices,
+        matrix_commit,
+        params::bounds::{
+            eps_mca_log2, list_size_log2, one_minus_distance_log2, ood_per_sample_log2, CodeParams,
+        },
+    },
     transcript::{
         Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
         VerifierMessage, VerifierState,
@@ -39,6 +41,12 @@ use crate::{
     type_info::Typed,
     utils::{chunks_exact_or_empty, zip_strict},
 };
+
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+pub enum IrsMode {
+    Standard,
+    ZeroKnowledge { mask_length: usize },
+}
 
 /// Commit to vectors over an fft-friendly field F
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
@@ -52,9 +60,6 @@ pub struct Config<M: Embedding> {
 
     /// The number of coefficients in each vector.
     pub vector_size: usize,
-
-    /// The number of masking values to add per codeword.
-    pub mask_length: usize,
 
     /// The number of Reed-Solomon evaluation points.
     pub codeword_length: usize,
@@ -78,6 +83,9 @@ pub struct Config<M: Embedding> {
     /// complexity, but it makes transcript pattern and control flow
     /// non-deterministic.
     pub deduplicate_in_domain: bool,
+
+    /// Standard / ZeroKnowledge.
+    pub mode: IrsMode,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
@@ -107,6 +115,7 @@ pub struct Evaluations<F> {
 }
 
 impl<M: Embedding> Config<M> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         security_target: f64,
         unique_decoding: bool,
@@ -115,7 +124,7 @@ impl<M: Embedding> Config<M> {
         vector_size: usize,
         interleaving_depth: usize,
         rate: f64,
-        mask_length: usize,
+        mode: IrsMode,
     ) -> Self
     where
         M: Default,
@@ -127,7 +136,6 @@ impl<M: Embedding> Config<M> {
         let codeword_length = (message_length as f64 / rate).ceil() as usize;
         let rate = message_length as f64 / codeword_length as f64;
 
-        // Pick in- and out-of-domain samples.
         // η = slack to Johnson bound. We pick η = √ρ / 20.
         // TODO: Optimize picking η.
         let johnson_slack = if unique_decoding {
@@ -135,28 +143,12 @@ impl<M: Embedding> Config<M> {
         } else {
             rate.sqrt() / 20.
         };
-        #[allow(clippy::cast_sign_loss)]
-        let in_domain_samples = {
-            // Query error is (1 - δ)^q, so we compute 1 - δ
-            let per_sample = if unique_decoding {
-                // Unique decoding bound: δ = (1 - ρ) / 2
-                f64::midpoint(1., rate)
-            } else {
-                // Johnson bound: δ = 1 - √ρ - η
-                rate.sqrt() + johnson_slack
-            };
-            (security_target / (-per_sample.log2())).ceil() as usize
-        };
-        debug_assert_eq!(
-            in_domain_samples,
-            num_in_domain_queries(unique_decoding, security_target, rate)
-        );
+        let in_domain_samples = num_in_domain_queries(unique_decoding, security_target, rate);
 
         Self {
             embedding: Typed::<M>::default(),
             num_vectors,
             vector_size,
-            mask_length,
             codeword_length,
             interleaving_depth,
             matrix_commit: matrix_commit::Config::with_hash(
@@ -167,6 +159,7 @@ impl<M: Embedding> Config<M> {
             johnson_slack: OrderedFloat(johnson_slack),
             in_domain_samples,
             deduplicate_in_domain: false,
+            mode,
         }
     }
 
@@ -191,9 +184,17 @@ impl<M: Embedding> Config<M> {
         self.vector_size / self.interleaving_depth
     }
 
+    /// Per-polynomial IRS randomness length. Returns 0 in Standard mode.
+    pub const fn mask_length(&self) -> usize {
+        match &self.mode {
+            IrsMode::Standard => 0,
+            IrsMode::ZeroKnowledge { mask_length } => *mask_length,
+        }
+    }
+
     /// Message length including mask coefficients.
     pub fn masked_message_length(&self) -> usize {
-        self.message_length() + self.mask_length
+        self.message_length() + self.mask_length()
     }
 
     pub fn evaluation_points(&self, indices: &[usize]) -> Vec<M::Source> {
@@ -212,44 +213,29 @@ impl<M: Embedding> Config<M> {
         self.johnson_slack == 0.0
     }
 
+    fn log_inv_rate(&self) -> f64 {
+        -self.rate().log2()
+    }
+
     /// Compute a list size bound.
     pub fn list_size(&self) -> f64 {
-        if self.unique_decoding() {
-            1.
-        } else {
-            // This is the Johnson bound $1 / (2 η √ρ)$.
-            1. / (2. * self.johnson_slack.into_inner() * self.rate().sqrt())
-        }
+        2_f64.powf(list_size_log2(
+            self.log_inv_rate(),
+            self.johnson_slack.into_inner(),
+        ))
     }
 
     /// Round-by-round soundness of the in-domain queries in bits.
     pub fn rbr_queries(&self) -> f64 {
-        let per_sample = if self.unique_decoding() {
-            // 1 - δ = 1 - (1 + ρ) / 2
-            f64::midpoint(1., self.rate())
-        } else {
-            // 1 - δ = sqrt(ρ) + η
-            self.rate().sqrt() + self.johnson_slack.into_inner()
-        };
-        self.in_domain_samples as f64 * per_sample.log2().neg()
+        // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
+        -(self.in_domain_samples as f64)
+            * one_minus_distance_log2(self.log_inv_rate(), self.johnson_slack.into_inner())
     }
 
-    // Compute the proximity gaps term of the fold
+    /// Round-by-round soundness of the proximity-gaps fold in bits.
+    /// See WHIR Theorem 4.8.
     pub fn rbr_soundness_fold_prox_gaps(&self) -> f64 {
-        let log_field_size = M::Target::field_size_bits();
-        let log_inv_rate = self.rate().log2().neg();
-        let log_k = (self.masked_message_length() as f64).log2();
-        // See WHIR Theorem 4.8
-        // Recall, at each round we are only folding by two at a time
-        let error = if self.unique_decoding() {
-            log_k + log_inv_rate
-        } else {
-            let log_eta = self.johnson_slack.into_inner().log2();
-            // Make sure η hits the min bound.
-            assert!(log_eta >= -(0.5 * log_inv_rate + LOG2_10 + 1.0) - 1e-6);
-            7. * LOG2_10 + 3.5 * log_inv_rate + 2. * log_k
-        };
-        log_field_size - error
+        -eps_mca_log2(&CodeParams::from_irs(self))
     }
 
     /// Commit to one or more vectors.
@@ -276,7 +262,7 @@ impl<M: Embedding> Config<M> {
         assert!(vectors.iter().all(|p| p.len() == self.vector_size));
 
         // Generate random mask
-        let masks = random_vector(prover_state.rng(), self.mask_length * self.num_messages());
+        let masks = random_vector(prover_state.rng(), self.mask_length() * self.num_messages());
 
         // Interleaved RS Encode the vectors
         let messages = vectors
@@ -543,9 +529,9 @@ pub fn num_ood_samples(
     if unique_decoding {
         return 0;
     }
-    let l_choose_2 = list_size * (list_size - 1.) / 2.;
-    let log_per_sample = field_size_bits - ((degree - 1) as f64).log2();
+    let log_per_sample = -ood_per_sample_log2(degree, field_size_bits);
     assert!(log_per_sample > 0.);
+    let l_choose_2 = list_size * (list_size - 1.) / 2.;
     ((security_target + l_choose_2.log2()) / log_per_sample)
         .ceil()
         .max(1.) as usize
@@ -561,7 +547,6 @@ pub(crate) fn num_in_domain_queries(
     security_target: f64,
     rate: f64,
 ) -> usize {
-    // Pick in- and out-of-domain samples.
     // η = slack to Johnson bound. We pick η = √ρ / 20.
     // TODO: Optimize picking η.
     let johnson_slack = if unique_decoding {
@@ -569,15 +554,9 @@ pub(crate) fn num_in_domain_queries(
     } else {
         rate.sqrt() / 20.
     };
-    // Query error is (1 - δ)^q, so we compute 1 - δ
-    let per_sample = if unique_decoding {
-        // Unique decoding bound: δ = (1 - ρ) / 2
-        f64::midpoint(1., rate)
-    } else {
-        // Johnson bound: δ = 1 - √ρ - η
-        rate.sqrt() + johnson_slack
-    };
-    (security_target / (-per_sample.log2())).ceil() as usize
+    // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
+    let log_one_minus_delta = one_minus_distance_log2(-rate.log2(), johnson_slack);
+    (security_target / -log_one_minus_delta).ceil() as usize
 }
 
 #[cfg(test)]
@@ -640,17 +619,22 @@ pub(crate) mod tests {
                     in_domain_samples,
                     deduplicate_in_domain,
                 )| {
+                    let mode = if mask_length == 0 {
+                        IrsMode::Standard
+                    } else {
+                        IrsMode::ZeroKnowledge { mask_length }
+                    };
                     Self {
                         embedding: Typed::new(embedding.clone()),
                         num_vectors,
                         vector_size,
-                        mask_length,
                         codeword_length,
                         interleaving_depth,
                         matrix_commit,
                         johnson_slack: OrderedFloat::default(),
                         in_domain_samples,
                         deduplicate_in_domain,
+                        mode,
                     }
                 },
             )

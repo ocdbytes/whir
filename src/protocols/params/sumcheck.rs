@@ -26,7 +26,7 @@ pub fn solve<M: Embedding>(
     sumcheck::Config::new(ctx.vector_size, round_pow, num_rounds, mode)
 }
 
-fn num_sumcheck_rounds<M: Embedding>(spec: &SecuritySpec<M>, ctx: &RoundContext) -> usize {
+const fn num_sumcheck_rounds<M: Embedding>(spec: &SecuritySpec<M>, ctx: &RoundContext) -> usize {
     if ctx.round_index == 0 {
         spec.initial_folding_factor
     } else {
@@ -34,7 +34,7 @@ fn num_sumcheck_rounds<M: Embedding>(spec: &SecuritySpec<M>, ctx: &RoundContext)
     }
 }
 
-pub fn masks_required<M: Embedding>(spec: &SecuritySpec<M>, ctx: &RoundContext) -> usize {
+pub const fn masks_required<M: Embedding>(spec: &SecuritySpec<M>, ctx: &RoundContext) -> usize {
     match spec.mode {
         Mode::Standard => 0,
         Mode::ZeroKnowledge => num_sumcheck_rounds(spec, ctx),
@@ -56,7 +56,8 @@ fn solve_sumcheck_round_pow<M: Embedding>(
     // TODO: extend with `ℓ_zk · |Λ_C_zk|` factors in ZK mode once mask-code
     // params are available (PR 2).
     let sec_mca = -bounds::eps_mca_log2(&code);
-    let sec_combination = code.field_bits - bounds::list_size_log2(&code) - 1.0;
+    let sec_combination =
+        code.field_bits - bounds::list_size_log2(code.log_inv_rate, code.johnson_slack) - 1.0;
     let achieved = sec_mca.min(sec_combination);
 
     let pow_bits = bounds::pow_bits_to_close_gap(spec.target_security_bits, achieved);

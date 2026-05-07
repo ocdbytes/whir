@@ -26,23 +26,23 @@ impl CodeParams {
             field_bits: M::Target::field_size_bits(),
         }
     }
+}
 
-    pub fn rate(&self) -> f64 {
-        2_f64.powf(-self.log_inv_rate)
-    }
+fn rate(log_inv_rate: f64) -> f64 {
+    2_f64.powf(-log_inv_rate)
+}
 
-    pub fn unique_decoding(&self) -> bool {
-        self.johnson_slack == 0.0
-    }
+fn unique_decoding(johnson_slack: f64) -> bool {
+    johnson_slack == 0.0
 }
 
 /// log2 |Λ(C, δ)|.
-pub fn list_size_log2(p: &CodeParams) -> f64 {
-    if p.unique_decoding() {
+pub fn list_size_log2(log_inv_rate: f64, johnson_slack: f64) -> f64 {
+    if unique_decoding(johnson_slack) {
         0.0
     } else {
         // Johnson: |Λ| = 1 / (2 η √ρ).
-        -1.0 - p.johnson_slack.log2() + 0.5 * p.log_inv_rate
+        -1.0 - johnson_slack.log2() + 0.5 * log_inv_rate
     }
 }
 
@@ -50,7 +50,7 @@ pub fn list_size_log2(p: &CodeParams) -> f64 {
 pub fn eps_mca_log2(p: &CodeParams) -> f64 {
     let log_k = (p.message_length as f64).log2();
 
-    let error = if p.unique_decoding() {
+    let error = if unique_decoding(p.johnson_slack) {
         log_k + p.log_inv_rate
     } else {
         debug_assert!(p.johnson_slack.log2() >= -(0.5 * p.log_inv_rate + LOG2_10 + 1.0) - 1e-6);
@@ -61,18 +61,18 @@ pub fn eps_mca_log2(p: &CodeParams) -> f64 {
 }
 
 /// log2(1 - δ).
-pub fn one_minus_distance_log2(p: &CodeParams) -> f64 {
-    let one_minus_delta = if p.unique_decoding() {
-        f64::midpoint(1.0, p.rate())
+pub fn one_minus_distance_log2(log_inv_rate: f64, johnson_slack: f64) -> f64 {
+    let one_minus_delta = if unique_decoding(johnson_slack) {
+        f64::midpoint(1.0, rate(log_inv_rate))
     } else {
-        p.rate().sqrt() + p.johnson_slack
+        rate(log_inv_rate).sqrt() + johnson_slack
     };
     one_minus_delta.log2()
 }
 
 /// log2 of the per-OOD-sample Schwartz-Zippel error: (k-1)/|F|.
-pub fn ood_per_sample_log2(p: &CodeParams) -> f64 {
-    ((p.message_length - 1) as f64).log2() - p.field_bits
+pub fn ood_per_sample_log2(message_length: usize, field_bits: f64) -> f64 {
+    ((message_length - 1) as f64).log2() - field_bits
 }
 
 /// PoW difficulty to close a soundness gap: max(0, target − achieved).
