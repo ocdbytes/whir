@@ -48,7 +48,7 @@ pub struct Witness<F: Field> {
 }
 
 /// Verifier output from the code-switch.
-pub type Commitment<F> = IrsCommitment<F>;
+pub type Commitment = IrsCommitment;
 
 /// Mask input for the code-switch prover.
 // TODO : This may be removed after parameter selection PR
@@ -101,9 +101,12 @@ impl<M: Embedding> Config<M> {
                 message_mask_length - source_config.mask_length >= out_domain_samples,
                 "the sampled randomness (s) length must be covering all the out of domain sample requests"
             );
+            // t' = (in-domain queries to g via target IRS)
+            //    + (OOD queries to g via Construction 9.7's OOD step, count = out_domain_samples).
+            // Lemma 9.5 perfect-ZK: t' ≤ r' = target.mask_length.
             assert!(
                 target_config.mask_length
-                    >= target_config.in_domain_samples + target_config.out_domain_samples,
+                    >= target_config.in_domain_samples + out_domain_samples,
                 "target encoder violates: t' > r', number of queries should be covered by random mask"
             );
         }
@@ -154,7 +157,7 @@ impl<M: Embedding> Config<M> {
         &self,
         prover_state: &mut ProverState<H, R>,
         message: Vec<M::Target>,
-        witness: &IrsWitness<M::Source, M::Target>,
+        witness: &IrsWitness<M::Source>,
         covector: &mut [M::Target],
         folding_randomness: &[M::Target],
         mask_input: &MaskInput<'_, M::Target>,
@@ -283,8 +286,8 @@ impl<M: Embedding> Config<M> {
         verifier_state: &mut VerifierState<H>,
         sum: &mut M::Target,
         folding_randomness: &[M::Target],
-        commitment: &IrsCommitment<M::Target>,
-    ) -> VerificationResult<Commitment<M::Target>>
+        commitment: &IrsCommitment,
+    ) -> VerificationResult<Commitment>
     where
         H: DuplexSpongeInterface,
         Standard: Distribution<M::Target>,
@@ -376,19 +379,18 @@ mod tests {
                 0_usize..=5, // fresh_s_len (≥ ood for assumption (c))
                 select(vec![1_usize, 2, 4]), // ι_s (source interleaving)
                 0_usize..=10, // target.in_domain_samples (t'_in)
-                0_usize..=10, // target.out_domain_samples (t'_out)
             );
 
             scalars.prop_flat_map(
-                move |(size, src_mask_len, zk, ood, fresh_s_len, iota_s, t_in, t_out)| {
+                move |(size, src_mask_len, zk, ood, fresh_s_len, iota_s, t_in)| {
                     // Bound 3 assumption (c): ℓ_zk - r ≥ t_ood ⇒ fresh_s_len ≥ ood.
                     let fresh_s_len = if zk {
                         fresh_s_len.max(ood)
                     } else {
                         fresh_s_len
                     };
-                    // Bound 4 assumption (a): target.mask_length ≥ t' = t_in + t_out.
-                    let target_mask = if zk { t_in + t_out } else { 0 };
+                    // Bound 4 assumption (a): target.mask_length ≥ t' = t_in + ood.
+                    let target_mask = if zk { t_in + ood } else { 0 };
                     // ZK with source.mask_length = 0 is valid: the assert
                     // `source.mask_length == 0 || message_mask_length > 0`
                     // is trivially satisfied. Allows testing the corner
@@ -416,13 +418,12 @@ mod tests {
                                 );
                                 let source = source.clone();
                                 target.prop_map(move |mut target| {
-                                    // IrsConfig::arbitrary samples query counts in
-                                    // [0,10] independently of mask_length; pin them
-                                    // to the values target_mask was sized for so
+                                    // IrsConfig::arbitrary samples in_domain_samples
+                                    // in [0,10] independently of mask_length; pin it
+                                    // to the value target_mask was sized for so
                                     // assumption (a) holds.
                                     if zk {
                                         target.in_domain_samples = t_in;
-                                        target.out_domain_samples = t_out;
                                     }
                                     // r = post-fold randomness length (ι_s parallel
                                     // masks fold to a single length-mask_length chunk).

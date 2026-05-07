@@ -143,7 +143,7 @@ impl<F: Field> Config<F> {
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-        commitment: &irs_commit::Commitment<F>,
+        commitment: &irs_commit::Commitment,
         mut sum: F,
     ) -> VerificationResult<Opening<F>>
     where
@@ -248,10 +248,7 @@ mod tests {
             let commit =
                 irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1);
             (commit, bool::weighted(0.8)).prop_map(move |(commit, masked)| Self {
-                commit: irs_commit::Config {
-                    out_domain_samples: 0,
-                    ..commit
-                },
+                commit: irs_commit::Config { ..commit },
                 sumcheck: sumcheck::Config::new(
                     size,
                     proof_of_work::Config::none(),

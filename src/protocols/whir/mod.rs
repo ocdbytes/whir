@@ -30,6 +30,9 @@ use crate::{
 #[serde(bound = "")]
 pub struct Config<M: Embedding> {
     pub initial_committer: irs_commit::Config<M>,
+    /// OOD samples on the initial commit (Construction 9.7-style OOD step,
+    /// formerly inside `irs_commit::commit`).
+    pub initial_out_domain_samples: usize,
     pub initial_sumcheck: sumcheck::Config<M::Target>,
     pub initial_skip_pow: proof_of_work::Config,
     pub round_configs: Vec<RoundConfig<M::Target>>,
@@ -41,12 +44,42 @@ pub struct Config<M: Embedding> {
 #[serde(bound = "")]
 pub struct RoundConfig<F: Field> {
     pub irs_committer: irs_commit::Config<Identity<F>>,
+    /// OOD samples for this round's commit.
+    pub out_domain_samples: usize,
     pub sumcheck: sumcheck::Config<F>,
     pub pow: proof_of_work::Config,
 }
 
-pub type Witness<F: Field, M: Embedding<Target = F>> = irs_commit::Witness<M::Source, F>;
-pub type Commitment<F: Field> = irs_commit::Commitment<F>;
+/// WHIR-level witness: IRS witness + OOD evaluations sampled at commit time.
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "M::Source: Serialize, F: Serialize",
+    deserialize = "M::Source: Deserialize<'de>, F: Deserialize<'de>"
+))]
+pub struct Witness<F: Field, M: Embedding<Target = F>> {
+    pub irs: irs_commit::Witness<M::Source>,
+    pub out_of_domain: irs_commit::Evaluations<F>,
+}
+
+/// WHIR-level commitment: IRS commitment + OOD evaluations received at commit time.
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
+pub struct Commitment<F: Field> {
+    pub irs: irs_commit::Commitment,
+    pub out_of_domain: irs_commit::Evaluations<F>,
+}
+
+impl<F: Field, M: Embedding<Target = F>> Witness<F, M> {
+    pub fn num_vectors(&self) -> usize {
+        self.out_of_domain.num_columns()
+    }
+}
+
+impl<F: Field> Commitment<F> {
+    pub fn num_vectors(&self) -> usize {
+        self.out_of_domain.num_columns()
+    }
+}
 
 #[must_use = "The final claim must be checked if there where any linear forms."]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -75,6 +108,10 @@ impl<F: Field> FinalClaim<F> {
 
 impl<M: Embedding> Config<M> {
     /// Commit to one or more vectors.
+    ///
+    /// After the IRS commit, runs the legacy WHIR OOD step: samples
+    /// `initial_out_domain_samples` random points from the verifier and sends
+    /// each vector's evaluation at each point.
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(size = vectors.first().unwrap().len())))]
     pub fn commit<H, R>(
         &self,
@@ -88,7 +125,12 @@ impl<M: Embedding> Config<M> {
         M::Target: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        self.initial_committer.commit(prover_state, vectors)
+        let (irs, out_of_domain) = self.initial_committer.commit_with_ood(
+            prover_state,
+            vectors,
+            self.initial_out_domain_samples,
+        );
+        Witness { irs, out_of_domain }
     }
 
     /// Receive a commitment to vectors.
@@ -101,7 +143,10 @@ impl<M: Embedding> Config<M> {
         M::Target: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        self.initial_committer.receive_commitment(verifier_state)
+        let (irs, out_of_domain) = self
+            .initial_committer
+            .receive_commitment_with_ood(verifier_state, self.initial_out_domain_samples)?;
+        Ok(Commitment { irs, out_of_domain })
     }
 
     /// Disable proof-of-work for test.

@@ -7,15 +7,9 @@
 //! using an NTT friendly Reed-Solomon code to produce a `num_vectors * interleaving_depth`
 //! by `codeword_size` matrix. This matrix is committed using the [`matrix_commit`] protocol.
 //!
-//! After committing the encoded matrix, the protocol generates a random Reed-Solomon code of
-//! length `out_domain_samples` over an extension field `G` of `F` and encodes the original
-//! matrix using this code to produce a `num_vectors` by `out_domain_samples` matrix over `G`.
-//! Together, these two encoded matrices form a commitment to the original matrix.
-//!
 //! On opening the commitment, the protocol randomly selects `in_domain_samples` rows and opens
-//! it using the [`matrix_commit`] protocol. Sampling is done with replacement, so may produce
-//! fewer than `in_domain_samples` distinct rows. This produces `in_domain_samples` evaluation
-//! points in `F` and `in_domain_samples` by `num_vectors * interleaving_depth`.
+//! them using the [`matrix_commit`] protocol. Sampling is done with replacement, so may produce
+//! fewer than `in_domain_samples` distinct rows.
 //!
 use std::{
     f64::{self, consts::LOG2_10},
@@ -44,7 +38,6 @@ use crate::{
     },
     type_info::Typed,
     utils::{chunks_exact_or_empty, zip_strict},
-    verify,
 };
 
 /// Commit to vectors over an fft-friendly field F
@@ -79,9 +72,6 @@ pub struct Config<M: Embedding> {
     /// The number of in-domain samples.
     pub in_domain_samples: usize,
 
-    /// The number of out-of-domain samples.
-    pub out_domain_samples: usize,
-
     /// Whether to sort and deduplicate the in-domain samples.
     ///
     /// Deduplication can slightly reduce proof size and prover/verifier
@@ -92,21 +82,16 @@ pub struct Config<M: Embedding> {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
 #[must_use]
-pub struct Witness<F: Field, G = F>
-where
-    G: Field,
-{
+pub struct Witness<F: Field> {
     pub masks: Vec<F>,
     pub matrix: Vec<F>,
     pub matrix_witness: matrix_commit::Witness,
-    pub out_of_domain: Evaluations<G>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
 #[must_use]
-pub struct Commitment<G: Field> {
-    matrix_commitment: matrix_commit::Commitment,
-    out_of_domain: Evaluations<G>,
+pub struct Commitment {
+    pub matrix_commitment: matrix_commit::Commitment,
 }
 
 /// Interleaved Reed-Solomon code.
@@ -150,16 +135,6 @@ impl<M: Embedding> Config<M> {
         } else {
             rate.sqrt() / 20.
         };
-        let out_domain_samples = {
-            let list_size = 1. / (2. * johnson_slack * rate.sqrt());
-            num_ood_samples(
-                unique_decoding,
-                security_target,
-                M::Target::field_size_bits(),
-                list_size,
-                vector_size,
-            )
-        };
         #[allow(clippy::cast_sign_loss)]
         let in_domain_samples = {
             // Query error is (1 - δ)^q, so we compute 1 - δ
@@ -191,7 +166,6 @@ impl<M: Embedding> Config<M> {
             ),
             johnson_slack: OrderedFloat(johnson_slack),
             in_domain_samples,
-            out_domain_samples,
             deduplicate_in_domain: false,
         }
     }
@@ -235,7 +209,7 @@ impl<M: Embedding> Config<M> {
     }
 
     pub fn unique_decoding(&self) -> bool {
-        self.out_domain_samples == 0 && self.johnson_slack == 0.0
+        self.johnson_slack == 0.0
     }
 
     /// Compute a list size bound.
@@ -246,16 +220,6 @@ impl<M: Embedding> Config<M> {
             // This is the Johnson bound $1 / (2 η √ρ)$.
             1. / (2. * self.johnson_slack.into_inner() * self.rate().sqrt())
         }
-    }
-
-    /// Round-by-round soundness of the out-of-domain samples in bits.
-    pub fn rbr_ood_sample(&self) -> f64 {
-        let list_size = self.list_size();
-        let log_field_size = M::Target::field_size_bits();
-        // See [STIR] lemma 4.5.
-        let l_choose_2 = list_size * (list_size - 1.) / 2.;
-        let log_per_sample = ((self.vector_size - 1) as f64).log2() - log_field_size;
-        -l_choose_2.log2() - self.out_domain_samples as f64 * log_per_sample
     }
 
     /// Round-by-round soundness of the in-domain queries in bits.
@@ -294,7 +258,7 @@ impl<M: Embedding> Config<M> {
         &self,
         prover_state: &mut ProverState<H, R>,
         vectors: &[&[M::Source]],
-    ) -> Witness<M::Source, M::Target>
+    ) -> Witness<M::Source>
     where
         Standard: Distribution<M::Source>,
         H: DuplexSpongeInterface,
@@ -324,29 +288,10 @@ impl<M: Embedding> Config<M> {
         // Commit to the matrix
         let matrix_witness = self.matrix_commit.commit(prover_state, &matrix);
 
-        // Handle out-of-domain points and values
-        // TODO : Remove this logic after main whir protocol is updated
-        // as this is not required in the new construction. This will be
-        // removed in next PR (Parameter Selection)
-        let oods_points: Vec<M::Target> =
-            prover_state.verifier_message_vec(self.out_domain_samples);
-        let mut oods_matrix = Vec::with_capacity(self.out_domain_samples * self.num_vectors);
-        for &point in &oods_points {
-            for &vector in vectors {
-                let value = mixed_univariate_evaluate(&*self.embedding, vector, point);
-                prover_state.prover_message(&value);
-                oods_matrix.push(value);
-            }
-        }
-
         Witness {
             masks,
             matrix,
             matrix_witness,
-            out_of_domain: Evaluations {
-                points: oods_points,
-                matrix: oods_matrix,
-            },
         }
     }
 
@@ -355,24 +300,67 @@ impl<M: Embedding> Config<M> {
     pub fn receive_commitment<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-    ) -> VerificationResult<Commitment<M::Target>>
+    ) -> VerificationResult<Commitment>
     where
         H: DuplexSpongeInterface,
         Hash: ProverMessage<[H::U]>,
         M::Target: Codec<[H::U]>,
     {
         let matrix_commitment = self.matrix_commit.receive_commitment(verifier_state)?;
-        let oods_points: Vec<M::Target> =
-            verifier_state.verifier_message_vec(self.out_domain_samples);
-        let oods_matrix =
-            verifier_state.prover_messages_vec(self.out_domain_samples * self.num_vectors)?;
-        Ok(Commitment {
-            matrix_commitment,
-            out_of_domain: Evaluations {
-                points: oods_points,
-                matrix: oods_matrix,
-            },
-        })
+        Ok(Commitment { matrix_commitment })
+    }
+
+    /// Commit to vectors and run the legacy WHIR OOD step in one call.
+    ///
+    /// Layered helper bundling `commit` + the OOD message exchange (sample
+    /// `out_domain_samples` random points, send each vector's evaluation at
+    /// each point). Used by the legacy WHIR protocol while the OOD step
+    /// is still part of the per-commit protocol shape; the new construction
+    /// (Construction 9.7) handles OOD at the code-switch level instead.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
+    pub fn commit_with_ood<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        vectors: &[&[M::Source]],
+        out_domain_samples: usize,
+    ) -> (Witness<M::Source>, Evaluations<M::Target>)
+    where
+        Standard: Distribution<M::Source>,
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        M::Target: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        let witness = self.commit(prover_state, vectors);
+        let points: Vec<M::Target> = prover_state.verifier_message_vec(out_domain_samples);
+        let mut matrix = Vec::with_capacity(out_domain_samples * vectors.len());
+        for &point in &points {
+            for &vector in vectors {
+                let value = mixed_univariate_evaluate(&*self.embedding, vector, point);
+                prover_state.prover_message(&value);
+                matrix.push(value);
+            }
+        }
+        (witness, Evaluations { points, matrix })
+    }
+
+    /// Receive a commitment and the legacy WHIR OOD evaluations in one call.
+    /// Verifier mirror of `commit_with_ood`.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(self = %self)))]
+    pub fn receive_commitment_with_ood<H>(
+        &self,
+        verifier_state: &mut VerifierState<H>,
+        out_domain_samples: usize,
+    ) -> VerificationResult<(Commitment, Evaluations<M::Target>)>
+    where
+        H: DuplexSpongeInterface,
+        Hash: ProverMessage<[H::U]>,
+        M::Target: Codec<[H::U]>,
+    {
+        let commitment = self.receive_commitment(verifier_state)?;
+        let points: Vec<M::Target> = verifier_state.verifier_message_vec(out_domain_samples);
+        let matrix = verifier_state.prover_messages_vec(out_domain_samples * self.num_vectors)?;
+        Ok((commitment, Evaluations { points, matrix }))
     }
 
     /// Opens the commitment and returns the evaluations of the vectors.
@@ -386,7 +374,7 @@ impl<M: Embedding> Config<M> {
     pub fn open<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        witnesses: &[&Witness<M::Source, M::Target>],
+        witnesses: &[&Witness<M::Source>],
     ) -> Evaluations<M::Source>
     where
         H: DuplexSpongeInterface,
@@ -396,11 +384,6 @@ impl<M: Embedding> Config<M> {
     {
         for witness in witnesses {
             assert_eq!(witness.matrix.len(), self.size());
-            assert_eq!(witness.out_of_domain.points.len(), self.out_domain_samples);
-            assert_eq!(
-                witness.out_of_domain.matrix.len(),
-                self.out_domain_samples * self.num_vectors
-            );
         }
 
         // Get in-domain openings
@@ -439,20 +422,13 @@ impl<M: Embedding> Config<M> {
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-        commitments: &[&Commitment<M::Target>],
+        commitments: &[&Commitment],
     ) -> VerificationResult<Evaluations<M::Source>>
     where
         H: DuplexSpongeInterface,
         u8: Decoding<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        for commitment in commitments {
-            verify!(commitment.out_of_domain.points.len() == self.out_domain_samples);
-            verify!(
-                commitment.out_of_domain.matrix.len() == self.num_vectors * self.out_domain_samples
-            );
-        }
-
         // Get in-domain openings
         let (indices, points) = self.in_domain_challenges(verifier_state);
 
@@ -498,28 +474,6 @@ impl<M: Embedding> Config<M> {
         );
         let points = self.evaluation_points(&indices);
         (indices, points)
-    }
-}
-
-impl<G: Field> Commitment<G> {
-    /// Returns the out-of-domain evaluations.
-    pub const fn out_of_domain(&self) -> &Evaluations<G> {
-        &self.out_of_domain
-    }
-
-    pub fn num_vectors(&self) -> usize {
-        self.out_of_domain().num_columns()
-    }
-}
-
-impl<F: Field, G: Field> Witness<F, G> {
-    /// Returns the out-of-domain evaluations.
-    pub const fn out_of_domain(&self) -> &Evaluations<G> {
-        &self.out_of_domain
-    }
-
-    pub fn num_vectors(&self) -> usize {
-        self.out_of_domain().num_columns()
     }
 }
 
@@ -569,11 +523,7 @@ impl<M: Embedding> fmt::Display for Config<M> {
             self.num_vectors, self.vector_size, self.interleaving_depth,
         )?;
         write!(f, " rate 2⁻{:.2}", -self.rate().log2())?;
-        write!(
-            f,
-            " samples {} in- {} out-domain",
-            self.in_domain_samples, self.out_domain_samples
-        )
+        write!(f, " samples {} in-domain", self.in_domain_samples)
     }
 }
 
@@ -583,7 +533,7 @@ impl<M: Embedding> fmt::Display for Config<M> {
 /// where `L` is the list size and `degree` is the polynomial degree bound.
 /// See [STIR] Lemma 4.5.
 #[allow(clippy::cast_sign_loss)]
-pub(crate) fn num_ood_samples(
+pub fn num_ood_samples(
     unique_decoding: bool,
     security_target: f64,
     field_size_bits: f64,
@@ -684,24 +634,24 @@ pub(crate) mod tests {
                 )
             });
 
-            (codeword_matrix, 0_usize..=10, 0_usize..=10, bool::ANY).prop_map(
+            (codeword_matrix, 0_usize..=10, bool::ANY).prop_map(
                 move |(
                     (codeword_length, matrix_commit),
                     in_domain_samples,
-                    out_domain_samples,
                     deduplicate_in_domain,
-                )| Self {
-                    embedding: Typed::new(embedding.clone()),
-                    num_vectors,
-                    vector_size,
-                    mask_length,
-                    codeword_length,
-                    interleaving_depth,
-                    matrix_commit,
-                    johnson_slack: OrderedFloat::default(),
-                    in_domain_samples,
-                    out_domain_samples,
-                    deduplicate_in_domain,
+                )| {
+                    Self {
+                        embedding: Typed::new(embedding.clone()),
+                        num_vectors,
+                        vector_size,
+                        mask_length,
+                        codeword_length,
+                        interleaving_depth,
+                        matrix_commit,
+                        johnson_slack: OrderedFloat::default(),
+                        in_domain_samples,
+                        deduplicate_in_domain,
+                    }
                 },
             )
         }
@@ -733,30 +683,6 @@ pub(crate) mod tests {
             &mut prover_state,
             &vectors.iter().map(|p| p.as_slice()).collect::<Vec<_>>(),
         );
-        assert_eq!(
-            witness.out_of_domain().points.len(),
-            config.out_domain_samples
-        );
-        assert_eq!(
-            witness.out_of_domain().matrix.len(),
-            config.out_domain_samples * config.num_vectors
-        );
-        if config.num_vectors > 0 {
-            for (point, evals) in zip_strict(
-                witness.out_of_domain().points.iter(),
-                witness
-                    .out_of_domain()
-                    .matrix
-                    .chunks_exact(config.num_vectors),
-            ) {
-                for (vector, expected) in zip_strict(vectors.iter(), evals.iter()) {
-                    assert_eq!(
-                        mixed_univariate_evaluate(config.embedding(), vector, *point),
-                        *expected
-                    );
-                }
-            }
-        }
         let in_domain_evals = config.open(&mut prover_state, &[&witness]);
         if config.deduplicate_in_domain {
             // Sorting is over index order, not points
@@ -800,7 +726,6 @@ pub(crate) mod tests {
         // Verifier
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
         let commitment = config.receive_commitment(&mut verifier_state).unwrap();
-        assert_eq!(commitment.out_of_domain(), witness.out_of_domain());
         let verifier_in_domain_evals = config.verify(&mut verifier_state, &[&commitment]).unwrap();
         assert_eq!(&verifier_in_domain_evals, &in_domain_evals);
         verifier_state.check_eof().unwrap();

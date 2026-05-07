@@ -26,8 +26,8 @@ use crate::{
 };
 
 enum RoundWitness<'a, F: Field, M: Embedding<Target = F>> {
-    Initial(Vec<Cow<'a, irs_commit::Witness<M::Source, F>>>),
-    Round(irs_commit::Witness<F, F>),
+    Initial(Vec<Cow<'a, Witness<F, M>>>),
+    Round(irs_commit::Witness<F>),
 }
 
 impl<M: Embedding> Config<M> {
@@ -103,8 +103,8 @@ impl<M: Embedding> Config<M> {
             let mut vector_offset = 0;
             for witness in &witnesses {
                 for (oods_eval, oods_row) in zip_strict(
-                    witness.out_of_domain().evaluators(self.initial_size()),
-                    witness.out_of_domain().rows(),
+                    witness.out_of_domain.evaluators(self.initial_size()),
+                    witness.out_of_domain.rows(),
                 ) {
                     for (j, vector) in vectors.iter().enumerate() {
                         if j >= vector_offset && j < oods_row.len() + vector_offset {
@@ -219,8 +219,12 @@ impl<M: Embedding> Config<M> {
 
         // Execute standard WHIR rounds on the batched vectors
         for (round_index, round_config) in self.round_configs.iter().enumerate() {
-            // Commit to the vector, this generates out-of-domain evaluations.
-            let new_witness = round_config.irs_committer.commit(prover_state, &[&vector]);
+            // Commit to the folded vector and run the per-round OOD step.
+            let (new_witness, out_of_domain) = round_config.irs_committer.commit_with_ood(
+                prover_state,
+                &[&vector],
+                round_config.out_domain_samples,
+            );
 
             // Proof of work before in-domain challenges
             round_config.pow.prove(prover_state);
@@ -228,9 +232,9 @@ impl<M: Embedding> Config<M> {
             // Open the previous round's witness.
             let in_domain = match prev_witness {
                 RoundWitness::Initial(init_witnesses) => {
-                    let witness_refs: Vec<&_> = init_witnesses.iter().map(|c| &**c).collect();
+                    let irs_refs: Vec<&_> = init_witnesses.iter().map(|c| &c.irs).collect();
                     self.initial_committer
-                        .open(prover_state, &witness_refs)
+                        .open(prover_state, &irs_refs)
                         .lift(self.embedding())
                 }
                 RoundWitness::Round(old_witness) => {
@@ -242,13 +246,11 @@ impl<M: Embedding> Config<M> {
             };
 
             // Collect constraints for this round and RLC them in
-            let stir_challenges = new_witness
-                .out_of_domain()
+            let stir_challenges = out_of_domain
                 .evaluators(round_config.initial_size())
                 .chain(in_domain.evaluators(round_config.initial_size()))
                 .collect::<Vec<_>>();
-            let stir_evaluations = new_witness
-                .out_of_domain()
+            let stir_evaluations = out_of_domain
                 .values(&[M::Target::ONE])
                 .chain(in_domain.values(&tensor_product(
                     &vector_rlc_coeffs,
@@ -289,8 +291,8 @@ impl<M: Embedding> Config<M> {
         // Open and consume the final previous witness.
         match prev_witness {
             RoundWitness::Initial(init_witnesses) => {
-                let witness_refs: Vec<&_> = init_witnesses.iter().map(|c| &**c).collect();
-                let _in_domain = self.initial_committer.open(prover_state, &witness_refs);
+                let irs_refs: Vec<&_> = init_witnesses.iter().map(|c| &c.irs).collect();
+                let _in_domain = self.initial_committer.open(prover_state, &irs_refs);
             }
             RoundWitness::Round(old_witness) => {
                 let prev_config = self.round_configs.last().unwrap();

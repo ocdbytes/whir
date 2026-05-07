@@ -23,11 +23,11 @@ use crate::{
 
 enum RoundCommitment<'a, F: Field> {
     Initial {
-        commitments: &'a [&'a irs_commit::Commitment<F>],
+        commitments: &'a [&'a Commitment<F>],
         batching_weights: Vec<F>,
     },
     Round {
-        commitment: irs_commit::Commitment<F>,
+        commitment: irs_commit::Commitment,
     },
 }
 
@@ -72,8 +72,8 @@ impl<M: Embedding> Config<M> {
             let mut vector_offset = 0;
             for commitment in commitments {
                 for (weights, oods_row) in zip_strict(
-                    commitment.out_of_domain().evaluators(self.initial_size()),
-                    commitment.out_of_domain().rows(),
+                    commitment.out_of_domain.evaluators(self.initial_size()),
+                    commitment.out_of_domain.rows(),
                 ) {
                     for j in 0..num_vectors {
                         if j >= vector_offset && j < oods_row.len() + vector_offset {
@@ -133,10 +133,10 @@ impl<M: Embedding> Config<M> {
         round_folding_randomness.push(folding_randomness);
 
         for (round_index, round_config) in self.round_configs.iter().enumerate() {
-            // Receive commitment to the folded vector, plus out-of-domain constraints
-            let commitment = round_config
+            // Receive commitment to the folded vector and the per-round OOD evaluations.
+            let (commitment, out_of_domain) = round_config
                 .irs_committer
-                .receive_commitment(verifier_state)?;
+                .receive_commitment_with_ood(verifier_state, round_config.out_domain_samples)?;
 
             // Proof of work before in-domain challenges
             round_config.pow.verify(verifier_state)?;
@@ -147,7 +147,8 @@ impl<M: Embedding> Config<M> {
                     commitments,
                     batching_weights,
                 } => {
-                    let in_domain = self.initial_committer.verify(verifier_state, commitments)?;
+                    let irs_refs: Vec<&_> = commitments.iter().map(|c| &c.irs).collect();
+                    let in_domain = self.initial_committer.verify(verifier_state, &irs_refs)?;
                     // TODO: Skip lift and keep initial in-domain in subfield for evaluation.
                     // This should be every so slightly more performant.
                     (in_domain.lift(self.embedding()), batching_weights)
@@ -162,13 +163,11 @@ impl<M: Embedding> Config<M> {
             };
 
             // Random linear combination of out- and in-domain constraints
-            let constraint_weights = commitment
-                .out_of_domain()
+            let constraint_weights = out_of_domain
                 .evaluators(round_config.initial_size())
                 .chain(in_domain.evaluators(round_config.initial_size()))
                 .collect::<Vec<_>>();
-            let constraint_values = commitment
-                .out_of_domain()
+            let constraint_values = out_of_domain
                 .values(&[M::Target::ONE])
                 .chain(in_domain.values(&tensor_product(
                     &poly_rlc,
@@ -202,7 +201,8 @@ impl<M: Embedding> Config<M> {
                 commitments,
                 batching_weights,
             } => {
-                let in_domain = self.initial_committer.verify(verifier_state, commitments)?;
+                let irs_refs: Vec<&_> = commitments.iter().map(|c| &c.irs).collect();
+                let in_domain = self.initial_committer.verify(verifier_state, &irs_refs)?;
                 (in_domain.lift(self.embedding()), batching_weights)
             }
             RoundCommitment::Round { commitment } => {

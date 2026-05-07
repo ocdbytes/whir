@@ -76,7 +76,7 @@ pub struct Witness<F: Field> {
 }
 
 /// Verifier output from the commit phase.
-pub type Commitment<F> = IrsCommitment<F>;
+pub type Commitment = IrsCommitment;
 
 impl<F: Field> Config<F> {
     pub fn new(c_zk_commit: IrsConfig<Identity<F>>, num_masks: usize) -> Self {
@@ -88,14 +88,6 @@ impl<F: Field> Config<F> {
         assert_eq!(
             c_zk_commit.interleaving_depth, 1,
             "mask proximity requires interleaving_depth = 1"
-        );
-        // OOD evaluations are sent in the clear during IRS commit/receive,
-        // which would leak raw mask values before the γ-combination and
-        // break the ZK contract. The OOD path in irs_commit is slated for
-        // removal in the new construction; until then, enforce zero here.
-        assert_eq!(
-            c_zk_commit.out_domain_samples, 0,
-            "mask proximity requires out_domain_samples = 0 (OOD openings would leak raw mask evaluations)"
         );
         Self {
             c_zk_commit,
@@ -148,7 +140,7 @@ impl<F: Field> Config<F> {
     pub fn receive_commitment<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-    ) -> VerificationResult<Commitment<F>>
+    ) -> VerificationResult<Commitment>
     where
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
@@ -214,7 +206,7 @@ impl<F: Field> Config<F> {
     pub fn verify<H>(
         &self,
         verifier_state: &mut VerifierState<H>,
-        commitment: &Commitment<F>,
+        commitment: &Commitment,
     ) -> VerificationResult<()>
     where
         F: Codec<[H::U]>,
@@ -320,10 +312,6 @@ mod tests {
                     );
                     (Just(num_masks), c_zk)
                 })
-                .prop_filter(
-                    "mask proximity requires out_domain_samples = 0",
-                    |(_, c_zk)| c_zk.out_domain_samples == 0,
-                )
                 .prop_map(|(num_masks, c_zk)| Self::new(c_zk, num_masks))
         }
     }

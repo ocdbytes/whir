@@ -7,8 +7,25 @@ use crate::{
     algebra::{embedding::Embedding, fields::FieldWithSize},
     bits::Bits,
     parameters::ProtocolParameters,
-    protocols::{irs_commit, proof_of_work, sumcheck},
+    protocols::{
+        irs_commit::{self, num_ood_samples},
+        proof_of_work, sumcheck,
+    },
 };
+
+/// log2 round-by-round soundness of `t_ood` OOD samples against a code with
+/// the given list size — formerly `irs_commit::Config::rbr_ood_sample`.
+fn rbr_ood_sample(
+    list_size: f64,
+    log_field_size: f64,
+    vector_size: usize,
+    out_domain_samples: usize,
+) -> f64 {
+    // [STIR] Lemma 4.5.
+    let l_choose_2 = list_size * (list_size - 1.) / 2.;
+    let log_per_sample = ((vector_size - 1) as f64).log2() - log_field_size;
+    -l_choose_2.log2() - out_domain_samples as f64 * log_per_sample
+}
 
 impl<M: Embedding> Config<M> {
     #[allow(clippy::too_many_lines)]
@@ -45,6 +62,13 @@ impl<M: Embedding> Config<M> {
             1 << whir_parameters.initial_folding_factor,
             0.5_f64.powi(whir_parameters.starting_log_inv_rate as i32),
             0,
+        );
+        let initial_out_domain_samples = num_ood_samples(
+            whir_parameters.unique_decoding,
+            protocol_security_level,
+            field_size_bits,
+            initial_committer.list_size(),
+            size,
         );
 
         // Initial sumcheck round pow bits.
@@ -87,9 +111,16 @@ impl<M: Embedding> Config<M> {
                 0.5_f64.powi(next_rate as i32),
                 0,
             );
+            let round_out_domain_samples = num_ood_samples(
+                whir_parameters.unique_decoding,
+                protocol_security_level,
+                field_size_bits,
+                irs_committer.list_size(),
+                1 << num_variables,
+            );
             let combination_error = {
                 let log_list_size = irs_committer.list_size().log2();
-                let count = irs_committer.out_domain_samples + in_domain_samples;
+                let count = round_out_domain_samples + in_domain_samples;
                 let log_combination = (count as f64).log2();
                 field_size_bits - (log_combination + log_list_size + 1.)
             };
@@ -104,6 +135,7 @@ impl<M: Embedding> Config<M> {
 
             let config = RoundConfig {
                 irs_committer,
+                out_domain_samples: round_out_domain_samples,
                 sumcheck: sumcheck::Config::new(
                     1 << num_variables,
                     pow(folding_pow_bits),
@@ -131,6 +163,7 @@ impl<M: Embedding> Config<M> {
 
         Self {
             initial_committer,
+            initial_out_domain_samples,
             initial_sumcheck: sumcheck::Config::new(
                 size,
                 pow(starting_folding_pow_bits),
@@ -169,11 +202,15 @@ impl<M: Embedding> Config<M> {
             security_level =
                 security_level.min(field_size_bits - ((num_linear_forms - 1) as f64).log2());
         }
-        let has_initial_constraints =
-            num_linear_forms > 0 || self.initial_committer.out_domain_samples > 0;
+        let has_initial_constraints = num_linear_forms > 0 || self.initial_out_domain_samples > 0;
 
         if !self.initial_committer.unique_decoding() {
-            security_level = security_level.min(self.initial_committer.rbr_ood_sample());
+            security_level = security_level.min(rbr_ood_sample(
+                self.initial_committer.list_size(),
+                field_size_bits,
+                self.initial_committer.vector_size,
+                self.initial_out_domain_samples,
+            ));
         }
 
         // Initial sumcheck error (or the skipped version for LDT).
@@ -198,13 +235,18 @@ impl<M: Embedding> Config<M> {
             let new_unique_decoding = round.irs_committer.unique_decoding();
 
             if !new_unique_decoding {
-                let ood_error = round.irs_committer.rbr_ood_sample();
+                let ood_error = rbr_ood_sample(
+                    round.irs_committer.list_size(),
+                    field_size_bits,
+                    round.irs_committer.vector_size,
+                    round.out_domain_samples,
+                );
                 security_level = security_level.min(ood_error);
             }
 
             let log_list_size = round.irs_committer.list_size().log2();
             let combination_error = {
-                let count = round.irs_committer.out_domain_samples + old_in_domain_samples;
+                let count = round.out_domain_samples + old_in_domain_samples;
                 let log_combination = (count as f64).log2();
                 field_size_bits - (log_combination + log_list_size + 1.)
             };
@@ -345,7 +387,12 @@ impl<M: Embedding> Display for Config<M> {
             writeln!(
                 f,
                 "{:.1} bits -- OOD commitment",
-                self.initial_committer.rbr_ood_sample()
+                rbr_ood_sample(
+                    self.initial_committer.list_size(),
+                    field_size_bits,
+                    self.initial_committer.vector_size,
+                    self.initial_out_domain_samples,
+                )
             )?;
         }
         let prox_gaps_error = self.initial_committer.rbr_soundness_fold_prox_gaps();
@@ -370,13 +417,18 @@ impl<M: Embedding> Display for Config<M> {
                 writeln!(
                     f,
                     "{:.1} bits -- OOD sample",
-                    r.irs_committer.rbr_ood_sample()
+                    rbr_ood_sample(
+                        r.irs_committer.list_size(),
+                        field_size_bits,
+                        r.irs_committer.vector_size,
+                        r.out_domain_samples,
+                    )
                 )?;
             }
 
             let log_list_size = r.irs_committer.list_size().log2();
             let combination_error = {
-                let count = r.irs_committer.out_domain_samples + old_in_domain_samples;
+                let count = r.out_domain_samples + old_in_domain_samples;
                 let log_combination = (count as f64).log2();
                 field_size_bits - (log_combination + log_list_size + 1.)
             };
@@ -534,9 +586,9 @@ mod tests {
                     matrix_commit: matrix_commit::Config::<Field64_3>::new(0, 0),
                     johnson_slack: OrderedFloat::default(),
                     in_domain_samples: 5,
-                    out_domain_samples: 2,
                     deduplicate_in_domain: true,
                 },
+                out_domain_samples: 2,
                 sumcheck: sumcheck::Config::<Field64_3>::new(
                     1 << 10,
                     proof_of_work::Config::from_difficulty(Bits::new(19.0)),
@@ -556,9 +608,9 @@ mod tests {
                     matrix_commit: matrix_commit::Config::<Field64_3>::new(0, 0),
                     johnson_slack: OrderedFloat::default(),
                     in_domain_samples: 6,
-                    out_domain_samples: 2,
                     deduplicate_in_domain: true,
                 },
+                out_domain_samples: 2,
                 sumcheck: sumcheck::Config::<Field64_3>::new(
                     1 << 10,
                     proof_of_work::Config::from_difficulty(Bits::new(19.5)),

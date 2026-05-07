@@ -26,10 +26,10 @@ pub struct Commitment<F: Field> {
 #[derive(Clone, Debug)]
 pub struct Witness<F: Field> {
     pub f_hat_vectors: Vec<Vec<F>>,
-    pub f_hat_witnesses: Vec<irs_commit::Witness<F, F>>,
+    pub f_hat_witnesses: Vec<irs_commit::Witness<F>>,
     pub blinding_polynomials: Vec<BlindingPolynomials<F>>,
     pub blinding_vectors: Vec<Vec<F>>,
-    pub blinding_witness: irs_commit::Witness<F, F>,
+    pub blinding_witness: irs_commit::Witness<F>,
 }
 
 impl<F: Field> Config<F> {
