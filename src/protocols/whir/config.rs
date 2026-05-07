@@ -8,7 +8,6 @@ use crate::{
     bits::Bits,
     parameters::ProtocolParameters,
     protocols::{irs_commit, proof_of_work, sumcheck},
-    type_info::Type,
 };
 
 impl<M: Embedding> Config<M> {
@@ -45,6 +44,7 @@ impl<M: Embedding> Config<M> {
             size,
             1 << whir_parameters.initial_folding_factor,
             0.5_f64.powi(whir_parameters.starting_log_inv_rate as i32),
+            0,
         );
 
         // Initial sumcheck round pow bits.
@@ -85,6 +85,7 @@ impl<M: Embedding> Config<M> {
                 1 << num_variables,
                 1 << whir_parameters.folding_factor,
                 0.5_f64.powi(next_rate as i32),
+                0,
             );
             let combination_error = {
                 let log_list_size = irs_committer.list_size().log2();
@@ -103,13 +104,12 @@ impl<M: Embedding> Config<M> {
 
             let config = RoundConfig {
                 irs_committer,
-                sumcheck: sumcheck::Config {
-                    field: Type::new(),
-                    initial_size: 1 << num_variables,
-                    round_pow: pow(folding_pow_bits),
-                    num_rounds: whir_parameters.folding_factor,
-                    mask_length: 0,
-                },
+                sumcheck: sumcheck::Config::new(
+                    1 << num_variables,
+                    pow(folding_pow_bits),
+                    whir_parameters.folding_factor,
+                    sumcheck::SumcheckMode::Standard,
+                ),
                 pow: pow(pow_bits),
             };
 
@@ -131,22 +131,20 @@ impl<M: Embedding> Config<M> {
 
         Self {
             initial_committer,
-            initial_sumcheck: sumcheck::Config {
-                field: Type::new(),
-                initial_size: size,
-                round_pow: pow(starting_folding_pow_bits),
-                num_rounds: whir_parameters.initial_folding_factor,
-                mask_length: 0,
-            },
+            initial_sumcheck: sumcheck::Config::new(
+                size,
+                pow(starting_folding_pow_bits),
+                whir_parameters.initial_folding_factor,
+                sumcheck::SumcheckMode::Standard,
+            ),
             initial_skip_pow: pow(initial_skip_pow_bits),
             round_configs,
-            final_sumcheck: sumcheck::Config {
-                field: Type::new(),
-                initial_size: 1 << num_variables,
-                round_pow: pow(final_folding_pow_bits),
-                num_rounds: num_variables,
-                mask_length: 0,
-            },
+            final_sumcheck: sumcheck::Config::new(
+                1 << num_variables,
+                pow(final_folding_pow_bits),
+                num_variables,
+                sumcheck::SumcheckMode::Standard,
+            ),
             final_pow: pow(final_pow_bits),
         }
     }
@@ -539,13 +537,12 @@ mod tests {
                     out_domain_samples: 2,
                     deduplicate_in_domain: true,
                 },
-                sumcheck: sumcheck::Config {
-                    field: Type::<Field64_3>::new(),
-                    initial_size: 1 << 10,
-                    round_pow: proof_of_work::Config::from_difficulty(Bits::new(19.0)),
-                    num_rounds: 2,
-                    mask_length: 0,
-                },
+                sumcheck: sumcheck::Config::<Field64_3>::new(
+                    1 << 10,
+                    proof_of_work::Config::from_difficulty(Bits::new(19.0)),
+                    2,
+                    sumcheck::SumcheckMode::Standard,
+                ),
                 pow: proof_of_work::Config::from_difficulty(Bits::new(17.0)),
             },
             RoundConfig {
@@ -562,13 +559,12 @@ mod tests {
                     out_domain_samples: 2,
                     deduplicate_in_domain: true,
                 },
-                sumcheck: sumcheck::Config {
-                    field: Type::<Field64_3>::new(),
-                    initial_size: 1 << 10,
-                    round_pow: proof_of_work::Config::from_difficulty(Bits::new(19.5)),
-                    num_rounds: 2,
-                    mask_length: 0,
-                },
+                sumcheck: sumcheck::Config::<Field64_3>::new(
+                    1 << 10,
+                    proof_of_work::Config::from_difficulty(Bits::new(19.5)),
+                    2,
+                    sumcheck::SumcheckMode::Standard,
+                ),
                 pow: proof_of_work::Config::from_difficulty(Bits::new(18.0)),
             },
         ];

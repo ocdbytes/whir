@@ -241,9 +241,7 @@ mod tests {
     use tracing::instrument;
 
     use super::*;
-    use crate::{
-        algebra::fields, protocols::proof_of_work, transcript::DomainSeparator, type_info::Type,
-    };
+    use crate::{algebra::fields, protocols::proof_of_work, transcript::DomainSeparator};
 
     impl<F: Field> Config<F> {
         pub fn arbitrary(size: usize, mask_length: usize) -> impl Strategy<Value = Self> {
@@ -254,13 +252,12 @@ mod tests {
                     out_domain_samples: 0,
                     ..commit
                 },
-                sumcheck: sumcheck::Config {
-                    field: Type::new(),
-                    initial_size: size,
-                    round_pow: proof_of_work::Config::none(),
-                    num_rounds: size.next_power_of_two().trailing_zeros() as usize,
-                    mask_length: 0,
-                },
+                sumcheck: sumcheck::Config::new(
+                    size,
+                    proof_of_work::Config::none(),
+                    size.next_power_of_two().trailing_zeros() as usize,
+                    sumcheck::SumcheckMode::Standard,
+                ),
                 masked,
             })
         }

@@ -130,6 +130,7 @@ impl<M: Embedding> Config<M> {
         vector_size: usize,
         interleaving_depth: usize,
         rate: f64,
+        mask_length: usize,
     ) -> Self
     where
         M: Default,
@@ -180,7 +181,7 @@ impl<M: Embedding> Config<M> {
             embedding: Typed::<M>::default(),
             num_vectors,
             vector_size,
-            mask_length: 0,
+            mask_length,
             codeword_length,
             interleaving_depth,
             matrix_commit: matrix_commit::Config::with_hash(
