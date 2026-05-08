@@ -62,6 +62,7 @@ fn solve_sumcheck_round_pow<M: Embedding>(
         code.field_bits - bounds::list_size_log2(code.log_inv_rate, code.johnson_slack) - 1.0;
     let achieved = sec_mca.min(sec_combination);
 
-    let pow_bits = bounds::pow_bits_to_close_gap(spec.target_security_bits, achieved);
+    // protocol-level PoW closes that portion separately.
+    let pow_bits = bounds::pow_bits_to_close_gap(spec.protocol_security_target_bits(), achieved);
     proof_of_work::Config::from_difficulty(pow_bits)
 }

@@ -320,7 +320,7 @@ impl<F: Field> Config<F> {
         let initial_in_domain = {
             #[cfg(feature = "tracing")]
             let _span = tracing::info_span!("open_f_hat").entered();
-            let witness_refs: Vec<_> = f_hat_witnesses.iter().collect();
+            let witness_refs: Vec<_> = f_hat_witnesses.iter().map(|w| &w.irs).collect();
             self.blinded_commitment
                 .initial_committer
                 .open(prover_state, &witness_refs)

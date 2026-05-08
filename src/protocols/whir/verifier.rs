@@ -63,6 +63,13 @@ impl<M: Embedding> Config<M> {
             return Ok(FinalClaim::default());
         }
 
+        let expected_matrix_len =
+            self.initial_out_domain_samples * self.initial_committer.num_vectors;
+        for commitment in commitments {
+            verify!(commitment.out_of_domain.points.len() == self.initial_out_domain_samples);
+            verify!(commitment.out_of_domain.matrix.len() == expected_matrix_len);
+        }
+
         // Complete the constraint and evaluation matrix with OODs and their cross-terms.
         let (oods_evals, oods_matrix) = {
             let mut oods_evals = Vec::new();

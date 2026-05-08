@@ -73,10 +73,11 @@ impl<F: Field> Config<F> {
         let masking_challenge: F = verifier_state.verifier_message();
         verify!(masking_challenge != F::ZERO);
         let commitments = commitment.f_hat.iter().collect::<Vec<_>>();
+        let irs_commitments = commitments.iter().map(|c| &c.irs).collect::<Vec<_>>();
         let initial_in_domain = self
             .blinded_commitment
             .initial_committer
-            .verify(verifier_state, &commitments)?;
+            .verify(verifier_state, &irs_commitments)?;
 
         // Expand base queries into coset points for the first folding round.
         let h_gammas = self.all_gammas(&initial_in_domain.points);

@@ -5,8 +5,9 @@ use tracing::instrument;
 
 use super::{utils::BlindingPolynomials, Config};
 use crate::{
+    algebra::embedding::Identity,
     hash::Hash,
-    protocols::{irs_commit, whir},
+    protocols::whir,
     transcript::{
         Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult, VerifierState,
     },
@@ -26,10 +27,10 @@ pub struct Commitment<F: Field> {
 #[derive(Clone, Debug)]
 pub struct Witness<F: Field> {
     pub f_hat_vectors: Vec<Vec<F>>,
-    pub f_hat_witnesses: Vec<irs_commit::Witness<F>>,
+    pub f_hat_witnesses: Vec<whir::Witness<F, Identity<F>>>,
     pub blinding_polynomials: Vec<BlindingPolynomials<F>>,
     pub blinding_vectors: Vec<Vec<F>>,
-    pub blinding_witness: irs_commit::Witness<F>,
+    pub blinding_witness: whir::Witness<F, Identity<F>>,
 }
 
 impl<F: Field> Config<F> {

@@ -18,10 +18,7 @@ pub fn solve<M: Embedding + Default>(
     ctx: &RoundContext,
     out_domain: OodSampleBudget,
 ) -> irs_commit::Config<M> {
-    let security_target = f64::from(
-        spec.target_security_bits
-            .saturating_sub(spec.max_pow_bits.unwrap_or(0)),
-    );
+    let security_target = f64::from(spec.protocol_security_target_bits());
     let raw_rate = 2_f64.powf(-f64::from(ctx.log_inv_rate));
     let interleaving_depth = 1_usize << ctx.folding_factor;
     let unique_decoding = spec.mode.unique_decoding();
@@ -86,10 +83,7 @@ pub fn solve_mask_code<M: Embedding + Default>(
         "num_vectors ({num_vectors}) must be even — mask-proximity expects 2 · num_masks (original + fresh)",
     );
 
-    let security_target = f64::from(
-        spec.target_security_bits
-            .saturating_sub(spec.max_pow_bits.unwrap_or(0)),
-    );
+    let security_target = f64::from(spec.protocol_security_target_bits());
     let raw_rate = 2_f64.powf(-f64::from(log_inv_rate.get()));
     // C_zk has interleaving_depth = 1 and IrsMode::Standard, so masked_message_length = l_zk.
     let rate = snap_rate::<M>(l_zk, raw_rate);

@@ -75,3 +75,12 @@ impl Mode {
         )
     }
 }
+
+impl<M: Embedding> SecuritySpec<M> {
+    /// Security bits the non-PoW parameters must deliver alone; the remaining
+    /// `max_pow_bits` are closed by PoW grinding.
+    pub fn protocol_security_target_bits(&self) -> u32 {
+        self.target_security_bits
+            .saturating_sub(self.max_pow_bits.unwrap_or(0))
+    }
+}
