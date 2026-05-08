@@ -31,6 +31,7 @@ pub struct Opening<F: Field> {
     pub linear_form_evaluation: F,
 }
 
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<F: Field> {

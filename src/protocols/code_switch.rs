@@ -30,6 +30,7 @@ use crate::{
 };
 
 /// Code-switching IOR config with optional ZK.
+#[must_use]
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<M: Embedding> {

@@ -36,6 +36,7 @@ pub enum SumcheckMode {
     ZeroKnowledge { mask_length: usize },
 }
 
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<F>

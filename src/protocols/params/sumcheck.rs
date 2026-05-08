@@ -17,9 +17,9 @@ pub fn solve<M: Embedding>(
 ) -> sumcheck::Config<M::Target> {
     let num_rounds = num_sumcheck_rounds(spec, ctx);
     let mode = match spec.mode {
-        Mode::Standard => sumcheck::SumcheckMode::Standard,
+        Mode::Standard { .. } => sumcheck::SumcheckMode::Standard,
         Mode::ZeroKnowledge => sumcheck::SumcheckMode::ZeroKnowledge {
-            mask_length: zk_mask_length(),
+            mask_length: mask_length(),
         },
     };
     let round_pow = solve_sumcheck_round_pow(spec, irs_source);
@@ -36,12 +36,14 @@ const fn num_sumcheck_rounds<M: Embedding>(spec: &SecuritySpec<M>, ctx: &RoundCo
 
 pub const fn masks_required<M: Embedding>(spec: &SecuritySpec<M>, ctx: &RoundContext) -> usize {
     match spec.mode {
-        Mode::Standard => 0,
+        Mode::Standard { .. } => 0,
         Mode::ZeroKnowledge => num_sumcheck_rounds(spec, ctx),
     }
 }
 
-const fn zk_mask_length() -> usize {
+/// 3 coefficients = constant + linear + quadratic, sufficient to mask each
+/// degree-2 sumcheck round polynomial.
+const fn mask_length() -> usize {
     3
 }
 

@@ -61,6 +61,7 @@ use crate::{
 /// Mask proximity configuration.
 ///
 /// Wraps an IRS config for the shared mask tree and the number of mask pairs.
+#[must_use]
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<F: Field> {

@@ -11,7 +11,7 @@
 //! them using the [`matrix_commit`] protocol. Sampling is done with replacement, so may produce
 //! fewer than `in_domain_samples` distinct rows.
 //!
-use std::{f64, fmt};
+use std::{f64, fmt, num::NonZeroUsize};
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
@@ -45,10 +45,11 @@ use crate::{
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 pub enum IrsMode {
     Standard,
-    ZeroKnowledge { mask_length: usize },
+    ZeroKnowledge { mask_length: NonZeroUsize },
 }
 
 /// Commit to vectors over an fft-friendly field F
+#[must_use]
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<M: Embedding> {
@@ -131,10 +132,14 @@ impl<M: Embedding> Config<M> {
     {
         assert!(vector_size.is_multiple_of(interleaving_depth));
         assert!(rate > 0. && rate <= 1.);
-        let message_length = vector_size / interleaving_depth;
+        let mask_length = match &mode {
+            IrsMode::Standard => 0,
+            IrsMode::ZeroKnowledge { mask_length } => mask_length.get(),
+        };
+        let masked_message_length = vector_size / interleaving_depth + mask_length;
         #[allow(clippy::cast_sign_loss)]
-        let codeword_length = (message_length as f64 / rate).ceil() as usize;
-        let rate = message_length as f64 / codeword_length as f64;
+        let codeword_length = (masked_message_length as f64 / rate).ceil() as usize;
+        let rate = masked_message_length as f64 / codeword_length as f64;
 
         // η = slack to Johnson bound. We pick η = √ρ / 20.
         // TODO: Optimize picking η.
@@ -143,7 +148,7 @@ impl<M: Embedding> Config<M> {
         } else {
             rate.sqrt() / 20.
         };
-        let in_domain_samples = num_in_domain_queries(unique_decoding, security_target, rate);
+        let in_domain_samples = num_in_domain_queries(unique_decoding, security_target, rate).get();
 
         Self {
             embedding: Typed::<M>::default(),
@@ -188,7 +193,7 @@ impl<M: Embedding> Config<M> {
     pub const fn mask_length(&self) -> usize {
         match &self.mode {
             IrsMode::Standard => 0,
-            IrsMode::ZeroKnowledge { mask_length } => *mask_length,
+            IrsMode::ZeroKnowledge { mask_length } => mask_length.get(),
         }
     }
 
@@ -539,6 +544,9 @@ pub fn num_ood_samples(
 
 /// Return the number of in-domain queries.
 ///
+/// Always ≥ 1 — the type carries that invariant so callers don't need to
+/// re-prove it locally.
+///
 /// This is used by [`whir_zk`].
 // TODO: A method with cleaner abstraction.
 #[allow(clippy::cast_sign_loss)]
@@ -546,7 +554,7 @@ pub(crate) fn num_in_domain_queries(
     unique_decoding: bool,
     security_target: f64,
     rate: f64,
-) -> usize {
+) -> NonZeroUsize {
     // η = slack to Johnson bound. We pick η = √ρ / 20.
     // TODO: Optimize picking η.
     let johnson_slack = if unique_decoding {
@@ -556,7 +564,8 @@ pub(crate) fn num_in_domain_queries(
     };
     // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
     let log_one_minus_delta = one_minus_distance_log2(-rate.log2(), johnson_slack);
-    (security_target / -log_one_minus_delta).ceil() as usize
+    let q = (security_target / -log_one_minus_delta).ceil() as usize;
+    NonZeroUsize::new(q).unwrap_or(NonZeroUsize::MIN)
 }
 
 #[cfg(test)]
@@ -619,11 +628,9 @@ pub(crate) mod tests {
                     in_domain_samples,
                     deduplicate_in_domain,
                 )| {
-                    let mode = if mask_length == 0 {
-                        IrsMode::Standard
-                    } else {
-                        IrsMode::ZeroKnowledge { mask_length }
-                    };
+                    let mode = NonZeroUsize::new(mask_length).map_or(IrsMode::Standard, |n| {
+                        IrsMode::ZeroKnowledge { mask_length: n }
+                    });
                     Self {
                         embedding: Typed::new(embedding.clone()),
                         num_vectors,

@@ -2,48 +2,76 @@ use core::marker::PhantomData;
 
 use crate::{algebra::embedding::Embedding, engines::EngineId};
 
-/// Security spec definition for the protocol
+/// Phantom-typed primitive — `Tagged<T, A>` and `Tagged<T, B>` are distinct types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Tagged<T, Tag>(T, PhantomData<Tag>);
+
+impl<T: Copy, Tag> Tagged<T, Tag> {
+    pub const fn new(v: T) -> Self {
+        Self(v, PhantomData)
+    }
+
+    pub const fn get(self) -> T {
+        self.0
+    }
+}
+
+/// Protocol-wide security spec.
+#[derive(Debug, Clone)]
 pub struct SecuritySpec<M: Embedding> {
-    /// Protocol Mode of operation
     pub mode: Mode,
-    /// Target security bits
     pub target_security_bits: u32,
-    /// Use the unique-decoding regime (`true`) instead of the Johnson regime.
-    /// ZK mode requires Johnson — Construction 9.7 / Bound 2 needs OOD queries,
-    /// and `num_ood_samples` returns 0 in unique-decoding.
-    pub unique_decoding: bool,
-    /// Size of the input witness / vector
     pub vector_size: usize,
-    /// Starting log inverse rate for RS code
     pub starting_log_inv_rate: u32,
-    /// Initial Folding factor for the first round of sumcheck
     pub initial_folding_factor: usize,
-    /// Folding factor for subsequent round of sumcheck
     pub folding_factor: usize,
-    /// POW bits
     pub max_pow_bits: Option<u32>,
-    /// Hash Engine
     pub hash_id: EngineId,
     pub _embedding: PhantomData<M>,
 }
 
-/// Per round context struct for calculating the bounds
+/// Per-round context for bound calculations.
+#[derive(Debug, Clone)]
 pub struct RoundContext {
-    /// Round index
     pub round_index: usize,
-    /// Vector size for the particular round
     pub vector_size: usize,
-    /// rate for the RS encoding for the round vector
     pub log_inv_rate: u32,
-    /// Forlding factor for sumcheck
     pub folding_factor: u32,
-    /// Previous round's in domain samples count
     pub prev_round_in_domain_samples: usize,
-    /// To keep track of the errors of all the rounds
     pub prev_round_query_error: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    Standard,
+    /// Regime is selectable.
+    Standard { unique_decoding: bool },
+    /// Always Johnson regime — Construction 9.7 needs OOD queries.
     ZeroKnowledge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OodSampleBudgetTag {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MaskCodeMessageLenTag {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LogInvRateTag {}
+
+/// `t_ood` — Bound 2's OOD-sample budget (produced by code-switch).
+pub type OodSampleBudget = Tagged<usize, OodSampleBudgetTag>;
+
+/// `ℓ_zk` — C_zk message length (Theorem 9.6: ℓ_zk ≥ source mask length).
+pub type MaskCodeMessageLen = Tagged<usize, MaskCodeMessageLenTag>;
+
+/// `rate = 2^-log_inv_rate`.
+pub type LogInvRate = Tagged<u32, LogInvRateTag>;
+
+impl Mode {
+    pub const fn unique_decoding(&self) -> bool {
+        matches!(
+            self,
+            Self::Standard {
+                unique_decoding: true
+            }
+        )
+    }
 }
