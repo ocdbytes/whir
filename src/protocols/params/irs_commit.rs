@@ -102,90 +102,49 @@ pub fn solve_mask_code<M: Embedding + Default>(
 
 #[cfg(test)]
 mod tests {
-    use std::marker::PhantomData;
-
     use ark_std::rand::{rngs::StdRng, SeedableRng};
     use proptest::prelude::*;
 
     use super::*;
     use crate::{
         algebra::random_vector,
-        hash,
-        protocols::params::test_utils::{arb_round_ctx, arb_spec, arb_zk_spec, TestEmbedding},
+        protocols::params::test_utils::{
+            arb_round_ctx, arb_spec, arb_zk_spec, deterministic_spec, TestEmbedding,
+        },
         transcript::{DomainSeparator, ProverState, VerifierState},
     };
 
     type M = TestEmbedding;
     type F = <M as Embedding>::Source;
 
-    fn minimal_zk_spec() -> SecuritySpec<M> {
-        SecuritySpec {
-            mode: Mode::ZeroKnowledge,
-            target_security_bits: 80,
-            max_pow_bits: None,
-            hash_id: hash::BLAKE3,
-            _embedding: PhantomData,
-        }
-    }
-
-    fn minimal_standard_spec() -> SecuritySpec<M> {
-        SecuritySpec {
-            mode: Mode::Standard {
-                unique_decoding: false,
-            },
-            target_security_bits: 80,
-            max_pow_bits: None,
-            hash_id: hash::BLAKE3,
-            _embedding: PhantomData,
-        }
-    }
-
     #[test]
     #[should_panic(expected = "C_zk only exists in ZK mode")]
     fn solve_mask_code_rejects_standard_spec() {
-        let _ = solve_mask_code(
-            &minimal_standard_spec(),
-            MaskCodeMessageLen::new(2),
-            0,
-            LogInvRate::new(1),
-            2,
-        );
+        let spec: SecuritySpec<M> = deterministic_spec(Mode::Standard {
+            unique_decoding: false,
+        });
+        let _ = solve_mask_code(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 2);
     }
 
     #[test]
     #[should_panic(expected = "must be a power of 2")]
     fn solve_mask_code_rejects_non_pow2_l_zk() {
-        let _ = solve_mask_code(
-            &minimal_zk_spec(),
-            MaskCodeMessageLen::new(3),
-            0,
-            LogInvRate::new(1),
-            2,
-        );
+        let spec: SecuritySpec<M> = deterministic_spec(Mode::ZeroKnowledge);
+        let _ = solve_mask_code(&spec, MaskCodeMessageLen::new(3), 0, LogInvRate::new(1), 2);
     }
 
     #[test]
     #[should_panic(expected = "Theorem 9.6")]
     fn solve_mask_code_rejects_l_zk_below_source_mask_length() {
-        let _ = solve_mask_code(
-            &minimal_zk_spec(),
-            MaskCodeMessageLen::new(2),
-            4,
-            LogInvRate::new(1),
-            2,
-        );
+        let spec: SecuritySpec<M> = deterministic_spec(Mode::ZeroKnowledge);
+        let _ = solve_mask_code(&spec, MaskCodeMessageLen::new(2), 4, LogInvRate::new(1), 2);
     }
 
     #[test]
     #[should_panic(expected = "must be even")]
     fn solve_mask_code_rejects_odd_num_vectors() {
-        let _ = solve_mask_code(
-            &minimal_zk_spec(),
-            MaskCodeMessageLen::new(2),
-            0,
-            LogInvRate::new(1),
-            3,
-        );
+        let spec: SecuritySpec<M> = deterministic_spec(Mode::ZeroKnowledge);
+        let _ = solve_mask_code(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 3);
     }
 
     fn arb_zk_spec_default() -> impl Strategy<Value = SecuritySpec<M>> {

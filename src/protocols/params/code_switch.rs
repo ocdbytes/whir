@@ -118,7 +118,7 @@ mod tests {
         spec::{LogInvRate, OodSampleBudget, RoundContext},
         test_utils::{
             arb_standard_johnson_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec,
-            deterministic_standard_spec, TestEmbedding,
+            deterministic_spec, TestEmbedding, TestExtensionField, TestNonIdentityEmbedding,
         },
     };
 
@@ -265,49 +265,107 @@ mod tests {
         }
     }
 
-    /// Smoke test: the generics compile and `solve` works end-to-end with a
-    /// non-identity embedding (`M::Source ≠ M::Target`).
-    #[test]
-    fn solve_works_with_basefield_embedding() {
-        use crate::algebra::{embedding::Basefield, fields::Field64_2};
-        type NonIdM = Basefield<Field64_2>;
-
-        let spec_source: SecuritySpec<NonIdM> = deterministic_standard_spec();
-        let spec_target: SecuritySpec<Identity<Field64_2>> = deterministic_standard_spec();
-
+    /// Build the canonical `(source_ctx, target_ctx)` pair used by both
+    /// non-identity smoke tests. Single source of truth so Standard and ZK
+    /// exercise the same problem shape, only the mode differs.
+    fn non_identity_smoke_ctxs() -> (RoundContext, RoundContext) {
         let source_ctx = RoundContext {
             round_index: 0,
-            vector_size: 16,
+            vector_size: 64,
             log_inv_rate: 1,
             folding_factor: 2,
             prev_round_in_domain_samples: 0,
             prev_round_query_error: 0.0,
         };
-        let source = params_irs::solve(&spec_source, &source_ctx, OodSampleBudget::new(0));
-
         let target_ctx = RoundContext {
             round_index: 1,
-            vector_size: source.message_length(),
+            vector_size: source_ctx.vector_size / (1 << source_ctx.folding_factor),
             log_inv_rate: source_ctx.log_inv_rate + source_ctx.folding_factor - 1,
             folding_factor: source_ctx.folding_factor,
-            prev_round_in_domain_samples: source.in_domain_samples,
+            prev_round_in_domain_samples: 0,
             prev_round_query_error: 0.0,
         };
+        (source_ctx, target_ctx)
+    }
 
-        let mut target = params_irs::solve(&spec_target, &target_ctx, OodSampleBudget::new(0));
-        let mut t_ood = compute_t_ood(&spec_source, &source, target.list_size(), None);
-        for _ in 0..8 {
-            let new_target =
-                params_irs::solve(&spec_target, &target_ctx, OodSampleBudget::new(t_ood));
-            if new_target.codeword_length == target.codeword_length {
-                target = new_target;
-                break;
-            }
-            target = new_target;
-            t_ood = compute_t_ood(&spec_source, &source, target.list_size(), None);
-        }
+    /// Standard-mode smoke test with `M::Source ≠ M::Target`.
+    #[test]
+    fn solve_works_with_basefield_embedding_standard() {
+        let spec_source: SecuritySpec<TestNonIdentityEmbedding> =
+            deterministic_spec(Mode::Standard {
+                unique_decoding: false,
+            });
+        let spec_target: SecuritySpec<Identity<TestExtensionField>> =
+            deterministic_spec(Mode::Standard {
+                unique_decoding: false,
+            });
+        let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
+
+        let source = params_irs::solve(&spec_source, &source_ctx, OodSampleBudget::new(0));
+        // Standard target: codeword_length is independent of t_ood (mask = 0),
+        // so one solve is sufficient.
+        let target = params_irs::solve(&spec_target, &target_ctx, OodSampleBudget::new(0));
+        let t_ood = compute_t_ood(&spec_source, &source, target.list_size(), None);
 
         let config = solve(source, target, t_ood, &RoundModeParams::Standard);
         assert!(matches!(config.mode, code_switch::Mode::Standard));
+    }
+
+    /// ZK-mode smoke test with `M::Source ≠ M::Target`. Exercises the
+    /// `RoundModeParams::ZeroKnowledge { c_zk, l_zk }` type path with
+    /// `c_zk: irs_commit::Config<Identity<M::Target>>`.
+    #[test]
+    fn solve_works_with_basefield_embedding_zk() {
+        let spec_source: SecuritySpec<TestNonIdentityEmbedding> =
+            deterministic_spec(Mode::ZeroKnowledge);
+        let spec_target: SecuritySpec<Identity<TestExtensionField>> =
+            deterministic_spec(Mode::ZeroKnowledge);
+        let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
+
+        let source = params_irs::solve(&spec_source, &source_ctx, OodSampleBudget::new(0));
+        // Bootstrap C_zk's list_size with a placeholder ℓ_zk.
+        let c_zk_placeholder = params_irs::solve_mask_code(
+            &spec_target,
+            compute_l_zk(&source, 1),
+            source.mask_length(),
+            LogInvRate::new(1),
+            2,
+        );
+        let c_zk_list_size = c_zk_placeholder.list_size();
+        // Two-solve target rebuild: placeholder t_ood, then final.
+        let target_placeholder =
+            params_irs::solve(&spec_target, &target_ctx, OodSampleBudget::new(0));
+        let t_ood = compute_t_ood(
+            &spec_source,
+            &source,
+            target_placeholder.list_size(),
+            Some(c_zk_list_size),
+        );
+        let target = params_irs::solve(&spec_target, &target_ctx, OodSampleBudget::new(t_ood));
+        let t_ood_check = compute_t_ood(
+            &spec_source,
+            &source,
+            target.list_size(),
+            Some(c_zk_list_size),
+        );
+        assert_eq!(
+            t_ood, t_ood_check,
+            "smoke-test params should converge in one iteration",
+        );
+
+        let l_zk = compute_l_zk(&source, t_ood);
+        let c_zk = params_irs::solve_mask_code(
+            &spec_target,
+            l_zk,
+            source.mask_length(),
+            LogInvRate::new(1),
+            2,
+        );
+        let zk = RoundModeParams::ZeroKnowledge { c_zk, l_zk };
+        let config = solve(source, target, t_ood, &zk);
+        assert!(matches!(
+            config.mode,
+            code_switch::Mode::ZeroKnowledge { .. }
+        ));
     }
 }

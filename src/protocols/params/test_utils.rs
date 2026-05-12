@@ -6,8 +6,8 @@ use proptest::prelude::*;
 
 use crate::{
     algebra::{
-        embedding::{Embedding, Identity},
-        fields::Field64,
+        embedding::{Basefield, Embedding, Identity},
+        fields::{Field64, Field64_2},
     },
     hash,
     protocols::params::{
@@ -20,13 +20,17 @@ use crate::{
 pub type TestField = Field64;
 pub type TestEmbedding = Identity<TestField>;
 
-/// Build a deterministic Standard-Johnson `SecuritySpec` for the given
-/// embedding. Useful for one-shot smoke tests over non-identity embeddings.
-pub fn deterministic_standard_spec<M: Embedding>() -> SecuritySpec<M> {
+/// Extension field used by non-identity smoke tests.
+pub type TestExtensionField = Field64_2;
+
+/// Non-identity embedding: `Source = Field64`, `Target = Field64_2`.
+pub type TestNonIdentityEmbedding = Basefield<TestExtensionField>;
+
+/// Build a deterministic `SecuritySpec` for the given embedding and mode.
+/// Useful for one-shot smoke / negative tests.
+pub fn deterministic_spec<M: Embedding>(mode: Mode) -> SecuritySpec<M> {
     SecuritySpec {
-        mode: Mode::Standard {
-            unique_decoding: false,
-        },
+        mode,
         target_security_bits: 80,
         max_pow_bits: None,
         hash_id: hash::BLAKE3,
