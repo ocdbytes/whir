@@ -76,6 +76,108 @@ pub fn ood_per_sample_log2(message_length: usize, field_bits: f64) -> f64 {
 }
 
 /// PoW difficulty to close a soundness gap: max(0, target − achieved).
-pub fn pow_bits_to_close_gap(target_security_bits: u32, achieved_security_bits: f64) -> Bits {
-    Bits::new((f64::from(target_security_bits) - achieved_security_bits).max(0.0))
+///
+/// Currently unused — solvers emit `Config::none()` PoW. Will be re-wired by
+/// the cross-protocol PoW pass.
+#[allow(dead_code)]
+pub fn pow_bits_to_close_gap(target_security_bits: f64, achieved_security_bits: f64) -> Bits {
+    Bits::new((target_security_bits - achieved_security_bits).max(0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Within 1e-9 of expected — formulas use `log2`, so floats are inexact.
+    fn approx_eq(a: f64, b: f64) {
+        assert!(
+            (a - b).abs() < 1e-9,
+            "expected ≈ {b}, got {a} (diff {})",
+            (a - b).abs()
+        );
+    }
+
+    #[test]
+    fn list_size_unique_decoding_is_one() {
+        // Unique decoding → |Λ| = 1 → log2 = 0.
+        approx_eq(list_size_log2(1.0, 0.0), 0.0);
+        approx_eq(list_size_log2(5.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn list_size_johnson_grows_as_slack_shrinks() {
+        // Same rate, smaller slack → larger list.
+        let big_slack = list_size_log2(2.0, 0.5);
+        let small_slack = list_size_log2(2.0, 0.05);
+        assert!(small_slack > big_slack, "{small_slack} > {big_slack}");
+    }
+
+    #[test]
+    fn list_size_johnson_grows_as_rate_drops() {
+        // Lower rate (larger log_inv_rate) → larger list.
+        let high_rate = list_size_log2(1.0, 0.1);
+        let low_rate = list_size_log2(4.0, 0.1);
+        assert!(low_rate > high_rate, "{low_rate} > {high_rate}");
+    }
+
+    fn code(log_inv_rate: f64, johnson_slack: f64, message_length: usize) -> CodeParams {
+        CodeParams {
+            log_inv_rate,
+            johnson_slack,
+            message_length,
+            field_bits: 64.0,
+        }
+    }
+
+    #[test]
+    fn eps_mca_grows_with_message_length() {
+        // Longer message → larger ε (less negative log) → less security.
+        let short = eps_mca_log2(&code(2.0, 0.1, 16));
+        let long = eps_mca_log2(&code(2.0, 0.1, 1024));
+        assert!(long > short, "{long} > {short}");
+    }
+
+    #[test]
+    fn eps_mca_grows_with_log_inv_rate() {
+        // Lower rate (larger log_inv_rate) → larger ε.
+        let high_rate = eps_mca_log2(&code(1.0, 0.1, 128));
+        let low_rate = eps_mca_log2(&code(4.0, 0.1, 128));
+        assert!(low_rate > high_rate, "{low_rate} > {high_rate}");
+    }
+
+    #[test]
+    fn one_minus_distance_unique_is_midpoint() {
+        // Unique decoding: 1 - δ = (1 + ρ) / 2.
+        // log_inv_rate = 1 → ρ = 0.5 → (1 + 0.5)/2 = 0.75.
+        approx_eq(one_minus_distance_log2(1.0, 0.0), 0.75_f64.log2());
+    }
+
+    #[test]
+    fn one_minus_distance_johnson_more_negative_than_unique() {
+        // Johnson allows larger δ than unique decoding → smaller (1-δ) → more
+        // negative log.
+        let unique = one_minus_distance_log2(2.0, 0.0);
+        let johnson = one_minus_distance_log2(2.0, 0.1);
+        assert!(johnson < unique, "{johnson} < {unique}");
+    }
+
+    #[test]
+    fn ood_per_sample_exact() {
+        // (k-1)/|F| with k=2, |F|=2^64 → log2 = -64.
+        approx_eq(ood_per_sample_log2(2, 64.0), -64.0);
+        // k=9, |F|=2^64 → (8)/2^64 → log2 = 3 - 64 = -61.
+        approx_eq(ood_per_sample_log2(9, 64.0), -61.0);
+    }
+
+    #[test]
+    fn pow_bits_zero_when_achieved_meets_target() {
+        assert!(pow_bits_to_close_gap(80.0, 100.0).is_zero());
+        assert!(pow_bits_to_close_gap(80.0, 80.0).is_zero());
+    }
+
+    #[test]
+    fn pow_bits_fills_gap_to_target() {
+        let bits = pow_bits_to_close_gap(80.0, 50.0);
+        approx_eq(f64::from(bits), 30.0);
+    }
 }

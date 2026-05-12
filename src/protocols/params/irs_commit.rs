@@ -1,9 +1,9 @@
 //! Parameter selection for the IRS commit protocol.
 
-use std::iter;
+use std::num::NonZeroUsize;
 
 use crate::{
-    algebra::{embedding::Embedding, ntt},
+    algebra::embedding::Embedding,
     protocols::{
         irs_commit::{self, num_in_domain_queries, IrsMode},
         params::spec::{
@@ -12,41 +12,42 @@ use crate::{
     },
 };
 
-/// Solve per-round IRS-commit parameters. ZK mask sized per Lemma 9.5.
+/// Solve per-round IRS-commit parameters. ZK mask sized per Lemma 9.5,
+/// padded so `message + mask` is a power of 2 (NTT-valid codeword length).
 pub fn solve<M: Embedding + Default>(
     spec: &SecuritySpec<M>,
     ctx: &RoundContext,
-    out_domain: OodSampleBudget,
+    out_domain_samples: OodSampleBudget,
 ) -> irs_commit::Config<M> {
-    let security_target = f64::from(spec.protocol_security_target_bits());
-    let raw_rate = 2_f64.powf(-f64::from(ctx.log_inv_rate));
+    let security_target = spec.protocol_security_target_bits();
+    let rate = 2_f64.powf(-f64::from(ctx.log_inv_rate));
     let interleaving_depth = 1_usize << ctx.folding_factor;
     let unique_decoding = spec.mode.unique_decoding();
+    let message_length = ctx.vector_size / interleaving_depth;
 
     let mode = match spec.mode {
         Mode::Standard { .. } => IrsMode::Standard,
         Mode::ZeroKnowledge => {
-            // Lemma 9.5 ZK budget: every revealed evaluation counts.
-            let in_domain = num_in_domain_queries(unique_decoding, security_target, raw_rate);
-            let mask_length = in_domain
-                .checked_add(out_domain.get())
-                .expect("usize overflow in mask_length");
+            let min_mask = num_in_domain_queries(unique_decoding, security_target, rate)
+                .checked_add(out_domain_samples.get())
+                .expect("usize overflow");
+            // Pad to pow2: Lemma 9.5 is `≥` so over-allocating is safe.
+            let mask_length = message_length
+                .checked_add(min_mask.get())
+                .expect("usize overflow")
+                .next_power_of_two()
+                .checked_sub(message_length)
+                .and_then(NonZeroUsize::new)
+                .expect("mask_length non-zero in ZK");
             IrsMode::ZeroKnowledge { mask_length }
         }
     };
-
-    let mask_length_value = match &mode {
-        IrsMode::Standard => 0,
-        IrsMode::ZeroKnowledge { mask_length } => mask_length.get(),
-    };
-    let masked_message_length = ctx.vector_size / interleaving_depth + mask_length_value;
-    let rate = snap_rate::<M>(masked_message_length, raw_rate);
 
     irs_commit::Config::new(
         security_target,
         unique_decoding,
         spec.hash_id,
-        // Orchestrator commits one vector per round.
+        // num_vectors: orchestrator commits one vector per round.
         1,
         ctx.vector_size,
         interleaving_depth,
@@ -57,11 +58,10 @@ pub fn solve<M: Embedding + Default>(
 
 /// Solve the shared C_zk IRS config for committing mask polynomials.
 ///
-/// - `l_zk` — message length (Theorem 9.6: ℓ_zk ≥ `source_mask_length`).
-/// - `source_mask_length` — `r`, the source IRS mask length.
+/// - `l_zk` — message length. Must be a power of 2 (caller pads it; see assert).
+/// - `source_mask_length` — `r`, the source IRS mask length (Theorem 9.6).
 /// - `log_inv_rate` — C_zk rate.
-/// - `num_vectors` — total masks per commit; must equal `2 * num_masks` to be
-///   consumable by `mask_proximity::Config::new` (original/fresh pairs).
+/// - `num_vectors` — total masks per commit; `2 * num_masks` for mask-proximity.
 pub fn solve_mask_code<M: Embedding + Default>(
     spec: &SecuritySpec<M>,
     l_zk: MaskCodeMessageLen,
@@ -76,17 +76,16 @@ pub fn solve_mask_code<M: Embedding + Default>(
     );
     assert!(
         l_zk >= source_mask_length,
-        "Theorem 9.6: ℓ_zk ({l_zk}) must be ≥ source mask length ({source_mask_length})",
+        "Theorem 9.6: ℓ_zk ({l_zk}) ≥ source mask length ({source_mask_length})",
     );
+    assert!(l_zk.is_power_of_two(), "ℓ_zk ({l_zk}) must be a power of 2");
     assert!(
         num_vectors.is_multiple_of(2),
-        "num_vectors ({num_vectors}) must be even — mask-proximity expects 2 · num_masks (original + fresh)",
+        "num_vectors ({num_vectors}) must be even (mask-proximity original/fresh pairs)",
     );
 
-    let security_target = f64::from(spec.protocol_security_target_bits());
-    let raw_rate = 2_f64.powf(-f64::from(log_inv_rate.get()));
-    // C_zk has interleaving_depth = 1 and IrsMode::Standard, so masked_message_length = l_zk.
-    let rate = snap_rate::<M>(l_zk, raw_rate);
+    let security_target = spec.protocol_security_target_bits();
+    let rate = 2_f64.powf(-f64::from(log_inv_rate.get()));
 
     irs_commit::Config::new(
         security_target,
@@ -101,19 +100,6 @@ pub fn solve_mask_code<M: Embedding + Default>(
     )
 }
 
-/// Snap `rate` so `Config::new`'s codeword sizing lands on a valid power-of-two
-/// NTT order. Returns a rate `≤ raw_rate`.
-fn snap_rate<M: Embedding>(masked_message_length: usize, raw_rate: f64) -> f64 {
-    #[allow(clippy::cast_sign_loss)]
-    let desired = (masked_message_length as f64 / raw_rate).ceil() as usize;
-    let codeword_length = iter::successors(ntt::next_order::<M::Source>(desired), |&n| {
-        ntt::next_order::<M::Source>(n + 1)
-    })
-    .find(|n| n.is_power_of_two())
-    .expect("no valid power-of-two NTT order ≥ desired codeword length");
-    masked_message_length as f64 / codeword_length as f64
-}
-
 #[cfg(test)]
 mod tests {
     use std::marker::PhantomData;
@@ -123,61 +109,121 @@ mod tests {
 
     use super::*;
     use crate::{
-        algebra::{embedding::Identity, fields::Field64, random_vector},
+        algebra::random_vector,
         hash,
+        protocols::params::test_utils::{arb_round_ctx, arb_spec, arb_zk_spec, TestEmbedding},
         transcript::{DomainSeparator, ProverState, VerifierState},
     };
 
-    type F = Field64;
-    type M = Identity<F>;
+    type M = TestEmbedding;
+    type F = <M as Embedding>::Source;
 
-    fn arb_spec_with(mode: impl Strategy<Value = Mode>) -> impl Strategy<Value = SecuritySpec<M>> {
-        (mode, 80u32..=128, 1u32..=4, prop::option::of(0u32..=20)).prop_map(
-            |(mode, target_security_bits, starting_log_inv_rate, max_pow_bits)| SecuritySpec {
-                mode,
-                target_security_bits,
-                vector_size: 1 << 8,
-                starting_log_inv_rate,
-                initial_folding_factor: 4,
-                folding_factor: 4,
-                max_pow_bits,
-                hash_id: hash::BLAKE3,
-                _embedding: PhantomData,
+    fn minimal_zk_spec() -> SecuritySpec<M> {
+        SecuritySpec {
+            mode: Mode::ZeroKnowledge,
+            target_security_bits: 80,
+            max_pow_bits: None,
+            hash_id: hash::BLAKE3,
+            _embedding: PhantomData,
+        }
+    }
+
+    fn minimal_standard_spec() -> SecuritySpec<M> {
+        SecuritySpec {
+            mode: Mode::Standard {
+                unique_decoding: false,
             },
-        )
+            target_security_bits: 80,
+            max_pow_bits: None,
+            hash_id: hash::BLAKE3,
+            _embedding: PhantomData,
+        }
     }
 
-    fn arb_zk_spec() -> impl Strategy<Value = SecuritySpec<M>> {
-        arb_spec_with(Just(Mode::ZeroKnowledge))
+    #[test]
+    #[should_panic(expected = "C_zk only exists in ZK mode")]
+    fn solve_mask_code_rejects_standard_spec() {
+        let _ = solve_mask_code(
+            &minimal_standard_spec(),
+            MaskCodeMessageLen::new(2),
+            0,
+            LogInvRate::new(1),
+            2,
+        );
     }
 
+    #[test]
+    #[should_panic(expected = "must be a power of 2")]
+    fn solve_mask_code_rejects_non_pow2_l_zk() {
+        let _ = solve_mask_code(
+            &minimal_zk_spec(),
+            MaskCodeMessageLen::new(3),
+            0,
+            LogInvRate::new(1),
+            2,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Theorem 9.6")]
+    fn solve_mask_code_rejects_l_zk_below_source_mask_length() {
+        let _ = solve_mask_code(
+            &minimal_zk_spec(),
+            MaskCodeMessageLen::new(2),
+            4,
+            LogInvRate::new(1),
+            2,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must be even")]
+    fn solve_mask_code_rejects_odd_num_vectors() {
+        let _ = solve_mask_code(
+            &minimal_zk_spec(),
+            MaskCodeMessageLen::new(2),
+            0,
+            LogInvRate::new(1),
+            3,
+        );
+    }
+
+    fn arb_zk_spec_default() -> impl Strategy<Value = SecuritySpec<M>> {
+        arb_zk_spec(80..=128)
+    }
+
+    /// IRS-specific: vary `unique_decoding` to exercise both regimes inside
+    /// `irs_commit::Config::new`.
     fn arb_standard_spec() -> impl Strategy<Value = SecuritySpec<M>> {
-        arb_spec_with(any::<bool>().prop_map(|unique_decoding| Mode::Standard { unique_decoding }))
+        any::<bool>()
+            .prop_flat_map(|unique_decoding| arb_spec(Mode::Standard { unique_decoding }, 80..=128))
     }
 
-    fn arb_any_spec() -> impl Strategy<Value = SecuritySpec<M>> {
-        prop_oneof![arb_zk_spec(), arb_standard_spec()]
-    }
+    fn commit_open_verify(config: &irs_commit::Config<M>, seed: u64) -> irs_commit::Witness<F> {
+        let ds = DomainSeparator::protocol(config)
+            .session(&format!("Test at {}:{}", file!(), line!()))
+            .instance(&seed);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let vector = random_vector::<F>(&mut rng, config.vector_size);
 
-    fn arb_ctx() -> impl Strategy<Value = RoundContext> {
-        (4u32..=8, 1u32..=4, 1u32..=3).prop_map(|(log_size, log_inv_rate, folding_factor)| {
-            RoundContext {
-                round_index: 0,
-                vector_size: 1_usize << log_size,
-                log_inv_rate,
-                folding_factor,
-                prev_round_in_domain_samples: 0,
-                prev_round_query_error: 0.0,
-            }
-        })
+        let mut prover_state = ProverState::new_std(&ds);
+        let witness = config.commit(&mut prover_state, &[&vector]);
+        let _ = config.open(&mut prover_state, &[&witness]);
+        let proof = prover_state.proof();
+
+        let mut verifier_state = VerifierState::new_std(&ds, &proof);
+        let commitment = config.receive_commitment(&mut verifier_state).unwrap();
+        let _ = config.verify(&mut verifier_state, &[&commitment]).unwrap();
+        verifier_state.check_eof().unwrap();
+        witness
     }
 
     proptest! {
         /// Lemma 9.5: ZK mask covers all revealed evaluations.
         #[test]
         fn zk_mask_covers_lemma_9_5(
-            spec in arb_zk_spec(),
-            ctx in arb_ctx(),
+            spec in arb_zk_spec_default(),
+            ctx in arb_round_ctx(),
             out_domain in 0usize..16,
         ) {
             let config = solve(&spec, &ctx, OodSampleBudget::new(out_domain));
@@ -188,38 +234,46 @@ mod tests {
             );
         }
 
-        /// Standard mode produces no IRS randomness.
+        /// Standard mode produces no IRS randomness regardless of input.
         #[test]
-        fn standard_has_no_mask(spec in arb_standard_spec(), ctx in arb_ctx()) {
-            let config = solve(&spec, &ctx, OodSampleBudget::new(0));
+        fn standard_has_no_mask(
+            spec in arb_standard_spec(),
+            ctx in arb_round_ctx(),
+            out_domain in 0usize..8,
+        ) {
+            let config = solve(&spec, &ctx, OodSampleBudget::new(out_domain));
             prop_assert_eq!(config.mask_length(), 0);
         }
 
-        /// Round-trip: solve → commit → verify with the produced config.
+        /// ZK round-trip + witness shape check.
         #[test]
-        fn solve_round_trips_through_irs_commit(
-            spec in arb_any_spec(),
-            ctx in arb_ctx(),
+        fn zk_round_trips(
+            spec in arb_zk_spec_default(),
+            ctx in arb_round_ctx(),
             out_domain in 0usize..8,
             seed: u64,
         ) {
             let config = solve(&spec, &ctx, OodSampleBudget::new(out_domain));
+            prop_assert!(config.mask_length() > 0, "ZK mode must produce non-zero mask");
+            let witness = commit_open_verify(&config, seed);
+            prop_assert_eq!(
+                witness.masks.len(),
+                config.mask_length() * config.num_messages(),
+                "witness mask vector size",
+            );
+        }
 
-            let ds = DomainSeparator::protocol(&config)
-                .session(&format!("Test at {}:{}", file!(), line!()))
-                .instance(&seed);
-            let mut rng = StdRng::seed_from_u64(seed);
-            let vector = random_vector::<F>(&mut rng, config.vector_size);
-
-            let mut prover_state = ProverState::new_std(&ds);
-            let witness = config.commit(&mut prover_state, &[&vector]);
-            let _ = config.open(&mut prover_state, &[&witness]);
-            let proof = prover_state.proof();
-
-            let mut verifier_state = VerifierState::new_std(&ds, &proof);
-            let commitment = config.receive_commitment(&mut verifier_state).unwrap();
-            let _ = config.verify(&mut verifier_state, &[&commitment]).unwrap();
-            verifier_state.check_eof().unwrap();
+        /// Standard round-trip + empty-mask check.
+        #[test]
+        fn standard_round_trips(
+            spec in arb_standard_spec(),
+            ctx in arb_round_ctx(),
+            seed: u64,
+        ) {
+            let config = solve(&spec, &ctx, OodSampleBudget::new(0));
+            prop_assert_eq!(config.mask_length(), 0);
+            let witness = commit_open_verify(&config, seed);
+            prop_assert!(witness.masks.is_empty(), "Standard mode must produce no masks");
         }
     }
 }

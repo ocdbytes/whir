@@ -48,6 +48,16 @@ pub enum IrsMode {
     ZeroKnowledge { mask_length: NonZeroUsize },
 }
 
+impl IrsMode {
+    /// Per-polynomial IRS randomness length. Returns 0 in Standard mode.
+    pub const fn mask_length(&self) -> usize {
+        match self {
+            Self::Standard => 0,
+            Self::ZeroKnowledge { mask_length } => mask_length.get(),
+        }
+    }
+}
+
 /// Commit to vectors over an fft-friendly field F
 #[must_use]
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
@@ -132,11 +142,7 @@ impl<M: Embedding> Config<M> {
     {
         assert!(vector_size.is_multiple_of(interleaving_depth));
         assert!(rate > 0. && rate <= 1.);
-        let mask_length = match &mode {
-            IrsMode::Standard => 0,
-            IrsMode::ZeroKnowledge { mask_length } => mask_length.get(),
-        };
-        let masked_message_length = vector_size / interleaving_depth + mask_length;
+        let masked_message_length = vector_size / interleaving_depth + mode.mask_length();
         #[allow(clippy::cast_sign_loss)]
         let codeword_length = (masked_message_length as f64 / rate).ceil() as usize;
         let rate = masked_message_length as f64 / codeword_length as f64;
@@ -191,10 +197,7 @@ impl<M: Embedding> Config<M> {
 
     /// Per-polynomial IRS randomness length. Returns 0 in Standard mode.
     pub const fn mask_length(&self) -> usize {
-        match &self.mode {
-            IrsMode::Standard => 0,
-            IrsMode::ZeroKnowledge { mask_length } => mask_length.get(),
-        }
+        self.mode.mask_length()
     }
 
     /// Message length including mask coefficients.

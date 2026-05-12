@@ -16,18 +16,30 @@ impl<T: Copy, Tag> Tagged<T, Tag> {
     }
 }
 
-/// Protocol-wide security spec.
+/// Security-target spec — *what* security the user wants. Tuning knobs live
+/// in [`TuningSpec`].
 #[derive(Debug, Clone)]
 pub struct SecuritySpec<M: Embedding> {
     pub mode: Mode,
     pub target_security_bits: u32,
-    pub vector_size: usize,
-    pub starting_log_inv_rate: u32,
-    pub initial_folding_factor: usize,
-    pub folding_factor: usize,
+    // TODO: cross-protocol PoW pass; until then, set this to `None` or `Some(0)`
+    // to avoid silently surrendering `max_pow_bits` of security.
     pub max_pow_bits: Option<u32>,
     pub hash_id: EngineId,
     pub _embedding: PhantomData<M>,
+}
+
+/// Tuning knobs — proof-size / prover-time / soundness-margin tradeoffs.
+#[derive(Debug, Clone)]
+pub struct TuningSpec {
+    /// Witness vector size (input polynomial coefficient count).
+    pub vector_size: usize,
+    /// Starting log inverse rate for the initial RS code.
+    pub starting_log_inv_rate: u32,
+    /// Folding factor for the first (initial) sumcheck round.
+    pub initial_folding_factor: usize,
+    /// Folding factor for subsequent sumcheck rounds.
+    pub folding_factor: usize,
 }
 
 /// Per-round context for bound calculations.
@@ -37,6 +49,8 @@ pub struct RoundContext {
     pub vector_size: usize,
     pub log_inv_rate: u32,
     pub folding_factor: u32,
+    // Reserved for the orchestrator's combination-error sizing; unused by
+    // current solvers.
     pub prev_round_in_domain_samples: usize,
     pub prev_round_query_error: f64,
 }
@@ -79,8 +93,17 @@ impl Mode {
 impl<M: Embedding> SecuritySpec<M> {
     /// Security bits the non-PoW parameters must deliver alone; the remaining
     /// `max_pow_bits` are closed by PoW grinding.
-    pub fn protocol_security_target_bits(&self) -> u32 {
-        self.target_security_bits
-            .saturating_sub(self.max_pow_bits.unwrap_or(0))
+    ///
+    /// **Until the cross-protocol PoW pass lands**, solvers emit no PoW —
+    /// so subtracting `max_pow_bits` would silently under-target security.
+    /// This function therefore asserts `max_pow_bits` is zero. Re-enable the
+    /// subtraction when PoW grinding is wired in.
+    pub fn protocol_security_target_bits(&self) -> f64 {
+        assert!(
+            self.max_pow_bits.unwrap_or(0) == 0,
+            "max_pow_bits must be None or Some(0) until cross-protocol PoW grinding lands; \
+             setting it nonzero now would silently surrender that many bits of security",
+        );
+        f64::from(self.target_security_bits)
     }
 }

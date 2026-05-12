@@ -1,68 +1,133 @@
+//! Parameter selection for the per-round sumcheck protocol.
+//!
+//! Produces a [`sumcheck::Config`] from a `RoundContext` and the ZK context.
+//! ZK mode adds a degree-2 masking polynomial per round (Lemma 6.4, p.38).
+
 use crate::{
     algebra::embedding::Embedding,
     protocols::{
-        irs_commit,
-        params::{
-            bounds::{self, CodeParams},
-            spec::{Mode, RoundContext, SecuritySpec},
-        },
+        params::{plan::RoundModeParams, spec::RoundContext},
         proof_of_work, sumcheck,
     },
 };
 
+/// Solve sumcheck parameters for one round.
 pub fn solve<M: Embedding>(
-    spec: &SecuritySpec<M>,
     ctx: &RoundContext,
-    irs_source: &irs_commit::Config<M>,
+    zk: &RoundModeParams<M>,
 ) -> sumcheck::Config<M::Target> {
-    let num_rounds = num_sumcheck_rounds(spec, ctx);
-    let mode = match spec.mode {
-        Mode::Standard { .. } => sumcheck::SumcheckMode::Standard,
-        Mode::ZeroKnowledge => sumcheck::SumcheckMode::ZeroKnowledge {
-            mask_length: mask_length(),
+    let num_rounds = num_sumcheck_rounds(ctx);
+    let mode = match zk {
+        RoundModeParams::Standard => sumcheck::SumcheckMode::Standard,
+        RoundModeParams::ZeroKnowledge { .. } => sumcheck::SumcheckMode::ZeroKnowledge {
+            mask_length: zk_mask_length(),
         },
     };
-    let round_pow = solve_sumcheck_round_pow(spec, irs_source);
-    sumcheck::Config::new(ctx.vector_size, round_pow, num_rounds, mode)
+    sumcheck::Config::new(
+        ctx.vector_size,
+        proof_of_work::Config::none(),
+        num_rounds,
+        mode,
+    )
 }
 
-const fn num_sumcheck_rounds<M: Embedding>(spec: &SecuritySpec<M>, ctx: &RoundContext) -> usize {
-    if ctx.round_index == 0 {
-        spec.initial_folding_factor
+/// Number of mask polynomials required for one round of sumcheck.
+pub const fn masks_required<M: Embedding>(zk: &RoundModeParams<M>, ctx: &RoundContext) -> usize {
+    if zk.is_zk() {
+        num_sumcheck_rounds(ctx)
     } else {
-        spec.folding_factor
+        0
     }
 }
 
-pub const fn masks_required<M: Embedding>(spec: &SecuritySpec<M>, ctx: &RoundContext) -> usize {
-    match spec.mode {
-        Mode::Standard { .. } => 0,
-        Mode::ZeroKnowledge => num_sumcheck_rounds(spec, ctx),
-    }
+const fn num_sumcheck_rounds(ctx: &RoundContext) -> usize {
+    ctx.folding_factor as usize
 }
 
-/// 3 coefficients = constant + linear + quadratic, sufficient to mask each
-/// degree-2 sumcheck round polynomial.
-const fn mask_length() -> usize {
+/// 3 coefficients suffice to mask the degree-2 sumcheck round polynomial —
+/// Lemma 6.4, p.38.
+const fn zk_mask_length() -> usize {
     3
 }
 
-/// Sumcheck-specific PoW sizing: closes the per-round Lemma 6.5 soundness gap.
-fn solve_sumcheck_round_pow<M: Embedding>(
-    spec: &SecuritySpec<M>,
-    irs_source: &irs_commit::Config<M>,
-) -> proof_of_work::Config {
-    let code = CodeParams::from_irs(irs_source);
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
 
-    // Lemma 6.5 per-round error has two terms; security in bits is the min.
-    // TODO: extend with `ℓ_zk · |Λ_C_zk|` factors in ZK mode once mask-code
-    // params are available (PR 2).
-    let sec_mca = -bounds::eps_mca_log2(&code);
-    let sec_combination =
-        code.field_bits - bounds::list_size_log2(code.log_inv_rate, code.johnson_slack) - 1.0;
-    let achieved = sec_mca.min(sec_combination);
+    use super::*;
+    use crate::protocols::params::test_utils::{
+        arb_round_ctx, arb_standard_johnson_spec, arb_zk_spec, build_minimal_round_mode,
+    };
 
-    // protocol-level PoW closes that portion separately.
-    let pow_bits = bounds::pow_bits_to_close_gap(spec.protocol_security_target_bits(), achieved);
-    proof_of_work::Config::from_difficulty(pow_bits)
+    proptest! {
+        /// Standard spec produces `SumcheckMode::Standard`.
+        #[test]
+        fn standard_mode_propagates(
+            spec in arb_standard_johnson_spec(80..=128),
+            ctx in arb_round_ctx(),
+        ) {
+            let zk = build_minimal_round_mode(&spec);
+            let config = solve(&ctx, &zk);
+            prop_assert!(matches!(config.mode, sumcheck::SumcheckMode::Standard));
+        }
+
+        /// ZK spec produces `SumcheckMode::ZeroKnowledge { mask_length: 3 }` — Lemma 6.4.
+        #[test]
+        fn zk_mode_has_three_mask_coefficients(
+            spec in arb_zk_spec(80..=128),
+            ctx in arb_round_ctx(),
+        ) {
+            let zk = build_minimal_round_mode(&spec);
+            let config = solve(&ctx, &zk);
+            match config.mode {
+                sumcheck::SumcheckMode::ZeroKnowledge { mask_length } => {
+                    prop_assert_eq!(mask_length, 3);
+                }
+                sumcheck::SumcheckMode::Standard => prop_assert!(false, "expected ZK"),
+            }
+        }
+
+        /// `num_rounds = ctx.folding_factor`.
+        #[test]
+        fn num_rounds_matches_folding_factor(
+            spec in prop_oneof![
+                arb_standard_johnson_spec(80..=128),
+                arb_zk_spec(80..=128),
+            ],
+            ctx in arb_round_ctx(),
+        ) {
+            let zk = build_minimal_round_mode(&spec);
+            let config = solve(&ctx, &zk);
+            prop_assert_eq!(config.num_rounds, ctx.folding_factor as usize);
+        }
+
+        /// `masks_required` = 0 in Standard, = `ctx.folding_factor` in ZK.
+        #[test]
+        fn masks_required_matches_mode(
+            spec in prop_oneof![
+                arb_standard_johnson_spec(80..=128),
+                arb_zk_spec(80..=128),
+            ],
+            ctx in arb_round_ctx(),
+        ) {
+            let zk = build_minimal_round_mode(&spec);
+            let required = masks_required(&zk, &ctx);
+            let expected = if zk.is_zk() { ctx.folding_factor as usize } else { 0 };
+            prop_assert_eq!(required, expected);
+        }
+
+        /// Smoke test: `solve` doesn't panic on assembly.
+        #[test]
+        fn solve_assembles_without_panic(
+            spec in prop_oneof![
+                arb_standard_johnson_spec(80..=128),
+                arb_zk_spec(80..=128),
+            ],
+            ctx in arb_round_ctx(),
+        ) {
+            let zk = build_minimal_round_mode(&spec);
+            let config = solve(&ctx, &zk);
+            prop_assert_eq!(config.initial_size, ctx.vector_size);
+        }
+    }
 }
