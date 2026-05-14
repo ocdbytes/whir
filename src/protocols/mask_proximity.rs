@@ -47,12 +47,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     algebra::{embedding::Identity, random_vector, scalar_mul_add_new, univariate_evaluate},
     hash::Hash,
-    protocols::irs_commit::{
-        Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness,
+    protocols::{
+        irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
+        proof_of_work,
     },
     transcript::{
-        Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
+        VerificationResult, VerifierMessage, VerifierState,
     },
     utils::zip_strict,
     verify,
@@ -67,6 +68,7 @@ use crate::{
 pub struct Config<F: Field> {
     pub c_zk_commit: IrsConfig<Identity<F>>,
     pub num_masks: usize,
+    pub pow: proof_of_work::Config,
 }
 
 /// Prover output from the commit phase.
@@ -80,7 +82,11 @@ pub struct Witness<F: Field> {
 pub type Commitment = IrsCommitment;
 
 impl<F: Field> Config<F> {
-    pub fn new(c_zk_commit: IrsConfig<Identity<F>>, num_masks: usize) -> Self {
+    pub fn new(
+        c_zk_commit: IrsConfig<Identity<F>>,
+        num_masks: usize,
+        pow: proof_of_work::Config,
+    ) -> Self {
         assert_eq!(
             c_zk_commit.num_vectors,
             2 * num_masks,
@@ -93,6 +99,7 @@ impl<F: Field> Config<F> {
         Self {
             c_zk_commit,
             num_masks,
+            pow,
         }
     }
 
@@ -162,10 +169,15 @@ impl<F: Field> Config<F> {
         R: RngCore + CryptoRng,
         Standard: Distribution<F>,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(original_msgs.len(), self.num_masks);
         assert_eq!(witness.fresh_msgs.len(), self.num_masks);
+
+        // Grind the Lemma 7.4 γ-combination gap before γ is sampled.
+        self.pow.prove(prover_state);
 
         // Step 1: receive combination randomness γ
         let gamma: F = prover_state.verifier_message();
@@ -213,8 +225,13 @@ impl<F: Field> Config<F> {
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
+        // Grind the Lemma 7.4 γ-combination gap before γ is sampled.
+        self.pow.verify(verifier_state)?;
+
         // Step 1: send combination randomness γ
         let gamma: F = verifier_state.verifier_message();
 
@@ -313,7 +330,9 @@ mod tests {
                     );
                     (Just(num_masks), c_zk)
                 })
-                .prop_map(|(num_masks, c_zk)| Self::new(c_zk, num_masks))
+                .prop_map(|(num_masks, c_zk)| {
+                    Self::new(c_zk, num_masks, proof_of_work::Config::none())
+                })
         }
     }
 

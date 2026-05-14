@@ -64,6 +64,21 @@ impl Config {
         difficulty(self.threshold)
     }
 
+    /// Build a PoW config whose difficulty closes the gap `target - analytic_error`,
+    /// clamped at zero.
+    ///
+    /// Used by parameter solvers: each PoW slot independently lifts its own
+    /// soundness up to `target`. The caller is responsible for ensuring
+    /// `analytic_error` is computed from the local protocol step (see e.g.
+    /// `params::sumcheck`).
+    pub fn grind_to(target: Bits, analytic_error: Bits, hash_id: EngineId) -> Self {
+        let gap = (f64::from(target) - f64::from(analytic_error)).max(0.0);
+        Self {
+            hash_id,
+            threshold: threshold(Bits::new(gap)),
+        }
+    }
+
     #[cfg_attr(feature = "tracing", instrument(skip_all, fields(engine)))]
     pub fn prove<H, R>(&self, prover_state: &mut ProverState<H, R>)
     where

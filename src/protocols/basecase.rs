@@ -1,8 +1,4 @@
-//! Base Case Linear Opening Protocol
-//!
-//! It support honest verifier zero-knowledge (HVZK), but is not succinct.
-//!
-//! <https://eprint.iacr.org/2026/391.pdf> § 7.
+//! Non-succinct linear opening (Construction 7.2, p.43). HVZK in ZK mode.
 
 use ark_ff::Field;
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
@@ -15,7 +11,7 @@ use crate::{
         univariate_evaluate,
     },
     hash::Hash,
-    protocols::{irs_commit, sumcheck},
+    protocols::{irs_commit, proof_of_work, sumcheck},
     transcript::{
         codecs::U64, Codec, DuplexSpongeInterface, ProverMessage, ProverState, VerifierMessage,
         VerifierState,
@@ -24,11 +20,17 @@ use crate::{
     verify,
 };
 
-/// Output from the base case protocol (shared by prover and verifier).
 #[must_use]
 pub struct Opening<F: Field> {
     pub evaluation_points: Vec<F>,
     pub linear_form_evaluation: F,
+}
+
+/// Standard / ZeroKnowledge selector for basecase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Mode {
+    Standard,
+    ZeroKnowledge,
 }
 
 #[must_use]
@@ -37,14 +39,17 @@ pub struct Opening<F: Field> {
 pub struct Config<F: Field> {
     pub commit: irs_commit::Config<Identity<F>>,
     pub sumcheck: sumcheck::Config<F>,
-
-    /// Whether to mask the vectors, which adds HVZK.
-    pub masked: bool,
+    pub mode: Mode,
+    pub pow: proof_of_work::Config,
 }
 
 impl<F: Field> Config<F> {
     pub const fn size(&self) -> usize {
         self.sumcheck.initial_size
+    }
+
+    pub const fn is_zk(&self) -> bool {
+        matches!(self.mode, Mode::ZeroKnowledge)
     }
 
     pub fn prove<H, R>(
@@ -77,67 +82,80 @@ impl<F: Field> Config<F> {
             };
         }
 
-        // Even more trivial non-zk protocol: send f and r directly.
-        if !self.masked {
-            prover_state.prover_messages(&vector);
-            prover_state.prover_messages(&witness.masks);
-            let _ = self.commit.open(prover_state, &[witness]);
-            let point = self
-                .sumcheck
-                .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
-                .round_challenges;
-            assert!(!vector[0].is_zero(), "Proof failed");
-            return Opening {
-                evaluation_points: point,
-                linear_form_evaluation: covector[0],
-            };
-        }
+        let blinding_witness =
+            self.maybe_blind_prove(prover_state, &mut vector, witness, &covector, &mut sum);
 
-        // Create masking vector.
-        let mask = random_vector(prover_state.rng(), vector.len());
+        let witnesses: Vec<&irs_commit::Witness<F>> = blinding_witness
+            .as_ref()
+            .map_or_else(|| vec![witness], |b| vec![b, witness]);
+        let _ = self.commit.open(prover_state, &witnesses);
 
-        // Commit to the masking vector.
-        let mask_witness = self.commit.commit(prover_state, &[&mask]);
-
-        // Compute and send linear form of mask (μ' in paper).
-        let mask_sum = dot(&mask, &covector);
-        prover_state.prover_message(&mask_sum);
-
-        // RLC the mask with the vector
-        let mask_rlc = prover_state.verifier_message::<F>();
-        assert!(!mask_rlc.is_zero(), "Proof failed");
-        let mut masked_vector = scalar_mul_add_new(&mask, mask_rlc, &vector);
-        prover_state.prover_messages(&masked_vector);
-
-        // Send combined IRS randomness. (r^* in paper)
-        let masked_masks = scalar_mul_add_new(&mask_witness.masks, mask_rlc, &witness.masks);
-        prover_state.prover_messages(&masked_masks);
-
-        // Open the commitment and mask simultaneously.
-        let _ = self.commit.open(prover_state, &[&mask_witness, witness]);
-
-        // Run sumcheck to reduce linear form claim
-        let mut masked_sum = mask_sum + mask_rlc * sum;
         let point = self
             .sumcheck
-            .prove(
-                prover_state,
-                &mut masked_vector,
-                &mut covector,
-                &mut masked_sum,
-                &[],
-            )
+            .prove(prover_state, &mut vector, &mut covector, &mut sum, &[])
             .round_challenges;
 
-        // If the MLE of `masked_vector` evaluates to zero, the verifier can not proceed.
-        // Basically the sumcheck equation has degenerated to 0 * l(r) = 0, which provides
-        // no constraints on l(r) that the verifier can return.
-        // This event is cryptographically unlikely as `F` is challenge sized.
-        assert!(!masked_vector[0].is_zero(), "Proof failed");
+        // Negligible event over a challenge-sized field; without it the verifier
+        // cannot derive `l(r) = sum / vector_mle(r)`.
+        assert!(!vector[0].is_zero(), "Proof failed");
 
         Opening {
             evaluation_points: point,
             linear_form_evaluation: covector[0],
+        }
+    }
+
+    /// ZK: commits a blinding codeword, runs the RLC, mutates `vector`/`sum` to
+    /// the combined values, sends them cleartext. Standard: sends `vector` and
+    /// `witness.masks` cleartext (no ZK).
+    fn maybe_blind_prove<H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        vector: &mut Vec<F>,
+        witness: &irs_commit::Witness<F>,
+        covector: &[F],
+        sum: &mut F,
+    ) -> Option<irs_commit::Witness<F>>
+    where
+        H: DuplexSpongeInterface,
+        R: RngCore + CryptoRng,
+        F: Codec<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+        Standard: Distribution<F>,
+    {
+        match self.mode {
+            Mode::Standard => {
+                prover_state.prover_messages(vector);
+                prover_state.prover_messages(&witness.masks);
+                None
+            }
+            Mode::ZeroKnowledge => {
+                let blinding_vector = random_vector(prover_state.rng(), vector.len());
+                let blinding_witness = self.commit.commit(prover_state, &[&blinding_vector]);
+                let blinding_inner_product = dot(&blinding_vector, covector);
+                prover_state.prover_message(&blinding_inner_product);
+
+                // Grind the Theorem 7.1 γ-combination gap before γ is sampled.
+                self.pow.prove(prover_state);
+
+                let combination_randomness = prover_state.verifier_message::<F>();
+                assert!(!combination_randomness.is_zero(), "Proof failed");
+
+                *vector = scalar_mul_add_new(&blinding_vector, combination_randomness, vector);
+                prover_state.prover_messages(vector);
+
+                let combined_irs_randomness = scalar_mul_add_new(
+                    &blinding_witness.masks,
+                    combination_randomness,
+                    &witness.masks,
+                );
+                prover_state.prover_messages(&combined_irs_randomness);
+
+                *sum = blinding_inner_product + combination_randomness * *sum;
+                Some(blinding_witness)
+            }
         }
     }
 
@@ -166,71 +184,70 @@ impl<F: Field> Config<F> {
             });
         }
 
-        // Unmasked protocol
-        if !self.masked {
-            let vector = verifier_state.prover_messages_vec(self.commit.vector_size)?;
-            let masks = verifier_state
-                .prover_messages_vec(self.commit.mask_length() * self.commit.num_messages())?;
-            let evals = self.commit.verify(verifier_state, &[commitment])?;
-            let point = self
-                .sumcheck
-                .verify(verifier_state, &mut sum)?
-                .round_challenges;
+        let blind = self.maybe_receive_blind(verifier_state, &mut sum)?;
 
-            for (&point, value) in zip_strict(&evals.points, evals.values(&[F::ONE])) {
-                // We expected `f(x) + x^l · g(x)` where l = deg(f) + 1, f is the message and g the mask.
-                let expected = univariate_evaluate(&vector, point)
-                    + point.pow([self.commit.message_length() as u64])
-                        * univariate_evaluate(&masks, point);
-                verify!(value == expected);
-            }
-            let mle = multilinear_extend(&vector, &point);
-            verify!(!mle.is_zero());
-            let linear_mle = sum / mle;
-            return Ok(Opening {
-                evaluation_points: point,
-                linear_form_evaluation: linear_mle,
-            });
-        }
+        let vector = verifier_state.prover_messages_vec(self.commit.vector_size)?;
+        let irs_randomness = verifier_state
+            .prover_messages_vec(self.commit.mask_length() * self.commit.num_messages())?;
 
-        let mask_commitment = self.commit.receive_commitment(verifier_state)?;
-        let mask_sum: F = verifier_state.prover_message()?;
-        let mask_rlc: F = verifier_state.verifier_message();
-        verify!(!mask_rlc.is_zero());
-        let masked_vector: Vec<F> = verifier_state.prover_messages_vec(self.commit.vector_size)?;
-        let masked_masks: Vec<F> = verifier_state.prover_messages_vec(self.commit.mask_length())?;
+        let (commitments, weights): (Vec<&irs_commit::Commitment>, Vec<F>) = match &blind {
+            Some((b, gamma)) => (vec![b, commitment], vec![F::ONE, *gamma]),
+            None => (vec![commitment], vec![F::ONE]),
+        };
+        let evals = self.commit.verify(verifier_state, &commitments)?;
 
-        // Open the commitment and mask simultaneously.
-        let evals = self
-            .commit
-            .verify(verifier_state, &[&mask_commitment, commitment])?;
-
-        // Spot check evaluations.
-        for (&point, value) in zip_strict(&evals.points, evals.values(&[F::ONE, mask_rlc])) {
-            // We expected `f(x) + x^l · g(x)` where l = deg(f) + 1, f is the message and g the mask.
-            let expected = univariate_evaluate(&masked_vector, point)
+        // Spot-check: Enc_C(vector, irs_randomness)(x) = Σ weights · opened_row(x).
+        for (&point, value) in zip_strict(&evals.points, evals.values(&weights)) {
+            let expected = univariate_evaluate(&vector, point)
                 + point.pow([self.commit.message_length() as u64])
-                    * univariate_evaluate(&masked_masks, point);
+                    * univariate_evaluate(&irs_randomness, point);
             verify!(value == expected);
         }
 
-        // Sumcheck on masked inner product
-        let mut masked_sum = mask_sum + mask_rlc * sum;
         let point = self
             .sumcheck
-            .verify(verifier_state, &mut masked_sum)?
+            .verify(verifier_state, &mut sum)?
             .round_challenges;
 
-        // Compute implied MLE of the linear form
-        // f*(r) · l(r) = sum  =>  l(r) = sum / f*(r)
-        let masked_mle = multilinear_extend(&masked_vector, &point);
-        verify!(!masked_mle.is_zero());
-        let linear_mle = masked_sum / masked_mle;
+        // l(r) = sum / vector_mle(r), where l is the implicit linear form.
+        let mle = multilinear_extend(&vector, &point);
+        verify!(!mle.is_zero());
+        let linear_mle = sum / mle;
 
         Ok(Opening {
             evaluation_points: point,
             linear_form_evaluation: linear_mle,
         })
+    }
+
+    /// ZK: reads the blinding commitment + μ' + γ, mutates `sum` to the
+    /// combined value, returns `(commitment, γ)`. Standard: no-op.
+    fn maybe_receive_blind<H>(
+        &self,
+        verifier_state: &mut VerifierState<H>,
+        sum: &mut F,
+    ) -> VerificationResult<Option<(irs_commit::Commitment, F)>>
+    where
+        H: DuplexSpongeInterface,
+        F: Codec<[H::U]>,
+        u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+        Hash: ProverMessage<[H::U]>,
+    {
+        match self.mode {
+            Mode::Standard => Ok(None),
+            Mode::ZeroKnowledge => {
+                let blinding_commitment = self.commit.receive_commitment(verifier_state)?;
+                let blinding_inner_product: F = verifier_state.prover_message()?;
+                // Grind the Theorem 7.1 γ-combination gap before γ is sampled.
+                self.pow.verify(verifier_state)?;
+                let combination_randomness: F = verifier_state.verifier_message();
+                verify!(!combination_randomness.is_zero());
+                *sum = blinding_inner_product + combination_randomness * *sum;
+                Ok(Some((blinding_commitment, combination_randomness)))
+            }
+        }
     }
 }
 
@@ -248,7 +265,7 @@ mod tests {
         pub fn arbitrary(size: usize, mask_length: usize) -> impl Strategy<Value = Self> {
             let commit =
                 irs_commit::Config::arbitrary(Identity::<F>::new(), 1, size, mask_length, 1);
-            (commit, bool::weighted(0.8)).prop_map(move |(commit, masked)| Self {
+            (commit, bool::weighted(0.8)).prop_map(move |(commit, is_zk)| Self {
                 commit,
                 sumcheck: sumcheck::Config::new(
                     size,
@@ -256,7 +273,12 @@ mod tests {
                     size.next_power_of_two().trailing_zeros() as usize,
                     sumcheck::SumcheckMode::Standard,
                 ),
-                masked,
+                mode: if is_zk {
+                    Mode::ZeroKnowledge
+                } else {
+                    Mode::Standard
+                },
+                pow: proof_of_work::Config::none(),
             })
         }
     }
@@ -267,7 +289,6 @@ mod tests {
         F: Field + Codec,
         Standard: Distribution<F>,
     {
-        // Pseudo-random Instance
         let instance = U64(seed);
         let ds = DomainSeparator::protocol(config)
             .session(&format!("Test at {}:{}", file!(), line!()))
@@ -277,7 +298,6 @@ mod tests {
         let covector = random_vector(&mut rng, config.size());
         let sum = dot(&vector, &covector);
 
-        // Prover
         let mut prover_state = ProverState::new_std(&ds);
         let witness = config.commit.commit(&mut prover_state, &[&vector]);
         let prover_result = config.prove(
@@ -293,7 +313,6 @@ mod tests {
         );
         let proof = prover_state.proof();
 
-        // Verifier
         let mut verifier_state = VerifierState::new_std(&ds, &proof);
         let commitment = config
             .commit

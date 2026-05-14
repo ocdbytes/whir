@@ -1,4 +1,4 @@
-//! Shared test fixtures for `params/` solvers.
+//! Shared test fixtures.
 
 use std::{marker::PhantomData, ops::RangeInclusive};
 
@@ -12,22 +12,17 @@ use crate::{
     hash,
     protocols::params::{
         irs_commit as params_irs,
-        plan::RoundModeParams,
+        plan::MaskOracleInfo,
         spec::{LogInvRate, MaskCodeMessageLen, Mode, RoundContext, SecuritySpec},
     },
 };
 
 pub type TestField = Field64;
 pub type TestEmbedding = Identity<TestField>;
-
-/// Extension field used by non-identity smoke tests.
 pub type TestExtensionField = Field64_2;
-
-/// Non-identity embedding: `Source = Field64`, `Target = Field64_2`.
+/// `Source = Field64, Target = Field64_2`.
 pub type TestNonIdentityEmbedding = Basefield<TestExtensionField>;
 
-/// Build a deterministic `SecuritySpec` for the given embedding and mode.
-/// Useful for one-shot smoke / negative tests.
 pub fn deterministic_spec<M: Embedding>(mode: Mode) -> SecuritySpec<M> {
     SecuritySpec {
         mode,
@@ -38,19 +33,20 @@ pub fn deterministic_spec<M: Embedding>(mode: Mode) -> SecuritySpec<M> {
     }
 }
 
-/// `SecuritySpec` strategy with `max_pow_bits ∈ {None, Some(0)}` (PoW deferred).
+/// `max_pow_bits` ∈ `{None, Some(0..=16)}`; bounded so the analytic floor
+/// stays positive for the lowest test targets and the PoW gap stays under the
+/// 60-bit cap.
 pub fn arb_spec(
     mode: Mode,
     target_range: RangeInclusive<u32>,
 ) -> impl Strategy<Value = SecuritySpec<TestEmbedding>> {
-    (target_range, prop_oneof![Just(None), Just(Some(0u32))]).prop_map(move |(target, max_pow)| {
-        SecuritySpec {
-            mode,
-            target_security_bits: target,
-            max_pow_bits: max_pow,
-            hash_id: hash::BLAKE3,
-            _embedding: PhantomData,
-        }
+    let pow_strategy = prop_oneof![Just(None), (0u32..=16).prop_map(Some)];
+    (target_range, pow_strategy).prop_map(move |(target, max_pow)| SecuritySpec {
+        mode,
+        target_security_bits: target,
+        max_pow_bits: max_pow,
+        hash_id: hash::BLAKE3,
+        _embedding: PhantomData,
     })
 }
 
@@ -78,23 +74,19 @@ pub fn arb_round_ctx() -> impl Strategy<Value = RoundContext> {
             vector_size: 1usize << log_size,
             log_inv_rate,
             folding_factor,
-            prev_round_in_domain_samples: 0,
-            prev_round_query_error: 0.0,
         },
     )
 }
 
-/// Minimal `RoundModeParams` matching `spec.mode`:
-/// - `Mode::Standard` → `RoundModeParams::Standard`.
-/// - `Mode::ZeroKnowledge` → `ZeroKnowledge { c_zk, l_zk }` with ℓ_zk = 2 and
-///   C_zk at rate 1/2.
-pub fn build_minimal_round_mode(
-    spec: &SecuritySpec<TestEmbedding>,
-) -> RoundModeParams<TestEmbedding> {
+/// `None` in Standard; `Some(ℓ_zk=2, c_zk rate 1/2)` in ZK.
+pub fn build_minimal_mask_oracle(spec: &SecuritySpec<TestEmbedding>) -> Option<MaskOracleInfo> {
     if !matches!(spec.mode, Mode::ZeroKnowledge) {
-        return RoundModeParams::Standard;
+        return None;
     }
     let l_zk = MaskCodeMessageLen::new(2);
     let c_zk = params_irs::solve_mask_code(spec, l_zk, 0, LogInvRate::new(1), 2);
-    RoundModeParams::ZeroKnowledge { c_zk, l_zk }
+    Some(MaskOracleInfo {
+        c_zk_list_size: c_zk.list_size(),
+        l_zk,
+    })
 }

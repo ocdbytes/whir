@@ -1,4 +1,5 @@
-//! Parameter selection for the IRS commit protocol.
+//! IRS-commit parameter selection. ZK mask sized per Lemma 9.5, padded so
+//! `message + mask` is a pow2 (NTT-valid codeword length).
 
 use std::num::NonZeroUsize;
 
@@ -12,8 +13,6 @@ use crate::{
     },
 };
 
-/// Solve per-round IRS-commit parameters. ZK mask sized per Lemma 9.5,
-/// padded so `message + mask` is a power of 2 (NTT-valid codeword length).
 pub fn solve<M: Embedding + Default>(
     spec: &SecuritySpec<M>,
     ctx: &RoundContext,
@@ -31,7 +30,7 @@ pub fn solve<M: Embedding + Default>(
             let min_mask = num_in_domain_queries(unique_decoding, security_target, rate)
                 .checked_add(out_domain_samples.get())
                 .expect("usize overflow");
-            // Pad to pow2: Lemma 9.5 is `≥` so over-allocating is safe.
+            // Lemma 9.5 is `≥`, so pow2 padding is safe.
             let mask_length = message_length
                 .checked_add(min_mask.get())
                 .expect("usize overflow")
@@ -47,8 +46,7 @@ pub fn solve<M: Embedding + Default>(
         security_target,
         unique_decoding,
         spec.hash_id,
-        // num_vectors: orchestrator commits one vector per round.
-        1,
+        1, // one vector committed per round
         ctx.vector_size,
         interleaving_depth,
         rate,
@@ -56,12 +54,11 @@ pub fn solve<M: Embedding + Default>(
     )
 }
 
-/// Solve the shared C_zk IRS config for committing mask polynomials.
+/// Shared C_zk IRS config for mask polynomials.
 ///
-/// - `l_zk` — message length. Must be a power of 2 (caller pads it; see assert).
-/// - `source_mask_length` — `r`, the source IRS mask length (Theorem 9.6).
-/// - `log_inv_rate` — C_zk rate.
-/// - `num_vectors` — total masks per commit; `2 * num_masks` for mask-proximity.
+/// - `l_zk`: message length, must be a power of 2.
+/// - `source_mask_length`: `r` from Theorem 9.6.
+/// - `num_vectors`: `2 * num_masks` (Construction 7.2: originals + fresh).
 pub fn solve_mask_code<M: Embedding + Default>(
     spec: &SecuritySpec<M>,
     l_zk: MaskCodeMessageLen,
@@ -89,8 +86,7 @@ pub fn solve_mask_code<M: Embedding + Default>(
 
     irs_commit::Config::new(
         security_target,
-        // ZK ⇒ Johnson regime.
-        false,
+        false, // ZK ⇒ Johnson regime
         spec.hash_id,
         num_vectors,
         l_zk,
@@ -151,8 +147,7 @@ mod tests {
         arb_zk_spec(80..=128)
     }
 
-    /// IRS-specific: vary `unique_decoding` to exercise both regimes inside
-    /// `irs_commit::Config::new`.
+    /// Varies `unique_decoding` to exercise both regimes.
     fn arb_standard_spec() -> impl Strategy<Value = SecuritySpec<M>> {
         any::<bool>()
             .prop_flat_map(|unique_decoding| arb_spec(Mode::Standard { unique_decoding }, 80..=128))
@@ -178,7 +173,7 @@ mod tests {
     }
 
     proptest! {
-        /// Lemma 9.5: ZK mask covers all revealed evaluations.
+        /// Lemma 9.5: mask covers all revealed evaluations.
         #[test]
         fn zk_mask_covers_lemma_9_5(
             spec in arb_zk_spec_default(),
@@ -193,7 +188,6 @@ mod tests {
             );
         }
 
-        /// Standard mode produces no IRS randomness regardless of input.
         #[test]
         fn standard_has_no_mask(
             spec in arb_standard_spec(),
@@ -204,7 +198,6 @@ mod tests {
             prop_assert_eq!(config.mask_length(), 0);
         }
 
-        /// ZK round-trip + witness shape check.
         #[test]
         fn zk_round_trips(
             spec in arb_zk_spec_default(),
@@ -213,16 +206,11 @@ mod tests {
             seed: u64,
         ) {
             let config = solve(&spec, &ctx, OodSampleBudget::new(out_domain));
-            prop_assert!(config.mask_length() > 0, "ZK mode must produce non-zero mask");
+            prop_assert!(config.mask_length() > 0);
             let witness = commit_open_verify(&config, seed);
-            prop_assert_eq!(
-                witness.masks.len(),
-                config.mask_length() * config.num_messages(),
-                "witness mask vector size",
-            );
+            prop_assert_eq!(witness.masks.len(), config.mask_length() * config.num_messages());
         }
 
-        /// Standard round-trip + empty-mask check.
         #[test]
         fn standard_round_trips(
             spec in arb_standard_spec(),
@@ -232,7 +220,7 @@ mod tests {
             let config = solve(&spec, &ctx, OodSampleBudget::new(0));
             prop_assert_eq!(config.mask_length(), 0);
             let witness = commit_open_verify(&config, seed);
-            prop_assert!(witness.masks.is_empty(), "Standard mode must produce no masks");
+            prop_assert!(witness.masks.is_empty());
         }
     }
 }

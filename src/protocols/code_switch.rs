@@ -21,10 +21,11 @@ use crate::{
     protocols::{
         geometric_challenge::geometric_challenge,
         irs_commit::{Commitment as IrsCommitment, Config as IrsConfig, Witness as IrsWitness},
+        proof_of_work,
     },
     transcript::{
-        Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
-        VerifierMessage, VerifierState,
+        codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
+        VerificationResult, VerifierMessage, VerifierState,
     },
     verify,
 };
@@ -45,6 +46,7 @@ pub struct Config<M: Embedding> {
     pub target: IrsConfig<Identity<M::Target>>,
     pub mode: Mode,
     pub out_domain_samples: usize,
+    pub pow: proof_of_work::Config,
 }
 
 /// Prover output from the code-switch.
@@ -65,6 +67,7 @@ impl<M: Embedding> Config<M> {
         target_config: IrsConfig<Identity<M::Target>>,
         out_domain_samples: usize,
         mode: Mode,
+        pow: proof_of_work::Config,
     ) -> Self {
         assert_eq!(
             source_config.num_vectors, 1,
@@ -73,6 +76,12 @@ impl<M: Embedding> Config<M> {
         assert_eq!(
             target_config.num_vectors, 1,
             "code-switch requires a single target vector"
+        );
+        // Construction 9.7 needs at least one OOD challenge; unique-decoding
+        // Standard mode (`t_ood = 0`) is incompatible with code-switch.
+        assert!(
+            out_domain_samples > 0,
+            "code-switch requires t_ood ≥ 1 (Construction 9.7)",
         );
         // Target encodes one polynomial of length ℓ = source.message_length()
         // under C' = D^{ι_t}. The IRS splits the input of length ℓ into ι_t
@@ -124,6 +133,7 @@ impl<M: Embedding> Config<M> {
             target: target_config,
             mode,
             out_domain_samples,
+            pow,
         }
     }
 
@@ -183,6 +193,8 @@ impl<M: Embedding> Config<M> {
         Standard: Distribution<M::Target>,
         M::Target: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(message.len(), self.source.message_length());
@@ -198,6 +210,9 @@ impl<M: Embedding> Config<M> {
 
         // Step 1: g := Enc_{C'}(f, r') — Construction 9.7 Step 1, p.55
         let target_witness = self.target.commit(prover_state, &[&message]);
+
+        // Grind Lemma 9.9 OOD gap before α is sampled.
+        self.pow.prove(prover_state);
 
         // Step 2-3: OOD challenge + answers — Construction 9.7 Steps 2-3, p.55
         let ood_points: Vec<M::Target> = prover_state.verifier_message_vec(self.out_domain_samples);
@@ -331,6 +346,8 @@ impl<M: Embedding> Config<M> {
         Standard: Distribution<M::Target>,
         M::Target: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
         verify!(1 << folding_randomness.len() == self.source.interleaving_depth);
@@ -340,6 +357,9 @@ impl<M: Embedding> Config<M> {
         // Step 1: target commitment — Construction 9.7 Step 1, p.55
         // Mask oracle is committed in the shared mask tree by the orchestrator.
         let target_commitment = self.target.receive_commitment(verifier_state)?;
+
+        // Grind Lemma 9.9 OOD gap before α is sampled.
+        self.pow.verify(verifier_state)?;
 
         // Step 2-3: OOD — Construction 9.7 Steps 2-3, p.55
         // In ZK mode, ood_answers = f(α) + α^ℓ · (r,s)(α) where (r,s) is
@@ -413,7 +433,7 @@ mod tests {
                 select(valid_sizes),
                 0_usize..=3, // src_mask_len (source IRS randomness, post-fold)
                 bool::ANY,   // zk
-                0_usize..=5, // ood (= code-switch t_ood)
+                1_usize..=5, // ood (= code-switch t_ood; ≥ 1 per Construction 9.7)
                 0_usize..=5, // fresh_s_len (≥ ood for assumption (c))
                 select(vec![1_usize, 2, 4]), // ι_s (source interleaving)
                 0_usize..=10, // target.in_domain_samples (t'_in)
@@ -473,7 +493,13 @@ mod tests {
                                     } else {
                                         Mode::Standard
                                     };
-                                    Self::new(source.clone(), target, ood, mode)
+                                    Self::new(
+                                        source.clone(),
+                                        target,
+                                        ood,
+                                        mode,
+                                        proof_of_work::Config::none(),
+                                    )
                                 })
                             })
                         })
@@ -780,12 +806,10 @@ mod tests {
     #[test]
     fn test_tampered_ood() {
         crate::tests::init();
-        let configs = Config::arbitrary(Identity::<fields::Field64>::new()).prop_filter(
-            "non-ZK with ood > 0",
-            |config| {
-                !config.is_zk() && config.source.mask_length() == 0 && config.out_domain_samples > 0
-            },
-        );
+        let configs = Config::arbitrary(Identity::<fields::Field64>::new())
+            .prop_filter("non-ZK", |config| {
+                !config.is_zk() && config.source.mask_length() == 0
+            });
         proptest!(|(seed: u64, config in configs)| {
             test_tampered_ood_config(seed, &config);
         });

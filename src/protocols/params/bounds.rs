@@ -1,4 +1,4 @@
-//! Shared primitives for parameter selection: RS bounds + PoW sizing.
+//! Shared RS-code primitives + the [`SoundnessBounded`] abstraction.
 
 use std::{f64::consts::LOG2_10, ops::Neg};
 
@@ -7,6 +7,18 @@ use crate::{
     bits::Bits,
     protocols::irs_commit,
 };
+
+/// Analytic soundness bits (excluding PoW) delivered by a protocol-level unit.
+///
+/// Implemented on [`RoundPlan`](super::plan::RoundPlan),
+/// [`MaskOraclePlan`](super::plan::MaskOraclePlan), and
+/// [`ParameterPlan`](super::plan::ParameterPlan). Sub-protocol `Config` types
+/// lack the cross-protocol context to self-report.
+// TODO(phase-6): wire `analytic + pow >= target` so this is called outside tests.
+#[allow(dead_code)]
+pub trait SoundnessBounded {
+    fn analytic_bits(&self) -> Bits;
+}
 
 /// `johnson_slack == 0.0` selects the unique-decoding regime.
 #[derive(Debug, Clone, Copy)]
@@ -75,10 +87,8 @@ pub fn ood_per_sample_log2(message_length: usize, field_bits: f64) -> f64 {
     ((message_length - 1) as f64).log2() - field_bits
 }
 
-/// PoW difficulty to close a soundness gap: max(0, target − achieved).
-///
-/// Currently unused — solvers emit `Config::none()` PoW. Will be re-wired by
-/// the cross-protocol PoW pass.
+/// PoW difficulty to close a soundness gap: `max(0, target − achieved)`.
+// TODO(phase-6): re-wire from the cross-protocol PoW pass.
 #[allow(dead_code)]
 pub fn pow_bits_to_close_gap(target_security_bits: f64, achieved_security_bits: f64) -> Bits {
     Bits::new((target_security_bits - achieved_security_bits).max(0.0))
