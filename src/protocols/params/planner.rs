@@ -38,21 +38,39 @@ impl<M: Embedding + Default> ParameterPlan<M> {
             basecase_vector_size,
             basecase_log_inv_rate,
         } = round_layout(&tuning);
-        match spec.mode {
-            Mode::Standard { .. } => derive_standard(
-                spec,
-                tuning,
-                &shapes,
-                basecase_vector_size,
-                basecase_log_inv_rate,
-            ),
-            Mode::ZeroKnowledge => derive_zk(
-                spec,
-                tuning,
-                &shapes,
-                basecase_vector_size,
-                basecase_log_inv_rate,
-            ),
+        let target_spec = transfer_spec_to_target(&spec);
+
+        let (rounds, mask_oracle) = match spec.mode {
+            Mode::Standard => {
+                let rounds = shapes
+                    .iter()
+                    .map(|shape| build_round(&spec, shape, None))
+                    .collect();
+                (rounds, None)
+            }
+            Mode::ZeroKnowledge => {
+                let SharedMaskOracleData {
+                    info,
+                    round_data,
+                    plan,
+                } = build_shared_mask_oracle(&spec, &target_spec, &tuning, &shapes);
+                let rounds = shapes
+                    .iter()
+                    .zip(round_data)
+                    .map(|(shape, data)| finalize_zk_round(&spec, shape, data, info))
+                    .collect();
+                (rounds, Some(plan))
+            }
+        };
+
+        let basecase = bc_solver::solve(&target_spec, basecase_vector_size, basecase_log_inv_rate);
+
+        Self {
+            security: spec,
+            tuning,
+            shared: SharedPlan { mask_oracle },
+            rounds,
+            basecase,
         }
     }
 }
@@ -85,22 +103,34 @@ struct RoundData<M: Embedding> {
     t_ood: usize,
 }
 
+/// Output of the ZK global ℓ_zk ↔ C_zk fixed-point: the slim `info` view used
+/// by per-round builders, the materialised per-round IRS/t_ood, and the full
+/// shared `MaskOraclePlan` to embed in the final plan.
+struct SharedMaskOracleData<M: Embedding> {
+    info: MaskOracleInfo,
+    round_data: Vec<RoundData<M>>,
+    plan: MaskOraclePlan<M::Target>,
+}
+
 /// Stops when there's no room for both a valid source and a valid target IRS.
 fn round_layout(tuning: &TuningSpec) -> RoundLayout {
     assert!(tuning.vector_size.is_power_of_two());
-    assert!(tuning.folding_factor >= 1);
-    assert!(tuning.initial_folding_factor >= 1);
+    assert!(tuning.folding_factor.min() >= 1);
 
     let mut num_vars = tuning.vector_size.trailing_zeros() as usize;
     let mut log_inv_rate = tuning.starting_log_inv_rate;
-    let mut source_folding = tuning.initial_folding_factor;
-    let target_folding = tuning.folding_factor;
     let mut shapes = Vec::new();
 
-    while num_vars >= source_folding + target_folding {
+    loop {
+        let round = shapes.len();
+        let source_folding = tuning.folding_factor.at_round(round);
+        let target_folding = tuning.folding_factor.at_round(round + 1);
+        if num_vars < source_folding + target_folding {
+            break;
+        }
         #[allow(clippy::cast_possible_truncation)]
         shapes.push(RoundShape {
-            round_index: shapes.len(),
+            round_index: round,
             source_vector_size: 1usize << num_vars,
             source_log_inv_rate: log_inv_rate,
             source_folding_factor: source_folding as u32,
@@ -111,7 +141,6 @@ fn round_layout(tuning: &TuningSpec) -> RoundLayout {
         {
             log_inv_rate += (source_folding as u32).saturating_sub(1);
         }
-        source_folding = target_folding;
     }
 
     RoundLayout {
@@ -139,45 +168,21 @@ fn target_context<M: Embedding>(shape: &RoundShape, source: &IrsConfig<M>) -> Ro
     }
 }
 
-// Standard mode
+// Zero-knowledge fixed-point — shared C_zk + global ℓ_zk
 // ---------------------------------------------------------------------------
 
-fn derive_standard<M: Embedding + Default>(
-    spec: SecuritySpec<M>,
-    tuning: TuningSpec,
+/// Run the global ℓ_zk ↔ C_zk fixed-point. `ℓ_zk = next_pow2(max_round(r + t_ood))`
+/// (Lemma 9.3), `C_zk.list_size` feeds back into per-round `t_ood` (Lemma 9.9
+/// term 1). The shared C_zk holds `2 · total_masks` columns (originals + fresh,
+/// one mask per sumcheck round per Lemma 6.4).
+fn build_shared_mask_oracle<M: Embedding + Default>(
+    spec: &SecuritySpec<M>,
+    target_spec: &SecuritySpec<Identity<M::Target>>,
+    tuning: &TuningSpec,
     shapes: &[RoundShape],
-    basecase_vector_size: usize,
-    basecase_log_inv_rate: u32,
-) -> ParameterPlan<M> {
-    let target_spec = transfer_spec_to_target(&spec);
-    let rounds = shapes
-        .iter()
-        .map(|shape| build_round(&spec, shape, None))
-        .collect();
-    let basecase = bc_solver::solve(&target_spec, basecase_vector_size, basecase_log_inv_rate);
-    ParameterPlan {
-        security: spec,
-        tuning,
-        shared: SharedPlan { mask_oracle: None },
-        rounds,
-        basecase,
-    }
-}
-
-// Zero-knowledge mode — global ℓ_zk fixed-point + shared C_zk
-// ---------------------------------------------------------------------------
-
-fn derive_zk<M: Embedding + Default>(
-    spec: SecuritySpec<M>,
-    tuning: TuningSpec,
-    shapes: &[RoundShape],
-    basecase_vector_size: usize,
-    basecase_log_inv_rate: u32,
-) -> ParameterPlan<M> {
-    let target_spec: SecuritySpec<Identity<M::Target>> = transfer_spec_to_target(&spec);
+) -> SharedMaskOracleData<M> {
     let c_zk_log_inv_rate = LogInvRate::new(tuning.starting_log_inv_rate);
 
-    // Lemma 6.4: one mask polynomial per sumcheck round. C_zk holds 2×.
     let total_masks: usize = shapes
         .iter()
         .map(|s| s.source_folding_factor as usize)
@@ -187,14 +192,14 @@ fn derive_zk<M: Embedding + Default>(
 
     let mut l_zk = MaskCodeMessageLen::new(L_ZK_BOOTSTRAP);
     let mut c_zk =
-        irs_solver::solve_mask_code(&target_spec, l_zk, 0, c_zk_log_inv_rate, c_zk_num_vectors);
+        irs_solver::solve_mask_code(target_spec, l_zk, 0, c_zk_log_inv_rate, c_zk_num_vectors);
 
     let mut last_round_data: Vec<RoundData<M>> = Vec::new();
 
     for _ in 0..L_ZK_MAX_ITER {
         let round_data: Vec<RoundData<M>> = shapes
             .iter()
-            .map(|shape| build_zk_round_data(&spec, shape, c_zk.list_size()))
+            .map(|shape| build_zk_round_data(spec, shape, c_zk.list_size()))
             .collect();
 
         let max_r_plus_t_ood = round_data
@@ -217,7 +222,7 @@ fn derive_zk<M: Embedding + Default>(
             .max()
             .unwrap_or(0);
         c_zk = irs_solver::solve_mask_code(
-            &target_spec,
+            target_spec,
             l_zk,
             max_source_mask,
             c_zk_log_inv_rate,
@@ -226,34 +231,21 @@ fn derive_zk<M: Embedding + Default>(
         last_round_data = round_data;
     }
 
-    let mask_oracle_info = MaskOracleInfo {
+    let info = MaskOracleInfo {
         c_zk_list_size: c_zk.list_size(),
         l_zk,
     };
-
-    let rounds = shapes
-        .iter()
-        .zip(last_round_data)
-        .map(|(shape, data)| finalize_zk_round(&spec, shape, data, mask_oracle_info))
-        .collect();
-
-    let mask_proximity = mp_solver::solve(&target_spec, c_zk.clone(), total_masks);
-    let mask_oracle = MaskOraclePlan {
+    let mask_proximity = mp_solver::solve(target_spec, c_zk.clone(), total_masks);
+    let plan = MaskOraclePlan {
         c_zk,
         l_zk,
         mask_proximity,
     };
 
-    let basecase = bc_solver::solve(&target_spec, basecase_vector_size, basecase_log_inv_rate);
-
-    ParameterPlan {
-        security: spec,
-        tuning,
-        shared: SharedPlan {
-            mask_oracle: Some(mask_oracle),
-        },
-        rounds,
-        basecase,
+    SharedMaskOracleData {
+        info,
+        round_data: last_round_data,
+        plan,
     }
 }
 
@@ -399,7 +391,8 @@ pub(super) fn compute_t_ood<M: Embedding>(
 
     let security_target = spec.protocol_security_target_bits();
     let field_bits = M::Target::field_size_bits();
-    let unique_decoding = spec.mode.unique_decoding();
+    // Construction 9.7 is Johnson-only — `Mode` cannot express unique-decoding.
+    let unique_decoding = false;
     let combined_list_size = target_list_size * c_zk_list_size.unwrap_or(1.0);
     let message_length = source.message_length();
     let source_mask_length = source.mask_length();
@@ -414,7 +407,7 @@ pub(super) fn compute_t_ood<M: Embedding>(
         )
     };
 
-    if !matches!(spec.mode, Mode::ZeroKnowledge) {
+    if matches!(spec.mode, Mode::Standard) {
         return solve_for_degree(message_length);
     }
 
@@ -448,18 +441,40 @@ const fn transfer_spec_to_target<M: Embedding>(
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::{
         hash,
-        protocols::params::{bounds::SoundnessBounded, test_utils::TestEmbedding},
+        protocols::params::{
+            bounds::SoundnessBounded, spec::FoldingFactor, test_utils::TestEmbedding,
+        },
     };
+
+    /// Varied tuning space for proptests. Exercises both `FoldingFactor`
+    /// variants. Bounds keep PoW under the 60-bit cap and the IRS solver
+    /// inside Field64's reachable range.
+    fn arb_tuning() -> impl Strategy<Value = TuningSpec> {
+        let folding = prop_oneof![
+            (1usize..=3).prop_map(FoldingFactor::Constant),
+            (1usize..=3, 1usize..=3).prop_map(|(initial, rest)| {
+                FoldingFactor::ConstantFromSecondRound { initial, rest }
+            }),
+        ];
+        (4u32..=8, 1u32..=3, folding).prop_map(|(log_size, log_inv_rate, folding_factor)| {
+            TuningSpec {
+                vector_size: 1usize << log_size,
+                starting_log_inv_rate: log_inv_rate,
+                folding_factor,
+            }
+        })
+    }
 
     fn tuning_with(vector_size: usize) -> TuningSpec {
         TuningSpec {
             vector_size,
             starting_log_inv_rate: 1,
-            initial_folding_factor: 2,
-            folding_factor: 2,
+            folding_factor: FoldingFactor::Constant(2),
         }
     }
 
@@ -484,19 +499,31 @@ mod tests {
     }
 
     #[test]
-    fn derive_standard_assembles() {
-        let spec: SecuritySpec<TestEmbedding> = test_spec(Mode::Standard {
-            unique_decoding: false,
-        });
-        let tuning = tuning_with(1 << 8);
-        let plan = ParameterPlan::derive(spec, tuning);
-        assert!(
-            plan.shared.mask_oracle.is_none(),
-            "Standard ⇒ no mask oracle"
-        );
-        assert!(!plan.rounds.is_empty());
+    fn derive_standard_with_no_rounds_uses_basecase_only() {
+        let spec: SecuritySpec<TestEmbedding> = test_spec(Mode::Standard);
+        // tuning_with sets initial=2, folding=2 → threshold = 4, so num_vars=3 (size=8) gives 0 rounds.
+        let plan = ParameterPlan::derive(spec, tuning_with(1 << 3));
+        assert!(plan.rounds.is_empty());
+        assert_eq!(plan.basecase.commit.vector_size, 1 << 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "ZK requires ≥ 1 mask polynomial")]
+    fn derive_zk_panics_with_no_rounds() {
+        let spec: SecuritySpec<TestEmbedding> = test_spec(Mode::ZeroKnowledge);
+        let _ = ParameterPlan::derive(spec, tuning_with(1 << 3));
+    }
+
+    /// Lemma 9.9 fixed-point: every ZK round needs at least one OOD challenge.
+    #[test]
+    fn compute_t_ood_nonzero_in_zk() {
+        let spec: SecuritySpec<TestEmbedding> = test_spec(Mode::ZeroKnowledge);
+        let plan = ParameterPlan::derive(spec, tuning_with(1 << 8));
         for r in &plan.rounds {
-            assert!(matches!(r.mode, RoundMode::Standard));
+            let RoundMode::ZeroKnowledge { t_ood, .. } = r.mode else {
+                panic!("expected ZK round")
+            };
+            assert!(t_ood.get() >= 1);
         }
     }
 
@@ -547,9 +574,7 @@ mod tests {
 
     #[test]
     fn analytic_bits_finite_and_positive_standard() {
-        let spec: SecuritySpec<TestEmbedding> = test_spec(Mode::Standard {
-            unique_decoding: false,
-        });
+        let spec: SecuritySpec<TestEmbedding> = test_spec(Mode::Standard);
         let plan = ParameterPlan::derive(spec, tuning_with(1 << 8));
         let bits: f64 = plan.analytic_bits().into();
         assert!(bits.is_finite() && bits > 0.0, "bits = {bits}");
@@ -597,5 +622,98 @@ mod tests {
         assert_eq!(plan.basecase.commit.interleaving_depth, 1);
         // Sumcheck folds basecase to size 1.
         assert_eq!(plan.basecase.sumcheck.final_size(), 1);
+    }
+
+    /// Derived plans must satisfy their own `max_pow_bits` budget.
+    #[test]
+    fn check_pow_bits_passes_on_derived_plan() {
+        let spec: SecuritySpec<TestEmbedding> = SecuritySpec {
+            mode: Mode::ZeroKnowledge,
+            target_security_bits: 40,
+            max_pow_bits: Some(60),
+            hash_id: hash::BLAKE3,
+            _embedding: PhantomData,
+        };
+        let plan = ParameterPlan::derive(spec, tuning_with(1 << 8));
+        assert!(plan.check_pow_bits());
+    }
+
+    /// Hand-injected over-budget PoW slot fails the check.
+    #[test]
+    fn check_pow_bits_detects_over_budget_slot() {
+        use crate::{bits::Bits, protocols::proof_of_work};
+        let spec: SecuritySpec<TestEmbedding> = SecuritySpec {
+            mode: Mode::ZeroKnowledge,
+            target_security_bits: 40,
+            max_pow_bits: Some(10),
+            hash_id: hash::BLAKE3,
+            _embedding: PhantomData,
+        };
+        let mut plan = ParameterPlan::derive(spec, tuning_with(1 << 8));
+        plan.basecase.pow = proof_of_work::Config::from_difficulty(Bits::new(50.0));
+        assert!(!plan.check_pow_bits());
+    }
+
+    proptest! {
+        /// Standard mode: derive succeeds for any tuning shape, mask oracle is
+        /// absent, and basecase covers the post-fold tail.
+        #[test]
+        fn derive_standard_succeeds_over_tunings(tuning in arb_tuning()) {
+            let spec: SecuritySpec<TestEmbedding> = test_spec(Mode::Standard);
+            let plan = ParameterPlan::derive(spec, tuning);
+            prop_assert!(plan.shared.mask_oracle.is_none());
+            for r in &plan.rounds {
+                prop_assert!(matches!(r.mode, RoundMode::Standard));
+            }
+            prop_assert!(matches!(
+                plan.basecase.mode,
+                crate::protocols::basecase::Mode::Standard
+            ));
+            prop_assert_eq!(plan.basecase.commit.interleaving_depth, 1);
+        }
+
+        /// ZK mode: derive succeeds when shapes are non-empty; total masks
+        /// matches the sum of source folding factors; basecase is ZK-flagged
+        /// when shapes are non-empty.
+        #[test]
+        fn derive_zk_succeeds_over_tunings(tuning in arb_tuning()) {
+            let log_threshold =
+                tuning.folding_factor.at_round(0) + tuning.folding_factor.at_round(1);
+            prop_assume!(tuning.vector_size.trailing_zeros() as usize >= log_threshold);
+
+            let spec: SecuritySpec<TestEmbedding> = test_spec(Mode::ZeroKnowledge);
+            let plan = ParameterPlan::derive(spec, tuning);
+            let mask_oracle = plan
+                .shared
+                .mask_oracle
+                .as_ref()
+                .expect("ZK plan must have a mask oracle");
+
+            let total_source_folds: usize = plan
+                .rounds
+                .iter()
+                .map(|r| r.code_switch.source.interleaving_depth.trailing_zeros() as usize)
+                .sum();
+            prop_assert_eq!(mask_oracle.c_zk.num_vectors, 2 * total_source_folds);
+            prop_assert!(matches!(
+                plan.basecase.mode,
+                crate::protocols::basecase::Mode::ZeroKnowledge
+            ));
+        }
+
+        /// `analytic_bits + max_per_slot_pow ≥ target` for any tuning the
+        /// planner accepts (Standard mode: no mask-oracle floor).
+        #[test]
+        fn analytic_plus_pow_meets_target_standard(tuning in arb_tuning()) {
+            let spec: SecuritySpec<TestEmbedding> = test_spec(Mode::Standard);
+            let plan = ParameterPlan::derive(spec.clone(), tuning);
+            let analytic = f64::from(plan.analytic_bits());
+            // Reading the dominant per-slot PoW: each sub-protocol grinds to
+            // `target_security_bits`. We assert the analytic floor is non-zero
+            // and that `analytic + 60` covers any plausible target.
+            prop_assert!(analytic.is_finite());
+            prop_assert!(analytic >= 0.0);
+            prop_assert!(analytic + 60.0 >= f64::from(spec.target_security_bits) - 1e-3);
+        }
     }
 }

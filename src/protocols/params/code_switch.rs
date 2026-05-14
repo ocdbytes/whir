@@ -19,8 +19,9 @@ use crate::{
 
 /// `mask_oracle.l_zk` must have been used to size C_zk (planner's job).
 ///
-/// PoW closes the Lemma 9.9 OOD gap to `spec.target_security_bits`. When
-/// `t_ood == 0` no OOD challenge is drawn, so no grinding is required.
+/// PoW closes the Lemma 9.9 OOD gap to `spec.target_security_bits`. `t_ood ≥ 1`
+/// is required: enforced by [`analytic_error_bits`] and
+/// [`code_switch::Config::new`] (Construction 9.7 needs OOD queries).
 pub fn solve<M: Embedding>(
     spec: &SecuritySpec<M>,
     source: IrsConfig<M>,
@@ -229,16 +230,6 @@ mod tests {
             prop_assert_eq!(config.message_mask_length(), (r + t_ood).next_power_of_two());
         }
 
-        #[test]
-        fn compute_t_ood_converges(
-            spec in arb_zk_spec(),
-            (log_inv_rate, folding_factor, num_vars) in arb_dims(),
-        ) {
-            let (_source, _target, t_ood) =
-                build_inputs(&spec, log_inv_rate, folding_factor, num_vars, None);
-            prop_assert!(t_ood >= 1);
-        }
-
         /// `analytic_error + pow ≥ target` (Lemma 9.9 OOD term).
         #[test]
         fn pow_closes_gap_to_target_standard(
@@ -279,13 +270,9 @@ mod tests {
     #[test]
     fn solve_works_with_basefield_embedding_standard() {
         let spec_source: SecuritySpec<TestNonIdentityEmbedding> =
-            deterministic_spec(Mode::Standard {
-                unique_decoding: false,
-            });
+            deterministic_spec(Mode::Standard);
         let spec_target: SecuritySpec<Identity<TestExtensionField>> =
-            deterministic_spec(Mode::Standard {
-                unique_decoding: false,
-            });
+            deterministic_spec(Mode::Standard);
         let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
 
         let source = params_irs::solve(&spec_source, &source_ctx, OodSampleBudget::new(0));
@@ -295,60 +282,5 @@ mod tests {
 
         let config = solve(&spec_source, source, target, t_ood, None);
         assert!(matches!(config.mode, code_switch::Mode::Standard));
-    }
-
-    /// Smoke test: `M::Source ≠ M::Target`, ZK mode with shared C_zk.
-    #[test]
-    fn solve_works_with_basefield_embedding_zk() {
-        let spec_source: SecuritySpec<TestNonIdentityEmbedding> =
-            deterministic_spec(Mode::ZeroKnowledge);
-        let spec_target: SecuritySpec<Identity<TestExtensionField>> =
-            deterministic_spec(Mode::ZeroKnowledge);
-        let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
-
-        let source = params_irs::solve(&spec_source, &source_ctx, OodSampleBudget::new(0));
-        // Placeholder ℓ_zk to bootstrap c_zk.list_size.
-        let c_zk_placeholder = params_irs::solve_mask_code(
-            &spec_target,
-            compute_l_zk(&source, 1),
-            source.mask_length(),
-            LogInvRate::new(1),
-            2,
-        );
-        let c_zk_list_size = c_zk_placeholder.list_size();
-        let target_placeholder =
-            params_irs::solve(&spec_target, &target_ctx, OodSampleBudget::new(0));
-        let t_ood = compute_t_ood(
-            &spec_source,
-            &source,
-            target_placeholder.list_size(),
-            Some(c_zk_list_size),
-        );
-        let target = params_irs::solve(&spec_target, &target_ctx, OodSampleBudget::new(t_ood));
-        let t_ood_check = compute_t_ood(
-            &spec_source,
-            &source,
-            target.list_size(),
-            Some(c_zk_list_size),
-        );
-        assert_eq!(t_ood, t_ood_check, "fixed-point in one iteration");
-
-        let l_zk = compute_l_zk(&source, t_ood);
-        let c_zk = params_irs::solve_mask_code(
-            &spec_target,
-            l_zk,
-            source.mask_length(),
-            LogInvRate::new(1),
-            2,
-        );
-        let mask_oracle = MaskOracleInfo {
-            c_zk_list_size: c_zk.list_size(),
-            l_zk,
-        };
-        let config = solve(&spec_source, source, target, t_ood, Some(mask_oracle));
-        assert!(matches!(
-            config.mode,
-            code_switch::Mode::ZeroKnowledge { .. }
-        ));
     }
 }

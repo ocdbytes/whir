@@ -694,7 +694,11 @@ pub(crate) mod tests {
             in_domain_evals.matrix.len(),
             in_domain_evals.points.len() * config.num_vectors * config.interleaving_depth
         );
-        if config.num_vectors > 0 {
+        // Value-correctness assertion only valid in non-ZK mode: in ZK the
+        // encoding is `Enc(f, r) = f(x) + x^ℓ · r(x)`, so opened values
+        // include the mask term. The lifecycle round-trip (open/verify
+        // agreement below) covers both modes.
+        if config.num_vectors > 0 && config.mask_length() == 0 {
             let base = config.vector_size / config.interleaving_depth;
             for (point, evals) in zip_strict(
                 &in_domain_evals.points,
@@ -736,13 +740,13 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         let size = select(valid_sizes);
 
-        let config = (0_usize..=3, size, 1_usize..=10).prop_flat_map(
-            |(num_vectors, size, interleaving_depth)| {
+        let config = (0_usize..=3, size, 1_usize..=10, 0_usize..=8).prop_flat_map(
+            |(num_vectors, size, interleaving_depth, mask_length)| {
                 Config::arbitrary(
                     embedding.clone(),
                     num_vectors,
                     size * interleaving_depth,
-                    0,
+                    mask_length,
                     interleaving_depth,
                 )
             },

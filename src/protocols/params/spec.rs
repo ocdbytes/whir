@@ -32,13 +32,50 @@ impl<M: Embedding> SecuritySpec<M> {
     }
 }
 
+/// Per-round folding strategy. `at_round(i)` returns the factor for round `i`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldingFactor {
+    /// Same folding factor across all rounds.
+    Constant(usize),
+    /// `at_round(0) = initial`; `at_round(i) = rest` for `i ≥ 1`.
+    ConstantFromSecondRound { initial: usize, rest: usize },
+}
+
+impl FoldingFactor {
+    pub const fn at_round(&self, round: usize) -> usize {
+        match self {
+            Self::Constant(f) => *f,
+            Self::ConstantFromSecondRound { initial, rest } => {
+                if round == 0 {
+                    *initial
+                } else {
+                    *rest
+                }
+            }
+        }
+    }
+
+    /// Smallest factor across rounds; used by `TuningSpec` validation.
+    pub const fn min(&self) -> usize {
+        match self {
+            Self::Constant(f) => *f,
+            Self::ConstantFromSecondRound { initial, rest } => {
+                if *initial < *rest {
+                    *initial
+                } else {
+                    *rest
+                }
+            }
+        }
+    }
+}
+
 /// Proof-size / prover-time / soundness-margin tradeoffs.
 #[derive(Debug, Clone)]
 pub struct TuningSpec {
     pub vector_size: usize,
     pub starting_log_inv_rate: u32,
-    pub initial_folding_factor: usize,
-    pub folding_factor: usize,
+    pub folding_factor: FoldingFactor,
 }
 
 /// Per-round context handed to a sub-protocol builder.
@@ -50,24 +87,13 @@ pub struct RoundContext {
     pub folding_factor: u32,
 }
 
+/// Both variants run in the Johnson regime — Construction 9.7's OOD-query
+/// requirement makes unique-decoding incompatible with code-switch, so it is
+/// not representable here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    Standard {
-        unique_decoding: bool,
-    },
-    /// Always Johnson regime — Construction 9.7 needs OOD queries.
+    Standard,
     ZeroKnowledge,
-}
-
-impl Mode {
-    pub const fn unique_decoding(&self) -> bool {
-        matches!(
-            self,
-            Self::Standard {
-                unique_decoding: true
-            }
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

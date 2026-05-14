@@ -19,7 +19,7 @@ use crate::{
             spec::{MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
             sumcheck as sumcheck_solver,
         },
-        sumcheck,
+        proof_of_work, sumcheck,
     },
 };
 
@@ -30,6 +30,30 @@ pub struct ParameterPlan<M: Embedding> {
     pub shared: SharedPlan<M::Target>,
     pub rounds: Vec<RoundPlan<M>>,
     pub basecase: basecase::Config<M::Target>,
+}
+
+impl<M: Embedding> ParameterPlan<M> {
+    /// Returns `true` iff every PoW slot's difficulty fits within
+    /// `security.max_pow_bits`. Cheap pre-flight check that fails before the
+    /// 60-bit cap assertion inside `proof_of_work::threshold`.
+    pub fn check_pow_bits(&self) -> bool {
+        let max = Bits::new(f64::from(self.security.max_pow_bits.unwrap_or(0)));
+        let within = |pow: &proof_of_work::Config| pow.difficulty() <= max;
+
+        if !self
+            .rounds
+            .iter()
+            .all(|r| within(&r.sumcheck.round_pow) && within(&r.code_switch.pow))
+        {
+            return false;
+        }
+        if let Some(mo) = &self.shared.mask_oracle {
+            if !within(&mo.mask_proximity.pow) {
+                return false;
+            }
+        }
+        within(&self.basecase.sumcheck.round_pow) && within(&self.basecase.pow)
+    }
 }
 
 impl<M: Embedding> SoundnessBounded for ParameterPlan<M> {

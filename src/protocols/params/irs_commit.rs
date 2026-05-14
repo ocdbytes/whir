@@ -21,11 +21,12 @@ pub fn solve<M: Embedding + Default>(
     let security_target = spec.protocol_security_target_bits();
     let rate = 2_f64.powf(-f64::from(ctx.log_inv_rate));
     let interleaving_depth = 1_usize << ctx.folding_factor;
-    let unique_decoding = spec.mode.unique_decoding();
+    // Construction 9.7 is Johnson-only — `Mode` cannot express unique-decoding.
+    let unique_decoding = false;
     let message_length = ctx.vector_size / interleaving_depth;
 
     let mode = match spec.mode {
-        Mode::Standard { .. } => IrsMode::Standard,
+        Mode::Standard => IrsMode::Standard,
         Mode::ZeroKnowledge => {
             let min_mask = num_in_domain_queries(unique_decoding, security_target, rate)
                 .checked_add(out_domain_samples.get())
@@ -98,27 +99,19 @@ pub fn solve_mask_code<M: Embedding + Default>(
 
 #[cfg(test)]
 mod tests {
-    use ark_std::rand::{rngs::StdRng, SeedableRng};
     use proptest::prelude::*;
 
     use super::*;
-    use crate::{
-        algebra::random_vector,
-        protocols::params::test_utils::{
-            arb_round_ctx, arb_spec, arb_zk_spec, deterministic_spec, TestEmbedding,
-        },
-        transcript::{DomainSeparator, ProverState, VerifierState},
+    use crate::protocols::params::test_utils::{
+        arb_round_ctx, arb_spec, arb_zk_spec, deterministic_spec, TestEmbedding,
     };
 
     type M = TestEmbedding;
-    type F = <M as Embedding>::Source;
 
     #[test]
     #[should_panic(expected = "C_zk only exists in ZK mode")]
     fn solve_mask_code_rejects_standard_spec() {
-        let spec: SecuritySpec<M> = deterministic_spec(Mode::Standard {
-            unique_decoding: false,
-        });
+        let spec: SecuritySpec<M> = deterministic_spec(Mode::Standard);
         let _ = solve_mask_code(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 2);
     }
 
@@ -147,29 +140,8 @@ mod tests {
         arb_zk_spec(80..=128)
     }
 
-    /// Varies `unique_decoding` to exercise both regimes.
     fn arb_standard_spec() -> impl Strategy<Value = SecuritySpec<M>> {
-        any::<bool>()
-            .prop_flat_map(|unique_decoding| arb_spec(Mode::Standard { unique_decoding }, 80..=128))
-    }
-
-    fn commit_open_verify(config: &irs_commit::Config<M>, seed: u64) -> irs_commit::Witness<F> {
-        let ds = DomainSeparator::protocol(config)
-            .session(&format!("Test at {}:{}", file!(), line!()))
-            .instance(&seed);
-        let mut rng = StdRng::seed_from_u64(seed);
-        let vector = random_vector::<F>(&mut rng, config.vector_size);
-
-        let mut prover_state = ProverState::new_std(&ds);
-        let witness = config.commit(&mut prover_state, &[&vector]);
-        let _ = config.open(&mut prover_state, &[&witness]);
-        let proof = prover_state.proof();
-
-        let mut verifier_state = VerifierState::new_std(&ds, &proof);
-        let commitment = config.receive_commitment(&mut verifier_state).unwrap();
-        let _ = config.verify(&mut verifier_state, &[&commitment]).unwrap();
-        verifier_state.check_eof().unwrap();
-        witness
+        arb_spec(Mode::Standard, 80..=128)
     }
 
     proptest! {
@@ -196,31 +168,6 @@ mod tests {
         ) {
             let config = solve(&spec, &ctx, OodSampleBudget::new(out_domain));
             prop_assert_eq!(config.mask_length(), 0);
-        }
-
-        #[test]
-        fn zk_round_trips(
-            spec in arb_zk_spec_default(),
-            ctx in arb_round_ctx(),
-            out_domain in 0usize..8,
-            seed: u64,
-        ) {
-            let config = solve(&spec, &ctx, OodSampleBudget::new(out_domain));
-            prop_assert!(config.mask_length() > 0);
-            let witness = commit_open_verify(&config, seed);
-            prop_assert_eq!(witness.masks.len(), config.mask_length() * config.num_messages());
-        }
-
-        #[test]
-        fn standard_round_trips(
-            spec in arb_standard_spec(),
-            ctx in arb_round_ctx(),
-            seed: u64,
-        ) {
-            let config = solve(&spec, &ctx, OodSampleBudget::new(0));
-            prop_assert_eq!(config.mask_length(), 0);
-            let witness = commit_open_verify(&config, seed);
-            prop_assert!(witness.masks.is_empty());
         }
     }
 }

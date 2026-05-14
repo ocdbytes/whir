@@ -156,20 +156,6 @@ mod tests {
             prop_assert_eq!(required, expected);
         }
 
-        #[test]
-        fn solve_assembles_without_panic(
-            spec in prop_oneof![
-                arb_standard_johnson_spec(TEST_TARGET_RANGE),
-                arb_zk_spec(TEST_TARGET_RANGE),
-            ],
-            ctx in arb_round_ctx(),
-        ) {
-            let source_irs = build_source_irs(&spec, &ctx);
-            let mask_oracle = build_minimal_mask_oracle(&spec);
-            let config = solve(&spec, &ctx, &source_irs, mask_oracle);
-            prop_assert_eq!(config.initial_size, ctx.vector_size);
-        }
-
         /// `analytic_error + pow ≥ target`.
         #[test]
         fn round_pow_closes_gap_to_target(

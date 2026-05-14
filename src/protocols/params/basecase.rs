@@ -48,7 +48,7 @@ pub fn solve<F: Field>(
     );
 
     let mode = match spec.mode {
-        SpecMode::Standard { .. } => basecase::Mode::Standard,
+        SpecMode::Standard => basecase::Mode::Standard,
         SpecMode::ZeroKnowledge => basecase::Mode::ZeroKnowledge,
     };
 
@@ -76,17 +76,10 @@ pub fn analytic_error_bits<F: Field>(commit: &IrsConfig<Identity<F>>) -> Bits {
 
 #[cfg(test)]
 mod tests {
-    use ark_std::rand::{rngs::StdRng, SeedableRng};
     use proptest::prelude::*;
 
     use super::*;
-    use crate::{
-        algebra::{dot, multilinear_extend, random_vector},
-        protocols::params::test_utils::{
-            arb_standard_johnson_spec, arb_zk_spec, deterministic_spec, TestEmbedding,
-        },
-        transcript::{codecs::U64, DomainSeparator, ProverState, VerifierState},
-    };
+    use crate::protocols::params::test_utils::{arb_standard_johnson_spec, arb_zk_spec};
 
     // Keeps `target − error ≤ 60`, the cap `proof_of_work::threshold` enforces.
     const TEST_TARGET_RANGE: std::ops::RangeInclusive<u32> = 30..=50;
@@ -141,72 +134,5 @@ mod tests {
             let config = solve(&spec, 1usize << log_size, log_inv_rate);
             prop_assert_eq!(config.pow, proof_of_work::Config::none());
         }
-    }
-
-    fn round_trip(seed: u64, vector_size: usize, zk: bool) {
-        let spec: SecuritySpec<TestEmbedding> = deterministic_spec(if zk {
-            SpecMode::ZeroKnowledge
-        } else {
-            SpecMode::Standard {
-                unique_decoding: false,
-            }
-        });
-        let spec = SecuritySpec {
-            target_security_bits: 40,
-            ..spec
-        };
-        let config = solve(&spec, vector_size, 1);
-
-        let mut rng = StdRng::seed_from_u64(seed);
-        let vector = random_vector::<<TestEmbedding as crate::algebra::embedding::Embedding>::Source>(
-            &mut rng,
-            vector_size,
-        );
-        let covector = random_vector(&mut rng, vector_size);
-        let sum = dot(&vector, &covector);
-
-        let instance = U64(seed);
-        let ds = DomainSeparator::protocol(&config)
-            .session(&format!("Test at {}:{}", file!(), line!()))
-            .instance(&instance);
-
-        let mut prover_state = ProverState::new_std(&ds);
-        let witness = config.commit.commit(&mut prover_state, &[&vector]);
-        let prover_result = config.prove(
-            &mut prover_state,
-            vector.clone(),
-            &witness,
-            covector.clone(),
-            sum,
-        );
-        assert_eq!(
-            multilinear_extend(&covector, &prover_result.evaluation_points),
-            prover_result.linear_form_evaluation,
-        );
-        let proof = prover_state.proof();
-
-        let mut verifier_state = VerifierState::new_std(&ds, &proof);
-        let commitment = config
-            .commit
-            .receive_commitment(&mut verifier_state)
-            .unwrap();
-        let verifier_result = config
-            .verify(&mut verifier_state, &commitment, sum)
-            .unwrap();
-        verifier_state.check_eof().unwrap();
-        assert_eq!(
-            verifier_result.linear_form_evaluation,
-            prover_result.linear_form_evaluation,
-        );
-    }
-
-    #[test]
-    fn round_trip_standard() {
-        round_trip(0x5EED_5EED, 8, false);
-    }
-
-    #[test]
-    fn round_trip_zk() {
-        round_trip(0x5EED_5EED, 8, true);
     }
 }

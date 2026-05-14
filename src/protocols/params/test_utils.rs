@@ -59,12 +59,7 @@ pub fn arb_zk_spec(
 pub fn arb_standard_johnson_spec(
     target_range: RangeInclusive<u32>,
 ) -> impl Strategy<Value = SecuritySpec<TestEmbedding>> {
-    arb_spec(
-        Mode::Standard {
-            unique_decoding: false,
-        },
-        target_range,
-    )
+    arb_spec(Mode::Standard, target_range)
 }
 
 pub fn arb_round_ctx() -> impl Strategy<Value = RoundContext> {
