@@ -5,16 +5,11 @@ use std::{f64::consts::LOG2_10, ops::Neg};
 use crate::{
     algebra::{embedding::Embedding, fields::FieldWithSize},
     bits::Bits,
-    protocols::irs_commit,
+    protocols::irs_commit::Config as IrsConfig,
 };
 
 /// Analytic soundness bits (excluding PoW) delivered by a protocol-level unit.
-///
-/// Implemented on [`RoundPlan`](super::plan::RoundPlan),
-/// [`MaskOraclePlan`](super::plan::MaskOraclePlan), and
-/// [`ParameterPlan`](super::plan::ParameterPlan). Sub-protocol `Config` types
-/// lack the cross-protocol context to self-report.
-// TODO(phase-6): wire `analytic + pow >= target` so this is called outside tests.
+/// Sub-protocol `Config` types lack the cross-protocol context to self-report.
 #[allow(dead_code)]
 pub trait SoundnessBounded {
     fn analytic_bits(&self) -> Bits;
@@ -30,7 +25,7 @@ pub struct CodeParams {
 }
 
 impl CodeParams {
-    pub fn from_irs<M: Embedding>(irs: &irs_commit::Config<M>) -> Self {
+    pub fn from_irs<M: Embedding>(irs: &IrsConfig<M>) -> Self {
         Self {
             log_inv_rate: irs.rate().log2().neg(),
             johnson_slack: irs.johnson_slack.into_inner(),
@@ -40,7 +35,8 @@ impl CodeParams {
     }
 }
 
-fn rate(log_inv_rate: f64) -> f64 {
+/// `ρ = 2^-log_inv_rate`. Centralized so the rate formula lives in one place.
+pub(super) fn rate(log_inv_rate: f64) -> f64 {
     2_f64.powf(-log_inv_rate)
 }
 
@@ -56,6 +52,14 @@ pub fn list_size_log2(log_inv_rate: f64, johnson_slack: f64) -> f64 {
         // Johnson: |Λ| = 1 / (2 η √ρ).
         -1.0 - johnson_slack.log2() + 0.5 * log_inv_rate
     }
+}
+
+/// `|Λ(C)|` for a Johnson-regime code derived purely from the rate, using the
+/// canonical `η = √ρ / 20` slack.
+pub fn johnson_list_size(log_inv_rate: f64) -> f64 {
+    let rate = 2_f64.powf(-log_inv_rate);
+    let johnson_slack = rate.sqrt() / 20.0;
+    2_f64.powf(list_size_log2(log_inv_rate, johnson_slack))
 }
 
 /// log2 ε_mca(C, δ).
@@ -92,4 +96,139 @@ pub fn ood_per_sample_log2(message_length: usize, field_bits: f64) -> f64 {
 #[allow(dead_code)]
 pub fn pow_bits_to_close_gap(target_security_bits: f64, achieved_security_bits: f64) -> Bits {
     Bits::new((target_security_bits - achieved_security_bits).max(0.0))
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::*;
+
+    const EPS: f64 = 1e-9;
+
+    /// Johnson list size: `|Λ| = 1 / (2η√ρ)`, log₂ form. Hand-evaluated at
+    /// `log_inv_rate = 2`, `η = 0.1`: `−1 − log₂(0.1) + 1 ≈ 3.3219`.
+    #[test]
+    fn list_size_log2_johnson_formula() {
+        let got = list_size_log2(2.0, 0.1);
+        let expected = -1.0 - 0.1_f64.log2() + 0.5 * 2.0;
+        assert!((got - expected).abs() < EPS, "got {got} vs {expected}");
+    }
+
+    /// Unique-decoding regime (`η = 0`) gives `|Λ| = 1`, i.e. log = 0.
+    #[test]
+    fn list_size_log2_unique_decoding_is_zero() {
+        assert_eq!(list_size_log2(2.0, 0.0), 0.0);
+    }
+
+    /// `η = √ρ / 20` substituted into `|Λ| = 1/(2η√ρ)` simplifies to `10/ρ`.
+    /// So `johnson_list_size(b) = 10 · 2^b`.
+    #[test]
+    fn johnson_list_size_closed_form() {
+        for b in [1.0, 2.0, 3.0, 5.0] {
+            let got = johnson_list_size(b);
+            let expected = 10.0 * 2_f64.powf(b);
+            assert!(
+                (got - expected).abs() / expected < 1e-12,
+                "log_inv_rate={b}: got {got} vs {expected}",
+            );
+        }
+    }
+
+    /// `johnson_list_size(b) = 2^list_size_log2(b, √ρ/20)` must match `Config::list_size`
+    /// once a config is built at the same rate. Keeps the bounds helper in sync with
+    /// `irs_commit::Config::new`'s `johnson_slack = √ρ / 20` policy.
+    #[test]
+    fn johnson_list_size_matches_config_list_size() {
+        use crate::{
+            algebra::{embedding::Identity, fields::Field64},
+            hash,
+            protocols::irs_commit::{Config, IrsMode},
+        };
+        let log_inv_rate = 2;
+        let config: Config<Identity<Field64>> = Config::new(
+            80.0,
+            false,
+            hash::BLAKE3,
+            2,
+            8,
+            1,
+            2_f64.powf(-f64::from(log_inv_rate)),
+            IrsMode::Standard,
+        );
+        let got = johnson_list_size(f64::from(log_inv_rate));
+        let expected = config.list_size();
+        assert!(
+            (got - expected).abs() / expected < 1e-12,
+            "bounds helper ({got}) vs Config::list_size ({expected})",
+        );
+    }
+
+    /// OOD per-sample Schwartz–Zippel: `log₂((k−1) / |F|) = log₂(k−1) − field_bits`.
+    #[test]
+    fn ood_per_sample_log2_formula() {
+        let got = ood_per_sample_log2(129, 64.0);
+        let expected = 128_f64.log2() - 64.0;
+        assert!((got - expected).abs() < EPS, "got {got} vs {expected}");
+        // (k−1)/|F| < 1 for sane parameters ⇒ log is negative.
+        assert!(got < 0.0);
+    }
+
+    /// `1 − δ` in unique-decoding mode: midpoint of 1 and ρ.
+    #[test]
+    fn one_minus_distance_log2_unique() {
+        let log_inv_rate = 2.0;
+        let got = one_minus_distance_log2(log_inv_rate, 0.0);
+        let rho = 2_f64.powf(-log_inv_rate);
+        let expected = f64::midpoint(1.0, rho).log2();
+        assert!((got - expected).abs() < EPS, "got {got} vs {expected}");
+    }
+
+    /// `1 − δ` in Johnson regime: `√ρ + η`.
+    #[test]
+    fn one_minus_distance_log2_johnson() {
+        let log_inv_rate = 2.0;
+        let eta = 0.1;
+        let got = one_minus_distance_log2(log_inv_rate, eta);
+        let rho = 2_f64.powf(-log_inv_rate);
+        let expected = (rho.sqrt() + eta).log2();
+        assert!((got - expected).abs() < EPS, "got {got} vs {expected}");
+    }
+
+    /// MCA error, unique-decoding branch: `log k + log_inv_rate − field_bits`.
+    #[test]
+    fn eps_mca_log2_unique_decoding_formula() {
+        let p = CodeParams {
+            log_inv_rate: 2.0,
+            johnson_slack: 0.0,
+            message_length: 16,
+            field_bits: 64.0,
+        };
+        let got = eps_mca_log2(&p);
+        let expected = 16_f64.log2() + 2.0 - 64.0;
+        assert!((got - expected).abs() < EPS, "got {got} vs {expected}");
+    }
+
+    /// MCA error, Johnson branch: `7·log₂10 + 3.5·log_inv_rate + 2·log k − field_bits`.
+    #[test]
+    fn eps_mca_log2_johnson_formula() {
+        let p = CodeParams {
+            log_inv_rate: 2.0,
+            // Stay within the debug assertion's slack range: johnson_slack.log2() ≥
+            // -(0.5·log_inv_rate + log₂10 + 1) ≈ -5.32.
+            johnson_slack: 0.1,
+            message_length: 16,
+            field_bits: 64.0,
+        };
+        let got = eps_mca_log2(&p);
+        let expected = 7.0 * LOG2_10 + 3.5 * 2.0 + 2.0 * 16_f64.log2() - 64.0;
+        assert!((got - expected).abs() < EPS, "got {got} vs {expected}");
+    }
+
+    /// `pow_bits_to_close_gap` clamps negative gaps to zero (no anti-grind).
+    #[test]
+    fn pow_bits_to_close_gap_saturates_at_zero() {
+        assert_eq!(f64::from(pow_bits_to_close_gap(100.0, 120.0)), 0.0);
+        assert_eq!(f64::from(pow_bits_to_close_gap(100.0, 100.0)), 0.0);
+        assert_eq!(f64::from(pow_bits_to_close_gap(100.0, 60.0)), 40.0);
+    }
 }

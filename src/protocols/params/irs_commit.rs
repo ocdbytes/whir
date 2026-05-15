@@ -6,20 +6,23 @@ use std::num::NonZeroUsize;
 use crate::{
     algebra::embedding::Embedding,
     protocols::{
-        irs_commit::{self, num_in_domain_queries, IrsMode},
-        params::spec::{
-            LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec,
+        irs_commit::{num_in_domain_queries, Config as IrsConfig, IrsMode},
+        params::{
+            bounds::rate,
+            spec::{
+                LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec,
+            },
         },
     },
 };
 
 pub fn solve<M: Embedding + Default>(
-    spec: &SecuritySpec<M>,
+    spec: &SecuritySpec,
     ctx: &RoundContext,
     out_domain_samples: OodSampleBudget,
-) -> irs_commit::Config<M> {
+) -> IrsConfig<M> {
     let security_target = spec.protocol_security_target_bits();
-    let rate = 2_f64.powf(-f64::from(ctx.log_inv_rate));
+    let rate = rate(f64::from(ctx.log_inv_rate));
     let interleaving_depth = 1_usize << ctx.folding_factor;
     // Construction 9.7 is Johnson-only — `Mode` cannot express unique-decoding.
     let unique_decoding = false;
@@ -31,19 +34,19 @@ pub fn solve<M: Embedding + Default>(
             let min_mask = num_in_domain_queries(unique_decoding, security_target, rate)
                 .checked_add(out_domain_samples.get())
                 .expect("usize overflow");
-            // Lemma 9.5 is `≥`, so pow2 padding is safe.
-            let mask_length = message_length
+            // Lemma 9.5: mask covers in-domain + OOD queries.
+            // Pad masked length to a pow2 for NTT (the lemma is `≥`, so padding is safe).
+            let masked_message_length = message_length
                 .checked_add(min_mask.get())
-                .expect("usize overflow")
-                .next_power_of_two()
-                .checked_sub(message_length)
-                .and_then(NonZeroUsize::new)
-                .expect("mask_length non-zero in ZK");
+                .expect("masked_message_length overflow")
+                .next_power_of_two();
+            let mask_length = NonZeroUsize::new(masked_message_length - message_length)
+                .expect("min_mask ≥ 1 (NonZeroUsize) ⇒ next_pow2(ℓ + min_mask) > ℓ");
             IrsMode::ZeroKnowledge { mask_length }
         }
     };
 
-    irs_commit::Config::new(
+    IrsConfig::new(
         security_target,
         unique_decoding,
         spec.hash_id,
@@ -61,12 +64,12 @@ pub fn solve<M: Embedding + Default>(
 /// - `source_mask_length`: `r` from Theorem 9.6.
 /// - `num_vectors`: `2 * num_masks` (Construction 7.2: originals + fresh).
 pub fn solve_mask_code<M: Embedding + Default>(
-    spec: &SecuritySpec<M>,
+    spec: &SecuritySpec,
     l_zk: MaskCodeMessageLen,
     source_mask_length: usize,
     log_inv_rate: LogInvRate,
     num_vectors: usize,
-) -> irs_commit::Config<M> {
+) -> IrsConfig<M> {
     let l_zk = l_zk.get();
     assert!(
         matches!(spec.mode, Mode::ZeroKnowledge),
@@ -83,9 +86,9 @@ pub fn solve_mask_code<M: Embedding + Default>(
     );
 
     let security_target = spec.protocol_security_target_bits();
-    let rate = 2_f64.powf(-f64::from(log_inv_rate.get()));
+    let rate = rate(f64::from(log_inv_rate.get()));
 
-    irs_commit::Config::new(
+    IrsConfig::new(
         security_target,
         false, // ZK ⇒ Johnson regime
         spec.hash_id,
@@ -104,6 +107,7 @@ mod tests {
     use super::*;
     use crate::protocols::params::test_utils::{
         arb_round_ctx, arb_spec, arb_zk_spec, deterministic_spec, TestEmbedding,
+        TestNonIdentityEmbedding,
     };
 
     type M = TestEmbedding;
@@ -111,36 +115,36 @@ mod tests {
     #[test]
     #[should_panic(expected = "C_zk only exists in ZK mode")]
     fn solve_mask_code_rejects_standard_spec() {
-        let spec: SecuritySpec<M> = deterministic_spec(Mode::Standard);
-        let _ = solve_mask_code(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 2);
+        let spec: SecuritySpec = deterministic_spec(Mode::Standard);
+        let _ = solve_mask_code::<M>(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 2);
     }
 
     #[test]
     #[should_panic(expected = "must be a power of 2")]
     fn solve_mask_code_rejects_non_pow2_l_zk() {
-        let spec: SecuritySpec<M> = deterministic_spec(Mode::ZeroKnowledge);
-        let _ = solve_mask_code(&spec, MaskCodeMessageLen::new(3), 0, LogInvRate::new(1), 2);
+        let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
+        let _ = solve_mask_code::<M>(&spec, MaskCodeMessageLen::new(3), 0, LogInvRate::new(1), 2);
     }
 
     #[test]
     #[should_panic(expected = "Theorem 9.6")]
     fn solve_mask_code_rejects_l_zk_below_source_mask_length() {
-        let spec: SecuritySpec<M> = deterministic_spec(Mode::ZeroKnowledge);
-        let _ = solve_mask_code(&spec, MaskCodeMessageLen::new(2), 4, LogInvRate::new(1), 2);
+        let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
+        let _ = solve_mask_code::<M>(&spec, MaskCodeMessageLen::new(2), 4, LogInvRate::new(1), 2);
     }
 
     #[test]
     #[should_panic(expected = "must be even")]
     fn solve_mask_code_rejects_odd_num_vectors() {
-        let spec: SecuritySpec<M> = deterministic_spec(Mode::ZeroKnowledge);
-        let _ = solve_mask_code(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 3);
+        let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
+        let _ = solve_mask_code::<M>(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 3);
     }
 
-    fn arb_zk_spec_default() -> impl Strategy<Value = SecuritySpec<M>> {
+    fn arb_zk_spec_default() -> impl Strategy<Value = SecuritySpec> {
         arb_zk_spec(80..=128)
     }
 
-    fn arb_standard_spec() -> impl Strategy<Value = SecuritySpec<M>> {
+    fn arb_standard_spec() -> impl Strategy<Value = SecuritySpec> {
         arb_spec(Mode::Standard, 80..=128)
     }
 
@@ -152,7 +156,7 @@ mod tests {
             ctx in arb_round_ctx(),
             out_domain in 0usize..16,
         ) {
-            let config = solve(&spec, &ctx, OodSampleBudget::new(out_domain));
+            let config = solve::<M>(&spec, &ctx, OodSampleBudget::new(out_domain));
             prop_assert!(
                 config.mask_length() >= config.in_domain_samples + out_domain,
                 "mask {} < in_domain {} + out_domain {}",
@@ -166,8 +170,25 @@ mod tests {
             ctx in arb_round_ctx(),
             out_domain in 0usize..8,
         ) {
-            let config = solve(&spec, &ctx, OodSampleBudget::new(out_domain));
+            let config = solve::<M>(&spec, &ctx, OodSampleBudget::new(out_domain));
             prop_assert_eq!(config.mask_length(), 0);
         }
+    }
+
+    /// Smoke test: `M::Source ≠ M::Target`, ZK path. Mask sizing depends only
+    /// on the target field (via `field_size_bits`), but the generic embedding
+    /// still flows through the Config and must compile + execute.
+    #[test]
+    fn solve_works_with_basefield_embedding_zk() {
+        let spec = deterministic_spec(Mode::ZeroKnowledge);
+        let ctx = RoundContext {
+            round_index: 0,
+            vector_size: 64,
+            log_inv_rate: 1,
+            folding_factor: 2,
+        };
+        let config: IrsConfig<TestNonIdentityEmbedding> =
+            solve(&spec, &ctx, OodSampleBudget::new(2));
+        assert!(config.mask_length() > 0);
     }
 }

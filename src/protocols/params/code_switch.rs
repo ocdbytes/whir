@@ -10,10 +10,10 @@ use crate::{
     },
     bits::Bits,
     protocols::{
-        code_switch,
+        code_switch::{self, Config as CodeSwitchConfig},
         irs_commit::Config as IrsConfig,
-        params::{plan::MaskOracleInfo, spec::SecuritySpec},
-        proof_of_work,
+        params::{protocol_config::MaskOracleInfo, spec::SecuritySpec},
+        proof_of_work::Config as PowConfig,
     },
 };
 
@@ -23,12 +23,12 @@ use crate::{
 /// is required: enforced by [`analytic_error_bits`] and
 /// [`code_switch::Config::new`] (Construction 9.7 needs OOD queries).
 pub fn solve<M: Embedding>(
-    spec: &SecuritySpec<M>,
+    spec: &SecuritySpec,
     source: IrsConfig<M>,
     target: IrsConfig<Identity<M::Target>>,
     t_ood: usize,
     mask_oracle: Option<MaskOracleInfo>,
-) -> code_switch::Config<M> {
+) -> CodeSwitchConfig<M> {
     let mode = mask_oracle.map_or(code_switch::Mode::Standard, |info| {
         let l_zk = info.l_zk.get();
         assert!(
@@ -44,17 +44,19 @@ pub fn solve<M: Embedding>(
 
     let target_bits = Bits::new(f64::from(spec.target_security_bits));
     let analytic = analytic_error_bits(&source, &target, t_ood, mask_oracle);
-    let pow = proof_of_work::Config::grind_to(target_bits, analytic, spec.hash_id);
+    let pow = PowConfig::grind_to(target_bits, analytic, spec.hash_id);
 
-    code_switch::Config::new(source, target, t_ood, mode, pow)
+    CodeSwitchConfig::new(source, target, t_ood, mode, pow)
 }
 
-/// Dominant soundness gap that PoW must close: `min(OOD term, combination term)`.
+/// Per-round code-switch soundness in bits: `min(ood_term, combination_term)`.
 ///
-/// - OOD (Lemma 9.9, term 1): `t_ood · (log|F| − log(degree − 1)) − log(L choose 2)`,
-///   with `L = target × c_zk` (ZK) or `target` (Standard), and
-///   `degree = ℓ + r + t_ood` (ZK) or `ℓ` (Standard).
-/// - Combination (Bound 1, γ-RLC): `log|F| − log(t_ood + t·ι) − log|Λ(target)| − [log|Λ(C_zk)|]`.
+/// - OOD (Lemma 9.9, term 1):  `t_ood · (log|F| − log(deg − 1))  −  log(L choose 2)`
+/// - Combination (Bound 1, γ-RLC): `log|F| − log(count) − log L`
+///
+/// `L = |Λ(target)| · |Λ(C_zk)|` (mask-oracle absent ⇒ `|Λ(C_zk)| = 1`).
+/// `deg = ℓ + r + t_ood` in ZK, `ℓ` in Standard.
+/// `count = t_ood + t · ι` (OOD samples + in-domain ι-interleaved source queries).
 ///
 /// `t_ood ≥ 1` per [`code_switch::Config::new`].
 pub fn analytic_error_bits<M: Embedding>(
@@ -64,109 +66,158 @@ pub fn analytic_error_bits<M: Embedding>(
     mask_oracle: Option<MaskOracleInfo>,
 ) -> Bits {
     assert!(t_ood > 0, "code-switch requires t_ood ≥ 1");
-    let field_bits = M::Target::field_size_bits();
-    let target_list = target.list_size();
-    let combined_list = mask_oracle.map_or(target_list, |info| target_list * info.c_zk_list_size);
-    let degree = mask_oracle.map_or_else(
-        || source.message_length(),
-        |_| source.masked_message_length() + t_ood,
-    );
 
+    let field_bits = M::Target::field_size_bits();
+    let combined_list = target.list_size() * mask_oracle.map_or(1.0, |info| info.c_zk_list_size);
+    let degree = match mask_oracle {
+        Some(_) => source.masked_message_length() + t_ood,
+        None => source.message_length(),
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let t_ood_f = t_ood as f64;
+
+    // OOD term — Lemma 9.9, term 1.
     #[allow(clippy::cast_precision_loss)]
     let log_degree_minus_1 = ((degree - 1) as f64).log2();
-    let l_choose_2 = combined_list * (combined_list - 1.0) / 2.0;
-    #[allow(clippy::cast_precision_loss)]
-    let ood_term = (t_ood as f64) * (field_bits - log_degree_minus_1) - l_choose_2.log2();
+    let log_l_choose_2 = (combined_list * (combined_list - 1.0) / 2.0).log2();
+    let ood_term = t_ood_f * (field_bits - log_degree_minus_1) - log_l_choose_2;
 
-    // Combination term: counts OOD samples plus the in-domain batch
-    // (t source queries, each contributing one column of the ι-interleaved
-    // source codeword to the geometric_challenge RLC).
-    let count = t_ood + source.in_domain_samples * source.interleaving_depth;
+    // Combination term — Bound 1 (γ-RLC): `t_ood` OOD samples plus the
+    // in-domain batch of `t · ι` source columns, all RLC'd into one target
+    // codeword.
     #[allow(clippy::cast_precision_loss)]
-    let log_count = (count as f64).log2();
-    let log_target_list = target_list.log2();
-    let log_c_zk_list = mask_oracle.map_or(0.0, |info| info.c_zk_list_size.log2());
-    let combination_term = field_bits - log_count - log_target_list - log_c_zk_list;
+    let log_count = ((t_ood + source.in_domain_samples * source.interleaving_depth) as f64).log2();
+    let combination_term = field_bits - log_count - combined_list.log2();
 
     Bits::new(ood_term.min(combination_term).max(0.0))
 }
 
+/// Number of `(r ‖ s)` mask polynomials code-switch contributes to C_zk per
+/// round. Mirrors [`super::sumcheck::masks_required`].
+pub const fn masks_required() -> usize {
+    1
+}
+
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use proptest::prelude::*;
 
     use super::*;
     use crate::protocols::params::{
-        irs_commit as params_irs,
-        planner::{compute_l_zk, compute_t_ood},
-        spec::{LogInvRate, Mode, OodSampleBudget, RoundContext, SecuritySpec},
+        irs_commit as irs_solver,
+        derive::{compute_l_zk, compute_t_ood},
+        spec::{LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec},
         test_utils::{
             arb_standard_johnson_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec,
-            deterministic_spec, TestEmbedding, TestExtensionField, TestNonIdentityEmbedding,
+            assert_pow_closes_gap, build_round_io, deterministic_spec, TestEmbedding,
+            TestExtensionField, TestField, TestNonIdentityEmbedding, TEST_TARGET_RANGE,
         },
     };
 
     type M = TestEmbedding;
 
-    // Keeps `target − error ≤ 60`, the cap `proof_of_work::threshold` enforces.
-    // On Field64 the γ-RLC combination term sits at ~0 bits in ZK and ~30 bits
-    // in Standard, so the gap to target must stay under 60.
-    const TEST_TARGET_RANGE: std::ops::RangeInclusive<u32> = 30..=50;
-
-    fn arb_zk_spec() -> impl Strategy<Value = SecuritySpec<M>> {
+    fn arb_zk_spec() -> impl Strategy<Value = SecuritySpec> {
         utils_zk_spec(TEST_TARGET_RANGE)
     }
 
-    fn arb_standard_johnson_spec() -> impl Strategy<Value = SecuritySpec<M>> {
+    fn arb_standard_johnson_spec() -> impl Strategy<Value = SecuritySpec> {
         utils_standard_spec(TEST_TARGET_RANGE)
     }
 
-    /// Iterates target until `codeword_length` stabilizes — its realized rate
-    /// depends on `mask_length`, which depends on `t_ood`.
-    fn build_inputs(
-        spec: &SecuritySpec<M>,
-        log_inv_rate: u32,
-        folding_factor: u32,
-        num_vars: u32,
-        c_zk_list_size: Option<f64>,
-    ) -> (IrsConfig<M>, IrsConfig<M>, usize) {
-        let source_ctx = RoundContext {
-            round_index: 0,
-            vector_size: 1usize << num_vars,
-            log_inv_rate,
-            folding_factor,
-        };
-        let source = params_irs::solve(spec, &source_ctx, OodSampleBudget::new(0));
+    const NUM_VARS_HEADROOM: u32 = 4;
 
-        let target_ctx = RoundContext {
-            round_index: 1,
-            vector_size: source.message_length(),
-            log_inv_rate: log_inv_rate + folding_factor - 1,
-            folding_factor,
-        };
-
-        let mut target = params_irs::solve(spec, &target_ctx, OodSampleBudget::new(0));
-        for _ in 0..8 {
-            let t_ood = compute_t_ood(spec, &source, target.list_size(), c_zk_list_size);
-            let new_target = params_irs::solve(spec, &target_ctx, OodSampleBudget::new(t_ood));
-            if new_target.codeword_length == target.codeword_length {
-                return (source, new_target, t_ood);
-            }
-            target = new_target;
-        }
-        panic!("target IRS did not stabilize");
-    }
-
-    /// `num_vars ≥ 2 * folding_factor` keeps target IRS valid.
+    /// `(log_inv_rate, folding_factor, num_vars)`. `num_vars ≥ 2 · folding_factor`
+    /// keeps target IRS valid.
     fn arb_dims() -> impl Strategy<Value = (u32, u32, u32)> {
         (1u32..=3, 1u32..=2).prop_flat_map(|(log_inv_rate, folding_factor)| {
             let min_num_vars = 2 * folding_factor;
             (
                 Just(log_inv_rate),
                 Just(folding_factor),
-                min_num_vars..=(min_num_vars + 4),
+                min_num_vars..=(min_num_vars + NUM_VARS_HEADROOM),
             )
         })
+    }
+
+    const FORMULA_LOG_INV_RATE: u32 = 1;
+    const FORMULA_FOLDING_FACTOR: u32 = 2;
+    const FORMULA_NUM_VARS: u32 = 6;
+
+    /// Standard OOD bound (Lemma 9.9 first term, no mask):
+    ///   `min(t_ood · (log|F| − log(ℓ−1)) − log(L choose 2), combination)`.
+    /// `L = target.list_size()`, `combination = log|F| − log(t_ood + t·ι) − log L`.
+    #[test]
+    fn analytic_error_standard_formula() {
+        let spec: SecuritySpec = deterministic_spec(Mode::Standard);
+        let (source, target, t_ood) = build_round_io::<M>(
+            &spec,
+            FORMULA_LOG_INV_RATE,
+            FORMULA_FOLDING_FACTOR,
+            FORMULA_NUM_VARS,
+            None,
+        );
+        let got = f64::from(analytic_error_bits(&source, &target, t_ood, None));
+
+        let field_bits = <TestField as FieldWithSize>::field_size_bits();
+        let target_list = target.list_size();
+        let degree = source.message_length();
+        let log_deg_m1 = ((degree - 1) as f64).log2();
+        let l_choose_2 = target_list * (target_list - 1.0) / 2.0;
+        let ood = (t_ood as f64) * (field_bits - log_deg_m1) - l_choose_2.log2();
+        let count = t_ood + source.in_domain_samples * source.interleaving_depth;
+        let comb = field_bits - (count as f64).log2() - target_list.log2();
+        let expected = ood.min(comb).max(0.0);
+
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "got {got} vs expected {expected}",
+        );
+    }
+
+    /// ZK OOD bound: combined list `L = target × c_zk`, masked degree `ℓ + r + t_ood`,
+    /// combination term also subtracts `log|Λ(C_zk)|`.
+    #[test]
+    fn analytic_error_zk_formula() {
+        // Both mask-oracle values are pow2 so `log2` is exact (avoids
+        // floating-point drift in the expected-vs-got comparison).
+        const C_ZK_LIST_SIZE: f64 = 4.0; // log2 = 2
+        const L_ZK_USIZE: usize = 8; // log2 = 3
+
+        let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
+        let mask_oracle = MaskOracleInfo {
+            c_zk_list_size: C_ZK_LIST_SIZE,
+            l_zk: MaskCodeMessageLen::new(L_ZK_USIZE),
+        };
+        let (source, target, t_ood) = build_round_io::<M>(
+            &spec,
+            FORMULA_LOG_INV_RATE,
+            FORMULA_FOLDING_FACTOR,
+            FORMULA_NUM_VARS,
+            Some(C_ZK_LIST_SIZE),
+        );
+        let got = f64::from(analytic_error_bits(
+            &source,
+            &target,
+            t_ood,
+            Some(mask_oracle),
+        ));
+
+        let field_bits = <TestField as FieldWithSize>::field_size_bits();
+        let target_list = target.list_size();
+        let combined_list = target_list * C_ZK_LIST_SIZE;
+        let degree = source.masked_message_length() + t_ood;
+        let log_deg_m1 = ((degree - 1) as f64).log2();
+        let l_choose_2 = combined_list * (combined_list - 1.0) / 2.0;
+        let ood = (t_ood as f64) * (field_bits - log_deg_m1) - l_choose_2.log2();
+        let count = t_ood + source.in_domain_samples * source.interleaving_depth;
+        let comb = field_bits - (count as f64).log2() - target_list.log2() - C_ZK_LIST_SIZE.log2();
+        let expected = ood.min(comb).max(0.0);
+
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "got {got} vs expected {expected}",
+        );
     }
 
     proptest! {
@@ -176,7 +227,7 @@ mod tests {
             (log_inv_rate, folding_factor, num_vars) in arb_dims(),
         ) {
             let (source, target, t_ood) =
-                build_inputs(&spec, log_inv_rate, folding_factor, num_vars, None);
+                build_round_io::<M>(&spec, log_inv_rate, folding_factor, num_vars, None);
             let config = solve(&spec, source, target, t_ood, None);
             prop_assert!(matches!(config.mode, code_switch::Mode::Standard));
             prop_assert!(config.out_domain_samples >= 1);
@@ -195,24 +246,24 @@ mod tests {
                 log_inv_rate,
                 folding_factor,
             };
-            let placeholder_source = params_irs::solve(
+            let placeholder_source = irs_solver::solve::<M>(
                 &spec,
                 &placeholder_source_ctx,
                 OodSampleBudget::new(0),
             );
-            let c_zk_placeholder = params_irs::solve_mask_code(
+            let c_zk_placeholder = irs_solver::solve_mask_code::<M>(
                 &spec,
                 compute_l_zk(&placeholder_source, 1),
                 placeholder_source.mask_length(),
                 LogInvRate::new(log_inv_rate),
                 2,
             );
-            let (source, target, t_ood) = build_inputs(
+            let (source, target, t_ood) = build_round_io::<M>(
                 &spec, log_inv_rate, folding_factor, num_vars, Some(c_zk_placeholder.list_size()),
             );
             let r = source.mask_length();
             let l_zk = compute_l_zk(&source, t_ood);
-            let c_zk = params_irs::solve_mask_code(
+            let c_zk = irs_solver::solve_mask_code::<M>(
                 &spec,
                 l_zk,
                 r,
@@ -237,25 +288,25 @@ mod tests {
             (log_inv_rate, folding_factor, num_vars) in arb_dims(),
         ) {
             let (source, target, t_ood) =
-                build_inputs(&spec, log_inv_rate, folding_factor, num_vars, None);
-            let config = solve(&spec, source.clone(), target.clone(), t_ood, None);
-            let error = f64::from(analytic_error_bits(&source, &target, t_ood, None));
-            let pow_bits = f64::from(config.pow.difficulty());
-            prop_assert!(
-                error + pow_bits >= f64::from(spec.target_security_bits) - 1e-3,
-                "error {} + pow {} < target {}",
-                error, pow_bits, spec.target_security_bits,
-            );
+                build_round_io::<M>(&spec, log_inv_rate, folding_factor, num_vars, None);
+            let error = analytic_error_bits(&source, &target, t_ood, None);
+            let config = solve(&spec, source, target, t_ood, None);
+            assert_pow_closes_gap(&spec, error, &config.pow);
         }
     }
 
-    /// Shared shape so Standard and ZK smoke tests differ only in mode.
+    /// Shared shape for the `M::Source ≠ M::Target` smoke tests.
+    /// `target_ctx` mirrors the planner's per-round chaining.
     fn non_identity_smoke_ctxs() -> (RoundContext, RoundContext) {
+        const SOURCE_VECTOR_SIZE: usize = 64;
+        const SOURCE_LOG_INV_RATE: u32 = 1;
+        const FOLDING_FACTOR: u32 = 2;
+
         let source_ctx = RoundContext {
             round_index: 0,
-            vector_size: 64,
-            log_inv_rate: 1,
-            folding_factor: 2,
+            vector_size: SOURCE_VECTOR_SIZE,
+            log_inv_rate: SOURCE_LOG_INV_RATE,
+            folding_factor: FOLDING_FACTOR,
         };
         let target_ctx = RoundContext {
             round_index: 1,
@@ -269,18 +320,63 @@ mod tests {
     /// Smoke test: `M::Source ≠ M::Target`, Standard mode.
     #[test]
     fn solve_works_with_basefield_embedding_standard() {
-        let spec_source: SecuritySpec<TestNonIdentityEmbedding> =
-            deterministic_spec(Mode::Standard);
-        let spec_target: SecuritySpec<Identity<TestExtensionField>> =
-            deterministic_spec(Mode::Standard);
+        let spec: SecuritySpec = deterministic_spec(Mode::Standard);
         let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
 
-        let source = params_irs::solve(&spec_source, &source_ctx, OodSampleBudget::new(0));
+        let source = irs_solver::solve::<TestNonIdentityEmbedding>(
+            &spec,
+            &source_ctx,
+            OodSampleBudget::new(0),
+        );
         // Standard target: codeword_length is t_ood-independent (mask = 0).
-        let target = params_irs::solve(&spec_target, &target_ctx, OodSampleBudget::new(0));
-        let t_ood = compute_t_ood(&spec_source, &source, target.list_size(), None);
+        let target = irs_solver::solve::<Identity<TestExtensionField>>(
+            &spec,
+            &target_ctx,
+            OodSampleBudget::new(0),
+        );
+        let t_ood = compute_t_ood(&spec, &source, target.list_size(), None);
 
-        let config = solve(&spec_source, source, target, t_ood, None);
+        let config = solve(&spec, source, target, t_ood, None);
         assert!(matches!(config.mode, code_switch::Mode::Standard));
+    }
+
+    /// Smoke test: `M::Source ≠ M::Target`, ZK mode.
+    #[test]
+    fn solve_works_with_basefield_embedding_zk() {
+        let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
+        let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
+
+        let c_zk_list_size = 4.0;
+        // `build_round_io` for the non-identity embedding.
+        let mut t_ood = 0;
+        let mut source = irs_solver::solve::<TestNonIdentityEmbedding>(
+            &spec,
+            &source_ctx,
+            OodSampleBudget::new(0),
+        );
+        let mut target = irs_solver::solve::<Identity<TestExtensionField>>(
+            &spec,
+            &target_ctx,
+            OodSampleBudget::new(0),
+        );
+        for _ in 0..8 {
+            let new_t_ood = compute_t_ood(&spec, &source, target.list_size(), Some(c_zk_list_size));
+            if new_t_ood == t_ood {
+                break;
+            }
+            t_ood = new_t_ood;
+            source = irs_solver::solve(&spec, &source_ctx, OodSampleBudget::new(t_ood));
+            target = irs_solver::solve(&spec, &target_ctx, OodSampleBudget::new(t_ood));
+        }
+
+        let mask_oracle = MaskOracleInfo {
+            c_zk_list_size,
+            l_zk: MaskCodeMessageLen::new((source.mask_length() + t_ood).next_power_of_two()),
+        };
+        let config = solve(&spec, source, target, t_ood, Some(mask_oracle));
+        assert!(matches!(
+            config.mode,
+            code_switch::Mode::ZeroKnowledge { .. }
+        ));
     }
 }

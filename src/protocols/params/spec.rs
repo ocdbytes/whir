@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::{algebra::embedding::Embedding, engines::EngineId};
+use crate::engines::EngineId;
 
 /// Phantom-typed newtype — `Tagged<T, A>` and `Tagged<T, B>` are distinct types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,15 +17,14 @@ impl<T: Copy, Tag> Tagged<T, Tag> {
 }
 
 #[derive(Debug, Clone)]
-pub struct SecuritySpec<M: Embedding> {
+pub struct SecuritySpec {
     pub mode: Mode,
     pub target_security_bits: u32,
     pub max_pow_bits: Option<u32>,
     pub hash_id: EngineId,
-    pub _embedding: PhantomData<M>,
 }
 
-impl<M: Embedding> SecuritySpec<M> {
+impl SecuritySpec {
     pub fn protocol_security_target_bits(&self) -> f64 {
         let pow = self.max_pow_bits.unwrap_or(0);
         f64::from(self.target_security_bits.saturating_sub(pow))
@@ -55,7 +54,7 @@ impl FoldingFactor {
         }
     }
 
-    /// Smallest factor across rounds; used by `TuningSpec` validation.
+    /// Smallest factor across rounds.
     pub const fn min(&self) -> usize {
         match self {
             Self::Constant(f) => *f,
@@ -116,24 +115,27 @@ pub type LogInvRate = Tagged<u32, LogInvRateTag>;
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
-    use crate::{
-        algebra::{embedding::Identity, fields::Field64},
-        hash,
-    };
+    use crate::hash;
 
-    fn spec(max_pow_bits: Option<u32>) -> SecuritySpec<Identity<Field64>> {
+    /// Fixture target. 100 is chosen so the expected `target − pow` values in
+    /// the tests below are round numbers (80, 40, 0) for readability.
+    const TARGET_BITS: u32 = 100;
+
+    fn spec(max_pow_bits: Option<u32>) -> SecuritySpec {
         SecuritySpec {
             mode: Mode::ZeroKnowledge,
-            target_security_bits: 100,
+            target_security_bits: TARGET_BITS,
             max_pow_bits,
             hash_id: hash::BLAKE3,
-            _embedding: PhantomData,
         }
     }
 
     #[test]
     fn none_means_no_pow_credit() {
-        assert_eq!(spec(None).protocol_security_target_bits(), 100.0);
+        assert_eq!(
+            spec(None).protocol_security_target_bits(),
+            f64::from(TARGET_BITS),
+        );
     }
 
     #[test]
@@ -146,12 +148,15 @@ mod tests {
 
     #[test]
     fn pow_credit_shifts_analytic_floor() {
+        // Two below-target PoW budgets: `target − pow` shifts down 1:1.
         assert_eq!(spec(Some(20)).protocol_security_target_bits(), 80.0);
         assert_eq!(spec(Some(60)).protocol_security_target_bits(), 40.0);
     }
 
     #[test]
     fn pow_exceeding_target_saturates_to_zero() {
-        assert_eq!(spec(Some(200)).protocol_security_target_bits(), 0.0);
+        // `pow > target` saturates rather than going negative.
+        let pow_over_target = TARGET_BITS + 100;
+        assert_eq!(spec(Some(pow_over_target)).protocol_security_target_bits(), 0.0);
     }
 }

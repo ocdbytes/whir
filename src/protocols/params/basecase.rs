@@ -6,24 +6,25 @@ use crate::{
     algebra::{embedding::Identity, fields::FieldWithSize},
     bits::Bits,
     protocols::{
-        basecase,
+        basecase::{self, Config as BasecaseConfig},
         irs_commit::Config as IrsConfig,
         params::{
             irs_commit as irs_solver,
             spec::{Mode as SpecMode, OodSampleBudget, RoundContext, SecuritySpec},
             sumcheck as sumcheck_solver,
         },
-        proof_of_work, sumcheck,
+        proof_of_work::Config as PowConfig,
+        sumcheck::{self, Config as SumcheckConfig},
     },
 };
 
 /// PoW closes the Theorem 7.1 γ-slot gap to `spec.target_security_bits`; no
 /// γ challenge in Standard mode ⇒ `Config::none()`.
 pub fn solve<F: Field>(
-    spec: &SecuritySpec<Identity<F>>,
+    spec: &SecuritySpec,
     vector_size: usize,
     log_inv_rate: u32,
-) -> basecase::Config<F> {
+) -> BasecaseConfig<F> {
     assert!(vector_size > 0, "basecase requires vector_size ≥ 1");
 
     let ctx = RoundContext {
@@ -35,12 +36,12 @@ pub fn solve<F: Field>(
     let commit = irs_solver::solve(spec, &ctx, OodSampleBudget::new(0));
 
     let target_bits = Bits::new(f64::from(spec.target_security_bits));
-    let sumcheck_pow = proof_of_work::Config::grind_to(
+    let sumcheck_pow = PowConfig::grind_to(
         target_bits,
         sumcheck_solver::analytic_error_bits(&commit, None),
         spec.hash_id,
     );
-    let sumcheck = sumcheck::Config::new(
+    let sumcheck = SumcheckConfig::new(
         vector_size,
         sumcheck_pow,
         vector_size.next_power_of_two().trailing_zeros() as usize,
@@ -53,13 +54,13 @@ pub fn solve<F: Field>(
     };
 
     let pow = match mode {
-        basecase::Mode::Standard => proof_of_work::Config::none(),
+        basecase::Mode::Standard => PowConfig::none(),
         basecase::Mode::ZeroKnowledge => {
-            proof_of_work::Config::grind_to(target_bits, analytic_error_bits(&commit), spec.hash_id)
+            PowConfig::grind_to(target_bits, analytic_error_bits(&commit), spec.hash_id)
         }
     };
 
-    basecase::Config {
+    BasecaseConfig {
         commit,
         sumcheck,
         mode,
@@ -75,17 +76,49 @@ pub fn analytic_error_bits<F: Field>(commit: &IrsConfig<Identity<F>>) -> Bits {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::protocols::params::test_utils::{arb_standard_johnson_spec, arb_zk_spec};
-
-    // Keeps `target − error ≤ 60`, the cap `proof_of_work::threshold` enforces.
-    const TEST_TARGET_RANGE: std::ops::RangeInclusive<u32> = 30..=50;
+    use crate::protocols::params::test_utils::{
+        arb_standard_johnson_spec, arb_zk_spec, assert_pow_closes_gap, deterministic_spec,
+        TestField, TEST_TARGET_RANGE,
+    };
 
     fn arb_dims() -> impl Strategy<Value = (u32, u32)> {
         (1u32..=4, 1u32..=3)
+    }
+
+    /// γ-combination soundness (Theorem 7.1, n=0): `log|F| − log|Λ(C^≡2, δ)|`.
+    /// Builds the commit directly via the IRS solver to bypass `solve`'s PoW
+    /// grind (which would assert against the cap for default test targets).
+    #[test]
+    fn analytic_error_formula() {
+        use crate::protocols::params::{
+            irs_commit as irs_solver,
+            spec::{Mode, OodSampleBudget, RoundContext},
+        };
+
+        let spec = deterministic_spec(Mode::ZeroKnowledge);
+        let ctx = RoundContext {
+            round_index: 0,
+            vector_size: 16,
+            log_inv_rate: 2,
+            folding_factor: 0,
+        };
+        let commit: IrsConfig<Identity<TestField>> =
+            irs_solver::solve(&spec, &ctx, OodSampleBudget::new(0));
+
+        let got = f64::from(analytic_error_bits(&commit));
+        let field_bits = TestField::field_size_bits();
+        let log_list = commit.list_size().log2();
+        let expected = (field_bits - log_list).max(0.0);
+
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "got {got} vs expected {expected}",
+        );
     }
 
     proptest! {
@@ -94,7 +127,7 @@ mod tests {
             spec in arb_standard_johnson_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
-            let config = solve(&spec, 1usize << log_size, log_inv_rate);
+            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
             prop_assert!(matches!(config.mode, basecase::Mode::Standard));
             prop_assert_eq!(config.commit.interleaving_depth, 1);
             prop_assert_eq!(config.commit.num_vectors, 1);
@@ -106,7 +139,7 @@ mod tests {
             spec in arb_zk_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
-            let config = solve(&spec, 1usize << log_size, log_inv_rate);
+            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
             prop_assert!(matches!(config.mode, basecase::Mode::ZeroKnowledge));
             prop_assert!(config.commit.mask_length() > 0);
         }
@@ -116,14 +149,8 @@ mod tests {
             spec in arb_zk_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
-            let config = solve(&spec, 1usize << log_size, log_inv_rate);
-            let error = f64::from(analytic_error_bits(&config.commit));
-            let pow_bits = f64::from(config.pow.difficulty());
-            prop_assert!(
-                error + pow_bits >= f64::from(spec.target_security_bits) - 1e-3,
-                "error {} + pow {} < target {}",
-                error, pow_bits, spec.target_security_bits,
-            );
+            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
+            assert_pow_closes_gap(&spec, analytic_error_bits(&config.commit), &config.pow);
         }
 
         #[test]
@@ -131,8 +158,8 @@ mod tests {
             spec in arb_standard_johnson_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
-            let config = solve(&spec, 1usize << log_size, log_inv_rate);
-            prop_assert_eq!(config.pow, proof_of_work::Config::none());
+            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
+            prop_assert_eq!(config.pow, PowConfig::none());
         }
     }
 }

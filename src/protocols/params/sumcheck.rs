@@ -5,24 +5,25 @@ use crate::{
     algebra::{embedding::Embedding, fields::FieldWithSize},
     bits::Bits,
     protocols::{
-        irs_commit,
+        irs_commit::Config as IrsConfig,
         params::{
-            plan::MaskOracleInfo,
+            protocol_config::MaskOracleInfo,
             spec::{RoundContext, SecuritySpec},
         },
-        proof_of_work, sumcheck,
+        proof_of_work::Config as PowConfig,
+        sumcheck::{self, Config as SumcheckConfig},
     },
 };
 
 /// `mask_oracle` is `Some` iff ZK; only C_zk's list size + ℓ_zk are read here.
 pub fn solve<M: Embedding>(
-    spec: &SecuritySpec<M>,
+    spec: &SecuritySpec,
     ctx: &RoundContext,
-    source_irs: &irs_commit::Config<M>,
+    source_irs: &IrsConfig<M>,
     mask_oracle: Option<MaskOracleInfo>,
-) -> sumcheck::Config<M::Target> {
+) -> SumcheckConfig<M::Target> {
     let num_rounds = num_sumcheck_rounds(ctx);
-    let round_pow = proof_of_work::Config::grind_to(
+    let round_pow = PowConfig::grind_to(
         Bits::new(f64::from(spec.target_security_bits)),
         analytic_error_bits(source_irs, mask_oracle),
         spec.hash_id,
@@ -33,7 +34,7 @@ pub fn solve<M: Embedding>(
             mask_length: zk_mask_length(),
         },
     };
-    sumcheck::Config::new(ctx.vector_size, round_pow, num_rounds, mode)
+    SumcheckConfig::new(ctx.vector_size, round_pow, num_rounds, mode)
 }
 
 /// Per-sumcheck-round soundness in bits: `min(ε_mca, poly_identity_term)`.
@@ -41,7 +42,7 @@ pub fn solve<M: Embedding>(
 /// - Standard (degree-2): `log|F| − log|Λ(C)| − 1`.
 /// - ZK (Lemma 6.5, p.40): `log|F| − log|Λ(C)| − log|Λ(C_zk)| − log ℓ_zk`.
 pub fn analytic_error_bits<M: Embedding>(
-    source_irs: &irs_commit::Config<M>,
+    source_irs: &IrsConfig<M>,
     mask_oracle: Option<MaskOracleInfo>,
 ) -> Bits {
     let field_bits = M::Target::field_size_bits();
@@ -58,12 +59,10 @@ pub fn analytic_error_bits<M: Embedding>(
     Bits::new(prox_gaps.min(poly_id).max(0.0))
 }
 
-pub const fn masks_required(is_zk: bool, ctx: &RoundContext) -> usize {
-    if is_zk {
-        num_sumcheck_rounds(ctx)
-    } else {
-        0
-    }
+/// Number of degree-2 round-polynomial masks sumcheck contributes to C_zk
+/// per round (Lemma 6.4): one per sumcheck round.
+pub const fn masks_required(ctx: &RoundContext) -> usize {
+    num_sumcheck_rounds(ctx)
 }
 
 const fn num_sumcheck_rounds(ctx: &RoundContext) -> usize {
@@ -76,27 +75,126 @@ const fn zk_mask_length() -> usize {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use proptest::prelude::*;
 
     use super::*;
     use crate::protocols::params::{
-        irs_commit as params_irs,
-        spec::OodSampleBudget,
+        irs_commit as irs_solver,
+        spec::{MaskCodeMessageLen, Mode, OodSampleBudget},
         test_utils::{
-            arb_round_ctx, arb_standard_johnson_spec, arb_zk_spec, build_minimal_mask_oracle,
-            TestEmbedding,
+            arb_round_ctx, arb_standard_johnson_spec, arb_zk_spec, assert_pow_closes_gap,
+            build_minimal_mask_oracle, deterministic_spec, TestEmbedding, TestField,
+            TestNonIdentityEmbedding, TEST_TARGET_RANGE,
         },
     };
 
-    // Keeps `target - error ≤ 60`, the upper bound `proof_of_work::threshold` enforces.
-    const TEST_TARGET_RANGE: std::ops::RangeInclusive<u32> = 30..=50;
-
     fn build_source_irs(
-        spec: &SecuritySpec<TestEmbedding>,
+        spec: &SecuritySpec,
         ctx: &RoundContext,
-    ) -> irs_commit::Config<TestEmbedding> {
-        params_irs::solve(spec, ctx, OodSampleBudget::new(0))
+    ) -> IrsConfig<TestEmbedding> {
+        irs_solver::solve(spec, ctx, OodSampleBudget::new(0))
+    }
+
+    /// Smallest pow2 shape that still produces a non-degenerate IRS.
+    const FIXTURE_LOG_VECTOR_SIZE: u32 = 4;
+    const FIXTURE_LOG_INV_RATE: u32 = 1;
+    const FIXTURE_FOLDING_FACTOR: u32 = 2;
+
+    fn fixture_ctx() -> RoundContext {
+        RoundContext {
+            round_index: 0,
+            vector_size: 1 << FIXTURE_LOG_VECTOR_SIZE,
+            log_inv_rate: FIXTURE_LOG_INV_RATE,
+            folding_factor: FIXTURE_FOLDING_FACTOR,
+        }
+    }
+
+    /// Lemma 6.4: ZK round polynomial has 3 coefficients.
+    #[test]
+    fn zk_mode_has_three_mask_coefficients() {
+        let spec = deterministic_spec(Mode::ZeroKnowledge);
+        let ctx = fixture_ctx();
+        let source_irs = build_source_irs(&spec, &ctx);
+        let mask_oracle = build_minimal_mask_oracle(&spec);
+        let config = solve(&spec, &ctx, &source_irs, mask_oracle);
+        match config.mode {
+            sumcheck::SumcheckMode::ZeroKnowledge { mask_length } => {
+                assert_eq!(mask_length, 3);
+            }
+            sumcheck::SumcheckMode::Standard => panic!("expected ZK"),
+        }
+    }
+
+    /// Standard branch: `min(prox_gaps, log|F| − log|Λ(C)| − 1).max(0)`.
+    #[test]
+    fn analytic_error_standard_formula() {
+        let spec = deterministic_spec(Mode::Standard);
+        let ctx = fixture_ctx();
+        let irs = build_source_irs(&spec, &ctx);
+
+        let got = f64::from(analytic_error_bits::<TestEmbedding>(&irs, None));
+
+        let field_bits = TestField::field_size_bits();
+        let log_list = irs.list_size().log2();
+        let prox = irs.rbr_soundness_fold_prox_gaps();
+        let expected = prox.min(field_bits - log_list - 1.0).max(0.0);
+
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "got {got} vs expected {expected}"
+        );
+    }
+
+    /// ZK branch (Lemma 6.5): `min(prox_gaps, log|F| − log|Λ(C)| − log|Λ(C_zk)| − log ℓ_zk).max(0)`.
+    #[test]
+    fn analytic_error_zk_formula() {
+        // Pow2 values so `log2` is exact.
+        const C_ZK_LIST_SIZE: f64 = 4.0;
+        const L_ZK_USIZE: usize = 8;
+        let log_c_zk_list = C_ZK_LIST_SIZE.log2();
+        let log_l_zk = (L_ZK_USIZE as f64).log2();
+
+        let spec = deterministic_spec(Mode::ZeroKnowledge);
+        let ctx = fixture_ctx();
+        let irs = build_source_irs(&spec, &ctx);
+        let info = MaskOracleInfo {
+            c_zk_list_size: C_ZK_LIST_SIZE,
+            l_zk: MaskCodeMessageLen::new(L_ZK_USIZE),
+        };
+
+        let got = f64::from(analytic_error_bits::<TestEmbedding>(&irs, Some(info)));
+
+        let field_bits = TestField::field_size_bits();
+        let log_list = irs.list_size().log2();
+        let prox = irs.rbr_soundness_fold_prox_gaps();
+        let expected = prox
+            .min(field_bits - log_list - log_c_zk_list - log_l_zk)
+            .max(0.0);
+
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "got {got} vs expected {expected}"
+        );
+    }
+
+    /// Oracle large enough to drive `poly_id` strongly negative → clamped to 0.
+    #[test]
+    fn analytic_error_clamps_to_zero() {
+        // `log2(c_zk_list_size) + log2(l_zk) > field_bits` on `Field64`.
+        const OVERSIZED_LOG_C_ZK_LIST: i32 = 60;
+        const OVERSIZED_LOG_L_ZK: u32 = 30;
+
+        let spec = deterministic_spec(Mode::ZeroKnowledge);
+        let ctx = fixture_ctx();
+        let irs = build_source_irs(&spec, &ctx);
+        let huge = MaskOracleInfo {
+            c_zk_list_size: 2_f64.powi(OVERSIZED_LOG_C_ZK_LIST),
+            l_zk: MaskCodeMessageLen::new(1 << OVERSIZED_LOG_L_ZK),
+        };
+        let bits = f64::from(analytic_error_bits::<TestEmbedding>(&irs, Some(huge)));
+        assert_eq!(bits, 0.0);
     }
 
     proptest! {
@@ -109,23 +207,6 @@ mod tests {
             let mask_oracle = build_minimal_mask_oracle(&spec);
             let config = solve(&spec, &ctx, &source_irs, mask_oracle);
             prop_assert!(matches!(config.mode, sumcheck::SumcheckMode::Standard));
-        }
-
-        /// Lemma 6.4: ZK round polynomial mask_length = 3.
-        #[test]
-        fn zk_mode_has_three_mask_coefficients(
-            spec in arb_zk_spec(TEST_TARGET_RANGE),
-            ctx in arb_round_ctx(),
-        ) {
-            let source_irs = build_source_irs(&spec, &ctx);
-            let mask_oracle = build_minimal_mask_oracle(&spec);
-            let config = solve(&spec, &ctx, &source_irs, mask_oracle);
-            match config.mode {
-                sumcheck::SumcheckMode::ZeroKnowledge { mask_length } => {
-                    prop_assert_eq!(mask_length, 3);
-                }
-                sumcheck::SumcheckMode::Standard => prop_assert!(false, "expected ZK"),
-            }
         }
 
         #[test]
@@ -142,18 +223,18 @@ mod tests {
             prop_assert_eq!(config.num_rounds, ctx.folding_factor as usize);
         }
 
+        /// ZK subtracts two non-negative log terms beyond Standard, so the ZK
+        /// error term cannot exceed the Standard one for any source IRS.
         #[test]
-        fn masks_required_matches_mode(
-            spec in prop_oneof![
-                arb_standard_johnson_spec(TEST_TARGET_RANGE),
-                arb_zk_spec(TEST_TARGET_RANGE),
-            ],
+        fn zk_error_le_standard_error(
+            spec in arb_zk_spec(TEST_TARGET_RANGE),
             ctx in arb_round_ctx(),
         ) {
-            let mask_oracle = build_minimal_mask_oracle(&spec);
-            let required = masks_required(mask_oracle.is_some(), &ctx);
-            let expected = if mask_oracle.is_some() { ctx.folding_factor as usize } else { 0 };
-            prop_assert_eq!(required, expected);
+            let irs = build_source_irs(&spec, &ctx);
+            let mo = build_minimal_mask_oracle(&spec);
+            let zk = f64::from(analytic_error_bits::<TestEmbedding>(&irs, mo));
+            let standard = f64::from(analytic_error_bits::<TestEmbedding>(&irs, None));
+            prop_assert!(zk <= standard + 1e-9, "zk {} > standard {}", zk, standard);
         }
 
         /// `analytic_error + pow ≥ target`.
@@ -167,15 +248,24 @@ mod tests {
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
             let mask_oracle = build_minimal_mask_oracle(&spec);
+            let error = analytic_error_bits(&source_irs, mask_oracle);
             let config = solve(&spec, &ctx, &source_irs, mask_oracle);
-            let error = f64::from(analytic_error_bits(&source_irs, mask_oracle));
-            let pow_bits = f64::from(config.round_pow.difficulty());
-            // Tolerance for `proof_of_work::threshold`'s ceil quantization.
-            prop_assert!(
-                error + pow_bits >= f64::from(spec.target_security_bits) - 1e-3,
-                "error {} + pow {} < target {}",
-                error, pow_bits, spec.target_security_bits,
-            );
+            assert_pow_closes_gap(&spec, error, &config.round_pow);
         }
+    }
+
+    /// Smoke test: `M::Source ≠ M::Target`, ZK mode.
+    #[test]
+    fn solve_works_with_basefield_embedding_zk() {
+        let spec = deterministic_spec(Mode::ZeroKnowledge);
+        let ctx = fixture_ctx();
+        let source_irs: IrsConfig<TestNonIdentityEmbedding> =
+            irs_solver::solve(&spec, &ctx, OodSampleBudget::new(0));
+        let info = MaskOracleInfo {
+            c_zk_list_size: 4.0,
+            l_zk: MaskCodeMessageLen::new(8),
+        };
+        let config = solve(&spec, &ctx, &source_irs, Some(info));
+        assert!(matches!(config.mode, sumcheck::SumcheckMode::ZeroKnowledge { .. }));
     }
 }
