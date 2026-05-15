@@ -157,6 +157,9 @@ mod tests {
     fn pow_exceeding_target_saturates_to_zero() {
         // `pow > target` saturates rather than going negative.
         let pow_over_target = TARGET_BITS + 100;
-        assert_eq!(spec(Some(pow_over_target)).protocol_security_target_bits(), 0.0);
+        assert_eq!(
+            spec(Some(pow_over_target)).protocol_security_target_bits(),
+            0.0
+        );
     }
 }

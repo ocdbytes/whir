@@ -29,7 +29,7 @@ pub fn solve<M: Embedding>(
     t_ood: usize,
     mask_oracle: Option<MaskOracleInfo>,
 ) -> CodeSwitchConfig<M> {
-    let mode = mask_oracle.map_or(code_switch::Mode::Standard, |info| {
+    let mode = mask_oracle.map_or(code_switch::CodeSwitchMode::Standard, |info| {
         let l_zk = info.l_zk.get();
         assert!(
             l_zk >= source.mask_length() + t_ood,
@@ -37,7 +37,7 @@ pub fn solve<M: Embedding>(
             source.mask_length(),
             t_ood,
         );
-        code_switch::Mode::ZeroKnowledge {
+        code_switch::CodeSwitchMode::ZeroKnowledge {
             message_mask_length: NonZeroUsize::new(l_zk).expect("ℓ_zk > 0"),
         }
     });
@@ -69,10 +69,13 @@ pub fn analytic_error_bits<M: Embedding>(
 
     let field_bits = M::Target::field_size_bits();
     let combined_list = target.list_size() * mask_oracle.map_or(1.0, |info| info.c_zk_list_size);
-    let degree = match mask_oracle {
-        Some(_) => source.masked_message_length() + t_ood,
-        None => source.message_length(),
-    };
+    // OOD polynomial is over witness `[f; r_C; s]` of length `ℓ + ℓ_zk` (ZK) or
+    // `ℓ` (Standard). The `s`-tail is sampled at full length `ℓ_zk − r` (not
+    // just `t_ood`), so degree must use the realized `ℓ_zk`, not `r + t_ood`.
+    let degree = mask_oracle.map_or_else(
+        || source.message_length(),
+        |info| source.message_length() + info.l_zk.get(),
+    );
     #[allow(clippy::cast_precision_loss)]
     let t_ood_f = t_ood as f64;
 
@@ -105,12 +108,12 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
-        irs_commit as irs_solver,
         derive::{compute_l_zk, compute_t_ood},
+        irs_commit as irs_solver,
         spec::{LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec},
         test_utils::{
             arb_standard_johnson_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec,
-            assert_pow_closes_gap, build_round_io, deterministic_spec, TestEmbedding,
+            assert_close, assert_pow_closes_gap, build_round_io, deterministic_spec, TestEmbedding,
             TestExtensionField, TestField, TestNonIdentityEmbedding, TEST_TARGET_RANGE,
         },
     };
@@ -169,10 +172,7 @@ mod tests {
         let comb = field_bits - (count as f64).log2() - target_list.log2();
         let expected = ood.min(comb).max(0.0);
 
-        assert!(
-            (got - expected).abs() < 1e-9,
-            "got {got} vs expected {expected}",
-        );
+        assert_close(got, expected);
     }
 
     /// ZK OOD bound: combined list `L = target × c_zk`, masked degree `ℓ + r + t_ood`,
@@ -206,7 +206,7 @@ mod tests {
         let field_bits = <TestField as FieldWithSize>::field_size_bits();
         let target_list = target.list_size();
         let combined_list = target_list * C_ZK_LIST_SIZE;
-        let degree = source.masked_message_length() + t_ood;
+        let degree = source.message_length() + L_ZK_USIZE;
         let log_deg_m1 = ((degree - 1) as f64).log2();
         let l_choose_2 = combined_list * (combined_list - 1.0) / 2.0;
         let ood = (t_ood as f64) * (field_bits - log_deg_m1) - l_choose_2.log2();
@@ -214,10 +214,7 @@ mod tests {
         let comb = field_bits - (count as f64).log2() - target_list.log2() - C_ZK_LIST_SIZE.log2();
         let expected = ood.min(comb).max(0.0);
 
-        assert!(
-            (got - expected).abs() < 1e-9,
-            "got {got} vs expected {expected}",
-        );
+        assert_close(got, expected);
     }
 
     proptest! {
@@ -229,7 +226,7 @@ mod tests {
             let (source, target, t_ood) =
                 build_round_io::<M>(&spec, log_inv_rate, folding_factor, num_vars, None);
             let config = solve(&spec, source, target, t_ood, None);
-            prop_assert!(matches!(config.mode, code_switch::Mode::Standard));
+            prop_assert!(matches!(config.mode, code_switch::CodeSwitchMode::Standard));
             prop_assert!(config.out_domain_samples >= 1);
         }
 
@@ -337,8 +334,15 @@ mod tests {
         let t_ood = compute_t_ood(&spec, &source, target.list_size(), None);
 
         let config = solve(&spec, source, target, t_ood, None);
-        assert!(matches!(config.mode, code_switch::Mode::Standard));
+        assert!(matches!(config.mode, code_switch::CodeSwitchMode::Standard));
     }
+
+    /// Placeholder mask-oracle list size for the smoke test. Pow2 keeps
+    /// `log2` exact and matches `analytic_error_zk_formula`'s fixture.
+    const SMOKE_C_ZK_LIST_SIZE: f64 = 4.0;
+    /// Cap on the smoke-test `t_ood ↔ (source, target)` fixed-point. Matches the
+    /// loop bound used in `build_round_io`; in practice converges in 1–3 iters.
+    const SMOKE_FIXED_POINT_MAX_ITER: usize = 8;
 
     /// Smoke test: `M::Source ≠ M::Target`, ZK mode.
     #[test]
@@ -346,8 +350,6 @@ mod tests {
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
         let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
 
-        let c_zk_list_size = 4.0;
-        // `build_round_io` for the non-identity embedding.
         let mut t_ood = 0;
         let mut source = irs_solver::solve::<TestNonIdentityEmbedding>(
             &spec,
@@ -359,8 +361,13 @@ mod tests {
             &target_ctx,
             OodSampleBudget::new(0),
         );
-        for _ in 0..8 {
-            let new_t_ood = compute_t_ood(&spec, &source, target.list_size(), Some(c_zk_list_size));
+        for _ in 0..SMOKE_FIXED_POINT_MAX_ITER {
+            let new_t_ood = compute_t_ood(
+                &spec,
+                &source,
+                target.list_size(),
+                Some(SMOKE_C_ZK_LIST_SIZE),
+            );
             if new_t_ood == t_ood {
                 break;
             }
@@ -370,13 +377,13 @@ mod tests {
         }
 
         let mask_oracle = MaskOracleInfo {
-            c_zk_list_size,
+            c_zk_list_size: SMOKE_C_ZK_LIST_SIZE,
             l_zk: MaskCodeMessageLen::new((source.mask_length() + t_ood).next_power_of_two()),
         };
         let config = solve(&spec, source, target, t_ood, Some(mask_oracle));
         assert!(matches!(
             config.mode,
-            code_switch::Mode::ZeroKnowledge { .. }
+            code_switch::CodeSwitchMode::ZeroKnowledge { .. }
         ));
     }
 }

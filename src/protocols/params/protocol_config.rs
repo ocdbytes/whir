@@ -8,7 +8,10 @@
 use ark_ff::Field;
 
 use crate::{
-    algebra::embedding::{Embedding, Identity},
+    algebra::{
+        embedding::{Embedding, Identity},
+        fields::FieldWithSize,
+    },
     bits::Bits,
     protocols::{
         basecase::{self, Config as BasecaseConfig},
@@ -53,6 +56,29 @@ impl<M: Embedding> ProtocolConfig<M> {
         }
         within(&self.basecase.sumcheck.round_pow) && within(&self.basecase.pow)
     }
+
+    /// HVZK privacy error in bits, summed across ZK rounds:
+    /// `−log Σ_r (t_ood_r² + t_ood_r) / (2|F|)` (Bound 3 + Bound 7).
+    /// Standard-mode plans return `target_security_bits` as a sentinel —
+    /// HVZK isn't claimed when there are no ZK rounds.
+    pub fn privacy_error_bits(&self) -> Bits {
+        let field_bits = <M::Target as FieldWithSize>::field_size_bits();
+        let mut total_error = 0.0_f64;
+        for r in &self.rounds {
+            if let RoundMode::ZeroKnowledge { t_ood, .. } = r.mode {
+                #[allow(clippy::cast_precision_loss)]
+                let t = t_ood.get() as f64;
+                // ζ_ze ≤ (t_ood² + t_ood) / (2|F|). Compute in log space to
+                // stay numerically stable for large field_bits.
+                let log_err = f64::midpoint(t * t, t).log2() - field_bits;
+                total_error += 2_f64.powf(log_err);
+            }
+        }
+        if total_error == 0.0 {
+            return Bits::new(f64::from(self.security.target_security_bits));
+        }
+        Bits::new((-total_error.log2()).max(0.0))
+    }
 }
 
 impl<M: Embedding> SoundnessBounded for ProtocolConfig<M> {
@@ -70,7 +96,7 @@ impl<M: Embedding> SoundnessBounded for ProtocolConfig<M> {
             &self.basecase.commit,
             None,
         )));
-        if matches!(self.basecase.mode, basecase::Mode::ZeroKnowledge) {
+        if matches!(self.basecase.mode, basecase::BasecaseMode::ZeroKnowledge) {
             min_bits = min_bits.min(f64::from(basecase_solver::analytic_error_bits(
                 &self.basecase.commit,
             )));

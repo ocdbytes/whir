@@ -50,11 +50,10 @@ mod tests {
         protocols::{
             irs_commit::IrsMode,
             params::{
-                irs_commit as irs_solver,
-                spec::{LogInvRate, MaskCodeMessageLen, Mode},
+                spec::Mode,
                 test_utils::{
-                    arb_zk_spec, assert_pow_closes_gap, deterministic_spec, TestEmbedding,
-                    TEST_TARGET_RANGE,
+                    arb_zk_spec, assert_close, assert_pow_closes_gap, build_test_c_zk,
+                    deterministic_spec, TEST_TARGET_RANGE,
                 },
             },
         },
@@ -63,42 +62,34 @@ mod tests {
     /// γ-combination (Lemma 7.4): `log|F| − log(num_masks · (deg − 1))`,
     /// `deg = c_zk.masked_message_length()`. With `num_masks = 0` or `deg ≤ 1`
     /// the bound saturates to `field_bits`.
+    /// Pow2 `l_zk = 8` gives exact `log2(deg − 1) = log2(7) ≈ 2.81`.
+    /// `num_masks = 3` is the smallest count > 1 (so `num_masks · (deg − 1) > 1`
+    /// and the formula doesn't saturate). `log_inv_rate = 1` is the minimum
+    /// rate the C_zk solver accepts.
+    const FIXTURE_L_ZK: usize = 8;
+    const FIXTURE_NUM_MASKS: usize = 3;
+    const FIXTURE_LOG_INV_RATE: u32 = 1;
+
     #[test]
     fn analytic_error_formula() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
-        let num_masks = 3_usize;
-        let c_zk = irs_solver::solve_mask_code::<TestEmbedding>(
-            &spec,
-            MaskCodeMessageLen::new(8),
-            0,
-            LogInvRate::new(1),
-            2 * num_masks,
-        );
+        let c_zk = build_test_c_zk(&spec, FIXTURE_L_ZK, FIXTURE_LOG_INV_RATE, FIXTURE_NUM_MASKS);
 
-        let got = f64::from(analytic_error_bits(&c_zk, num_masks));
+        let got = f64::from(analytic_error_bits(&c_zk, FIXTURE_NUM_MASKS));
 
         let field_bits = <Field64 as FieldWithSize>::field_size_bits();
         let deg = c_zk.masked_message_length();
-        let log_combined = ((num_masks * (deg - 1)) as f64).log2();
+        let log_combined = ((FIXTURE_NUM_MASKS * (deg - 1)) as f64).log2();
         let expected = (field_bits - log_combined).max(0.0);
 
-        assert!(
-            (got - expected).abs() < 1e-9,
-            "got {got} vs expected {expected}",
-        );
+        assert_close(got, expected);
     }
 
     /// Degenerate inputs (`num_masks == 0` or `deg ≤ 1`) saturate to `field_bits`.
     #[test]
     fn analytic_error_saturates_when_no_masks() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
-        let c_zk = irs_solver::solve_mask_code::<TestEmbedding>(
-            &spec,
-            MaskCodeMessageLen::new(2),
-            0,
-            LogInvRate::new(1),
-            2,
-        );
+        let c_zk = build_test_c_zk(&spec, 2, 1, 1);
         let bits = f64::from(analytic_error_bits(&c_zk, 0));
         let field_bits = <Field64 as FieldWithSize>::field_size_bits();
         assert_eq!(bits, field_bits.max(0.0));
@@ -112,14 +103,7 @@ mod tests {
             num_masks in 1usize..=8,
             l_zk_log in 1u32..=5,
         ) {
-            let l_zk = MaskCodeMessageLen::new(1usize << l_zk_log);
-            let c_zk = irs_solver::solve_mask_code::<TestEmbedding>(
-                &spec,
-                l_zk,
-                0,
-                LogInvRate::new(log_inv_rate),
-                2 * num_masks,
-            );
+            let c_zk = build_test_c_zk(&spec, 1usize << l_zk_log, log_inv_rate, num_masks);
             let config = solve(&spec, c_zk, num_masks);
             prop_assert_eq!(config.num_masks, num_masks);
             prop_assert_eq!(config.c_zk_commit.num_vectors, 2 * num_masks);
@@ -134,31 +118,21 @@ mod tests {
             num_masks in 1usize..=8,
             l_zk_log in 1u32..=5,
         ) {
-            let l_zk = MaskCodeMessageLen::new(1usize << l_zk_log);
-            let c_zk = irs_solver::solve_mask_code::<TestEmbedding>(
-                &spec,
-                l_zk,
-                0,
-                LogInvRate::new(log_inv_rate),
-                2 * num_masks,
-            );
+            let c_zk = build_test_c_zk(&spec, 1usize << l_zk_log, log_inv_rate, num_masks);
             let analytic = analytic_error_bits(&c_zk, num_masks);
             let config = solve(&spec, c_zk, num_masks);
             assert_pow_closes_gap(&spec, analytic, &config.pow);
         }
     }
 
+    /// `mask_proximity::solve` requires `c_zk.num_vectors == 2 · num_masks`.
+    /// Builds C_zk for `num_masks = 2` (so `num_vectors = 4`), then calls
+    /// `solve` with `num_masks = 3` to trip the assertion.
     #[test]
     #[should_panic(expected = "c_zk.num_vectors must be 2 * num_masks")]
     fn solve_rejects_mismatched_num_vectors() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
-        let c_zk = irs_solver::solve_mask_code::<TestEmbedding>(
-            &spec,
-            MaskCodeMessageLen::new(2),
-            0,
-            LogInvRate::new(1),
-            4,
-        );
+        let c_zk = build_test_c_zk(&spec, 2, 1, 2);
         let _ = solve(&spec, c_zk, 3);
     }
 

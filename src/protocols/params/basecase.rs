@@ -49,13 +49,13 @@ pub fn solve<F: Field>(
     );
 
     let mode = match spec.mode {
-        SpecMode::Standard => basecase::Mode::Standard,
-        SpecMode::ZeroKnowledge => basecase::Mode::ZeroKnowledge,
+        SpecMode::Standard => basecase::BasecaseMode::Standard,
+        SpecMode::ZeroKnowledge => basecase::BasecaseMode::ZeroKnowledge,
     };
 
     let pow = match mode {
-        basecase::Mode::Standard => PowConfig::none(),
-        basecase::Mode::ZeroKnowledge => {
+        basecase::BasecaseMode::Standard => PowConfig::none(),
+        basecase::BasecaseMode::ZeroKnowledge => {
             PowConfig::grind_to(target_bits, analytic_error_bits(&commit), spec.hash_id)
         }
     };
@@ -82,9 +82,15 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::test_utils::{
-        arb_standard_johnson_spec, arb_zk_spec, assert_pow_closes_gap, deterministic_spec,
-        TestField, TEST_TARGET_RANGE,
+        arb_standard_johnson_spec, arb_zk_spec, assert_close, assert_pow_closes_gap,
+        deterministic_spec, TestField, TEST_TARGET_RANGE,
     };
+
+    /// `vector_size = 16` (2^4) and `log_inv_rate = 2` give a small but
+    /// non-degenerate basecase IRS. `folding_factor = 0` is the basecase
+    /// invariant (no folding, message_length = vector_size).
+    const FIXTURE_VECTOR_SIZE: usize = 16;
+    const FIXTURE_LOG_INV_RATE: u32 = 2;
 
     fn arb_dims() -> impl Strategy<Value = (u32, u32)> {
         (1u32..=4, 1u32..=3)
@@ -103,8 +109,8 @@ mod tests {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let ctx = RoundContext {
             round_index: 0,
-            vector_size: 16,
-            log_inv_rate: 2,
+            vector_size: FIXTURE_VECTOR_SIZE,
+            log_inv_rate: FIXTURE_LOG_INV_RATE,
             folding_factor: 0,
         };
         let commit: IrsConfig<Identity<TestField>> =
@@ -115,10 +121,7 @@ mod tests {
         let log_list = commit.list_size().log2();
         let expected = (field_bits - log_list).max(0.0);
 
-        assert!(
-            (got - expected).abs() < 1e-9,
-            "got {got} vs expected {expected}",
-        );
+        assert_close(got, expected);
     }
 
     proptest! {
@@ -128,7 +131,7 @@ mod tests {
             (log_size, log_inv_rate) in arb_dims(),
         ) {
             let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
-            prop_assert!(matches!(config.mode, basecase::Mode::Standard));
+            prop_assert!(matches!(config.mode, basecase::BasecaseMode::Standard));
             prop_assert_eq!(config.commit.interleaving_depth, 1);
             prop_assert_eq!(config.commit.num_vectors, 1);
             prop_assert_eq!(config.commit.vector_size, config.sumcheck.initial_size);
@@ -140,7 +143,7 @@ mod tests {
             (log_size, log_inv_rate) in arb_dims(),
         ) {
             let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
-            prop_assert!(matches!(config.mode, basecase::Mode::ZeroKnowledge));
+            prop_assert!(matches!(config.mode, basecase::BasecaseMode::ZeroKnowledge));
             prop_assert!(config.commit.mask_length() > 0);
         }
 

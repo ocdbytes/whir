@@ -140,12 +140,18 @@ mod tests {
         let _ = solve_mask_code::<M>(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 3);
     }
 
+    /// `irs_commit::solve` doesn't grind PoW, so this range can sit higher than
+    /// the shared `TEST_TARGET_RANGE` (which is capped at 50 to keep the PoW
+    /// gap below the 60-bit threshold). 80..=128 covers production-realistic
+    /// target sizes.
+    const IRS_TARGET_RANGE: std::ops::RangeInclusive<u32> = 80..=128;
+
     fn arb_zk_spec_default() -> impl Strategy<Value = SecuritySpec> {
-        arb_zk_spec(80..=128)
+        arb_zk_spec(IRS_TARGET_RANGE)
     }
 
     fn arb_standard_spec() -> impl Strategy<Value = SecuritySpec> {
-        arb_spec(Mode::Standard, 80..=128)
+        arb_spec(Mode::Standard, IRS_TARGET_RANGE)
     }
 
     proptest! {
@@ -175,6 +181,14 @@ mod tests {
         }
     }
 
+    /// Smoke-test fixture: 64-element vector folded by 2 at rate 1/2 — small
+    /// but produces a non-degenerate IRS for the non-identity embedding.
+    const SMOKE_VECTOR_SIZE: usize = 64;
+    const SMOKE_LOG_INV_RATE: u32 = 1;
+    const SMOKE_FOLDING_FACTOR: u32 = 2;
+    /// Arbitrary > 0 so the ZK mask sizing exercises the OOD path.
+    const SMOKE_OOD_BUDGET: usize = 2;
+
     /// Smoke test: `M::Source ≠ M::Target`, ZK path. Mask sizing depends only
     /// on the target field (via `field_size_bits`), but the generic embedding
     /// still flows through the Config and must compile + execute.
@@ -183,12 +197,12 @@ mod tests {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let ctx = RoundContext {
             round_index: 0,
-            vector_size: 64,
-            log_inv_rate: 1,
-            folding_factor: 2,
+            vector_size: SMOKE_VECTOR_SIZE,
+            log_inv_rate: SMOKE_LOG_INV_RATE,
+            folding_factor: SMOKE_FOLDING_FACTOR,
         };
         let config: IrsConfig<TestNonIdentityEmbedding> =
-            solve(&spec, &ctx, OodSampleBudget::new(2));
+            solve(&spec, &ctx, OodSampleBudget::new(SMOKE_OOD_BUDGET));
         assert!(config.mask_length() > 0);
     }
 }

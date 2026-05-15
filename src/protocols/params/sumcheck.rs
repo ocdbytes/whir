@@ -84,16 +84,18 @@ mod tests {
         irs_commit as irs_solver,
         spec::{MaskCodeMessageLen, Mode, OodSampleBudget},
         test_utils::{
-            arb_round_ctx, arb_standard_johnson_spec, arb_zk_spec, assert_pow_closes_gap,
-            build_minimal_mask_oracle, deterministic_spec, TestEmbedding, TestField,
-            TestNonIdentityEmbedding, TEST_TARGET_RANGE,
+            arb_round_ctx, arb_standard_johnson_spec, arb_zk_spec, assert_close,
+            assert_pow_closes_gap, build_minimal_mask_oracle, deterministic_spec, TestEmbedding,
+            TestField, TestNonIdentityEmbedding, EPS, TEST_TARGET_RANGE,
         },
     };
 
-    fn build_source_irs(
-        spec: &SecuritySpec,
-        ctx: &RoundContext,
-    ) -> IrsConfig<TestEmbedding> {
+    /// Mask-oracle fixture used by the formula tests + the ZK smoke test.
+    /// Both values are pow2 so `log2` is exact (no f64 drift in expected-vs-got).
+    const FIXTURE_C_ZK_LIST_SIZE: f64 = 4.0;
+    const FIXTURE_L_ZK: usize = 8;
+
+    fn build_source_irs(spec: &SecuritySpec, ctx: &RoundContext) -> IrsConfig<TestEmbedding> {
         irs_solver::solve(spec, ctx, OodSampleBudget::new(0))
     }
 
@@ -141,27 +143,21 @@ mod tests {
         let prox = irs.rbr_soundness_fold_prox_gaps();
         let expected = prox.min(field_bits - log_list - 1.0).max(0.0);
 
-        assert!(
-            (got - expected).abs() < 1e-9,
-            "got {got} vs expected {expected}"
-        );
+        assert_close(got, expected);
     }
 
     /// ZK branch (Lemma 6.5): `min(prox_gaps, log|F| − log|Λ(C)| − log|Λ(C_zk)| − log ℓ_zk).max(0)`.
     #[test]
     fn analytic_error_zk_formula() {
-        // Pow2 values so `log2` is exact.
-        const C_ZK_LIST_SIZE: f64 = 4.0;
-        const L_ZK_USIZE: usize = 8;
-        let log_c_zk_list = C_ZK_LIST_SIZE.log2();
-        let log_l_zk = (L_ZK_USIZE as f64).log2();
+        let log_c_zk_list = FIXTURE_C_ZK_LIST_SIZE.log2();
+        let log_l_zk = (FIXTURE_L_ZK as f64).log2();
 
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let ctx = fixture_ctx();
         let irs = build_source_irs(&spec, &ctx);
         let info = MaskOracleInfo {
-            c_zk_list_size: C_ZK_LIST_SIZE,
-            l_zk: MaskCodeMessageLen::new(L_ZK_USIZE),
+            c_zk_list_size: FIXTURE_C_ZK_LIST_SIZE,
+            l_zk: MaskCodeMessageLen::new(FIXTURE_L_ZK),
         };
 
         let got = f64::from(analytic_error_bits::<TestEmbedding>(&irs, Some(info)));
@@ -173,10 +169,7 @@ mod tests {
             .min(field_bits - log_list - log_c_zk_list - log_l_zk)
             .max(0.0);
 
-        assert!(
-            (got - expected).abs() < 1e-9,
-            "got {got} vs expected {expected}"
-        );
+        assert_close(got, expected);
     }
 
     /// Oracle large enough to drive `poly_id` strongly negative → clamped to 0.
@@ -234,7 +227,7 @@ mod tests {
             let mo = build_minimal_mask_oracle(&spec);
             let zk = f64::from(analytic_error_bits::<TestEmbedding>(&irs, mo));
             let standard = f64::from(analytic_error_bits::<TestEmbedding>(&irs, None));
-            prop_assert!(zk <= standard + 1e-9, "zk {} > standard {}", zk, standard);
+            prop_assert!(zk <= standard + EPS, "zk {} > standard {}", zk, standard);
         }
 
         /// `analytic_error + pow ≥ target`.
@@ -262,10 +255,13 @@ mod tests {
         let source_irs: IrsConfig<TestNonIdentityEmbedding> =
             irs_solver::solve(&spec, &ctx, OodSampleBudget::new(0));
         let info = MaskOracleInfo {
-            c_zk_list_size: 4.0,
-            l_zk: MaskCodeMessageLen::new(8),
+            c_zk_list_size: FIXTURE_C_ZK_LIST_SIZE,
+            l_zk: MaskCodeMessageLen::new(FIXTURE_L_ZK),
         };
         let config = solve(&spec, &ctx, &source_irs, Some(info));
-        assert!(matches!(config.mode, sumcheck::SumcheckMode::ZeroKnowledge { .. }));
+        assert!(matches!(
+            config.mode,
+            sumcheck::SumcheckMode::ZeroKnowledge { .. }
+        ));
     }
 }

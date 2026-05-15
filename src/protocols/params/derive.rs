@@ -297,7 +297,10 @@ pub(super) fn compute_t_ood<M: Embedding>(
 
     let r = source.mask_length();
     for _ in 0..MAX_ITER {
-        let new_t_ood = solve_for_degree(message_length + r + t_ood);
+        // Polynomial degree = `ℓ + ℓ_zk` where `ℓ_zk = next_pow2(r + t_ood)`
+        // (Lemma 9.3). Using `r + t_ood` would under-count when not pow2.
+        let l_zk = (r + t_ood).next_power_of_two();
+        let new_t_ood = solve_for_degree(message_length + l_zk);
         if new_t_ood == t_ood {
             return t_ood;
         }
@@ -317,7 +320,7 @@ mod tests {
         protocols::params::{
             bounds::SoundnessBounded,
             spec::FoldingFactor,
-            test_utils::{assert_pow_closes_gap, TestEmbedding},
+            test_utils::{assert_close, assert_pow_closes_gap, TestEmbedding},
         },
     };
 
@@ -482,7 +485,7 @@ mod tests {
         assert!(plan.rounds.is_empty());
         assert!(matches!(
             plan.basecase.mode,
-            crate::protocols::basecase::Mode::ZeroKnowledge
+            crate::protocols::basecase::BasecaseMode::ZeroKnowledge
         ));
     }
 
@@ -509,7 +512,7 @@ mod tests {
         ));
         if matches!(
             plan.basecase.mode,
-            crate::protocols::basecase::Mode::ZeroKnowledge
+            crate::protocols::basecase::BasecaseMode::ZeroKnowledge
         ) {
             sumcheck.min(f64::from(basecase_solver::analytic_error_bits(
                 &plan.basecase.commit,
@@ -534,7 +537,7 @@ mod tests {
             .map(|r| f64::from(r.analytic_bits()))
             .fold(f64::INFINITY, f64::min);
         let expected = min_round.min(basecase_min_bits(&plan));
-        assert!((bits - expected).abs() < 1e-9, "{bits} vs {expected}");
+        assert_close(bits, expected);
     }
 
     #[test]
@@ -564,10 +567,7 @@ mod tests {
             .map(|r| f64::from(r.analytic_bits()))
             .fold(f64::INFINITY, f64::min);
         let expected = mo_floor.min(min_round).min(basecase_min_bits(&plan));
-        assert!(
-            (plan_bits - expected).abs() < 1e-9,
-            "{plan_bits} vs {expected}"
-        );
+        assert_close(plan_bits, expected);
     }
 
     #[test]
@@ -579,7 +579,7 @@ mod tests {
         );
         assert!(matches!(
             plan.basecase.mode,
-            crate::protocols::basecase::Mode::ZeroKnowledge
+            crate::protocols::basecase::BasecaseMode::ZeroKnowledge
         ));
         assert_eq!(plan.basecase.commit.interleaving_depth, 1);
         // Sumcheck folds basecase to size 1.
@@ -593,6 +593,44 @@ mod tests {
     const TIGHT_POW_BUDGET_BITS: u32 = 10;
     /// Comfortably above `TIGHT_POW_BUDGET_BITS`.
     const OVER_BUDGET_INJECTED_BITS: f64 = 50.0;
+
+    /// Bound 3 + Bound 7: HVZK privacy error in bits matches the closed-form
+    /// `−log Σ_r (t_ood_r² + t_ood_r) / (2|F|)` over ZK rounds.
+    #[test]
+    fn privacy_error_bits_matches_bound_3_sum() {
+        let spec = test_spec(Mode::ZeroKnowledge);
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        );
+        let field_bits = <crate::algebra::fields::Field64 as FieldWithSize>::field_size_bits();
+        let mut expected_total = 0.0_f64;
+        for r in &plan.rounds {
+            let RoundMode::ZeroKnowledge { t_ood, .. } = r.mode else {
+                panic!("expected ZK round");
+            };
+            let t = t_ood.get() as f64;
+            expected_total += 2_f64.powf(f64::midpoint(t * t, t).log2() - field_bits);
+        }
+        let expected_bits = -expected_total.log2();
+        let got = f64::from(plan.privacy_error_bits());
+        assert_close(got, expected_bits);
+    }
+
+    /// Standard-mode plans have no HVZK claim — `privacy_error_bits` returns
+    /// the spec's `target_security_bits` as a sentinel.
+    #[test]
+    fn privacy_error_bits_standard_returns_target_sentinel() {
+        let spec = test_spec(Mode::Standard);
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        );
+        assert_eq!(
+            f64::from(plan.privacy_error_bits()),
+            f64::from(PLAN_FIXTURE_TARGET_BITS),
+        );
+    }
 
     /// Derived plans must satisfy their own `max_pow_bits` budget.
     #[test]
@@ -669,7 +707,7 @@ mod tests {
         // γ-slot is ZK-only.
         if matches!(
             plan.basecase.mode,
-            crate::protocols::basecase::Mode::ZeroKnowledge
+            crate::protocols::basecase::BasecaseMode::ZeroKnowledge
         ) {
             assert_pow_closes_gap(
                 spec,
@@ -713,7 +751,7 @@ mod tests {
             }
             prop_assert!(matches!(
                 plan.basecase.mode,
-                crate::protocols::basecase::Mode::Standard
+                crate::protocols::basecase::BasecaseMode::Standard
             ));
             prop_assert_eq!(plan.basecase.commit.interleaving_depth, 1);
         }
@@ -746,7 +784,7 @@ mod tests {
             }
             prop_assert!(matches!(
                 plan.basecase.mode,
-                crate::protocols::basecase::Mode::ZeroKnowledge
+                crate::protocols::basecase::BasecaseMode::ZeroKnowledge
             ));
         }
 

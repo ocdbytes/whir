@@ -32,7 +32,7 @@ use crate::{
 
 /// Standard / ZeroKnowledge selector for code-switch.
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
-pub enum Mode {
+pub enum CodeSwitchMode {
     Standard,
     ZeroKnowledge { message_mask_length: NonZeroUsize },
 }
@@ -44,7 +44,7 @@ pub enum Mode {
 pub struct Config<M: Embedding> {
     pub source: IrsConfig<M>,
     pub target: IrsConfig<Identity<M::Target>>,
-    pub mode: Mode,
+    pub mode: CodeSwitchMode,
     pub out_domain_samples: usize,
     pub pow: proof_of_work::Config,
 }
@@ -66,7 +66,7 @@ impl<M: Embedding> Config<M> {
         source_config: IrsConfig<M>,
         target_config: IrsConfig<Identity<M::Target>>,
         out_domain_samples: usize,
-        mode: Mode,
+        mode: CodeSwitchMode,
         pow: proof_of_work::Config,
     ) -> Self {
         assert_eq!(
@@ -99,7 +99,7 @@ impl<M: Embedding> Config<M> {
             source_config.interleaving_depth.is_power_of_two(),
             "source.interleaving_depth must be a power of 2"
         );
-        if let Mode::ZeroKnowledge {
+        if let CodeSwitchMode::ZeroKnowledge {
             message_mask_length,
         } = &mode
         {
@@ -140,8 +140,8 @@ impl<M: Embedding> Config<M> {
     /// Mask oracle length `ℓ_zk`. Returns 0 in Standard mode.
     pub const fn message_mask_length(&self) -> usize {
         match &self.mode {
-            Mode::Standard => 0,
-            Mode::ZeroKnowledge {
+            CodeSwitchMode::Standard => 0,
+            CodeSwitchMode::ZeroKnowledge {
                 message_mask_length,
             } => message_mask_length.get(),
         }
@@ -149,7 +149,7 @@ impl<M: Embedding> Config<M> {
 
     /// `true` iff the protocol is configured for ZK.
     pub const fn is_zk(&self) -> bool {
-        matches!(&self.mode, Mode::ZeroKnowledge { .. })
+        matches!(&self.mode, CodeSwitchMode::ZeroKnowledge { .. })
     }
 
     /// Length of the covector for this code-switch.
@@ -263,8 +263,8 @@ impl<M: Embedding> Config<M> {
         for &point in ood_points {
             let f_eval = univariate_evaluate(message, point);
             let answer = match &self.mode {
-                Mode::Standard => f_eval,
-                Mode::ZeroKnowledge { .. } => {
+                CodeSwitchMode::Standard => f_eval,
+                CodeSwitchMode::ZeroKnowledge { .. } => {
                     let mask_eval = univariate_evaluate(mask, point);
                     let shift = point.pow([msg_len as u64]);
                     f_eval + shift * mask_eval
@@ -286,7 +286,7 @@ impl<M: Embedding> Config<M> {
         in_domain_points: &[M::Target],
     ) {
         match &self.mode {
-            Mode::Standard => {
+            CodeSwitchMode::Standard => {
                 let all_points: Vec<_> =
                     ood_points.iter().chain(in_domain_points).copied().collect();
                 let pows: Vec<_> = ood_rlc_coeffs
@@ -296,7 +296,7 @@ impl<M: Embedding> Config<M> {
                     .collect();
                 geometric_accumulate(covector, pows, &all_points);
             }
-            Mode::ZeroKnowledge { .. } => {
+            CodeSwitchMode::ZeroKnowledge { .. } => {
                 geometric_accumulate(covector, ood_rlc_coeffs.to_vec(), ood_points);
                 geometric_accumulate(
                     &mut covector[..self.source.masked_message_length()],
@@ -486,12 +486,12 @@ mod tests {
                                     // masks fold to a single length-mask_length chunk).
                                     let r = source.mask_length();
                                     let mode = if zk {
-                                        Mode::ZeroKnowledge {
+                                        CodeSwitchMode::ZeroKnowledge {
                                             message_mask_length: NonZeroUsize::new(r + fresh_s_len)
                                                 .expect("ZK ⇒ r + fresh_s_len > 0"),
                                         }
                                     } else {
-                                        Mode::Standard
+                                        CodeSwitchMode::Standard
                                     };
                                     Self::new(
                                         source.clone(),

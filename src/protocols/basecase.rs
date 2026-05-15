@@ -28,7 +28,7 @@ pub struct Opening<F: Field> {
 
 /// Standard / ZeroKnowledge selector for basecase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Mode {
+pub enum BasecaseMode {
     Standard,
     ZeroKnowledge,
 }
@@ -39,7 +39,7 @@ pub enum Mode {
 pub struct Config<F: Field> {
     pub commit: irs_commit::Config<Identity<F>>,
     pub sumcheck: sumcheck::Config<F>,
-    pub mode: Mode,
+    pub mode: BasecaseMode,
     pub pow: proof_of_work::Config,
 }
 
@@ -49,7 +49,7 @@ impl<F: Field> Config<F> {
     }
 
     pub const fn is_zk(&self) -> bool {
-        matches!(self.mode, Mode::ZeroKnowledge)
+        matches!(self.mode, BasecaseMode::ZeroKnowledge)
     }
 
     pub fn prove<H, R>(
@@ -126,12 +126,12 @@ impl<F: Field> Config<F> {
         Standard: Distribution<F>,
     {
         match self.mode {
-            Mode::Standard => {
+            BasecaseMode::Standard => {
                 prover_state.prover_messages(vector);
                 prover_state.prover_messages(&witness.masks);
                 None
             }
-            Mode::ZeroKnowledge => {
+            BasecaseMode::ZeroKnowledge => {
                 let blinding_vector = random_vector(prover_state.rng(), vector.len());
                 let blinding_witness = self.commit.commit(prover_state, &[&blinding_vector]);
                 let blinding_inner_product = dot(&blinding_vector, covector);
@@ -236,8 +236,8 @@ impl<F: Field> Config<F> {
         Hash: ProverMessage<[H::U]>,
     {
         match self.mode {
-            Mode::Standard => Ok(None),
-            Mode::ZeroKnowledge => {
+            BasecaseMode::Standard => Ok(None),
+            BasecaseMode::ZeroKnowledge => {
                 let blinding_commitment = self.commit.receive_commitment(verifier_state)?;
                 let blinding_inner_product: F = verifier_state.prover_message()?;
                 // Grind the Theorem 7.1 γ-combination gap before γ is sampled.
@@ -274,9 +274,9 @@ mod tests {
                     sumcheck::SumcheckMode::Standard,
                 ),
                 mode: if is_zk {
-                    Mode::ZeroKnowledge
+                    BasecaseMode::ZeroKnowledge
                 } else {
-                    Mode::Standard
+                    BasecaseMode::Standard
                 },
                 pow: proof_of_work::Config::none(),
             })
