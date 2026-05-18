@@ -7,8 +7,10 @@ use crate::{
     algebra::{embedding::Identity, fields::FieldWithSize},
     bits::Bits,
     protocols::{
-        irs_commit::Config as IrsConfig, mask_proximity::Config as MaskProximityConfig,
-        params::spec::SecuritySpec, proof_of_work::Config as PowConfig,
+        irs_commit::Config as IrsConfig,
+        mask_proximity::Config as MaskProximityConfig,
+        params::{bounds::SoundnessBounded, spec::SecuritySpec},
+        proof_of_work::Config as PowConfig,
     },
 };
 
@@ -36,6 +38,12 @@ pub fn analytic_error_bits<F: Field>(c_zk: &IrsConfig<Identity<F>>, num_masks: u
     #[allow(clippy::cast_precision_loss)]
     let log_combined = ((num_masks * (deg - 1)) as f64).log2();
     Bits::new((field_bits - log_combined).max(0.0))
+}
+
+impl<F: Field> SoundnessBounded for MaskProximityConfig<F> {
+    fn analytic_bits(&self) -> Bits {
+        analytic_error_bits(&self.c_zk_commit, self.num_masks)
+    }
 }
 
 #[cfg(test)]

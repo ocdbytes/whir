@@ -84,9 +84,8 @@ pub fn arb_standard_johnson_spec(
 /// `log_size ∈ 4..=8` (vector_size 16..256) leaves room for ≥ 2·folding_factor
 /// post-folding while capping proptest time.
 pub fn arb_round_ctx() -> impl Strategy<Value = RoundContext> {
-    (0usize..=3, 4u32..=8, 1u32..=4, 1u32..=3).prop_map(
-        |(round_index, log_size, log_inv_rate, folding_factor)| RoundContext {
-            round_index,
+    (4u32..=8, 1u32..=4, 1u32..=3).prop_map(
+        |(log_size, log_inv_rate, folding_factor)| RoundContext {
             vector_size: 1usize << log_size,
             log_inv_rate,
             folding_factor,
@@ -161,7 +160,6 @@ pub fn build_round_io<M: Embedding + Default>(
     c_zk_list_size: Option<f64>,
 ) -> (IrsConfig<M>, IrsConfig<Identity<M::Target>>, usize) {
     let source_ctx = RoundContext {
-        round_index: 0,
         vector_size: 1usize << num_vars,
         log_inv_rate,
         folding_factor,
@@ -169,7 +167,6 @@ pub fn build_round_io<M: Embedding + Default>(
     let source = irs_solver::solve(spec, &source_ctx, OodSampleBudget::new(0));
 
     let target_ctx = RoundContext {
-        round_index: 1,
         vector_size: source.message_length(),
         log_inv_rate: log_inv_rate + folding_factor - 1,
         folding_factor,

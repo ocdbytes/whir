@@ -20,6 +20,9 @@ impl<T: Copy, Tag> Tagged<T, Tag> {
 pub struct SecuritySpec {
     pub mode: Mode,
     pub target_security_bits: u32,
+    /// Per-slot PoW budget — every grinding slot may close at most this many
+    /// bits of gap to `target_security_bits`. Not a cumulative budget across
+    /// slots; `check_pow_bits` enforces it per-slot. `None` ⇒ `Some(0)`.
     pub max_pow_bits: Option<u32>,
     pub hash_id: EngineId,
 }
@@ -80,7 +83,6 @@ pub struct TuningSpec {
 /// Per-round context handed to a sub-protocol builder.
 #[derive(Debug, Clone)]
 pub struct RoundContext {
-    pub round_index: usize,
     pub vector_size: usize,
     pub log_inv_rate: u32,
     pub folding_factor: u32,

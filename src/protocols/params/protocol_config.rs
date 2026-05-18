@@ -14,14 +14,13 @@ use crate::{
     },
     bits::Bits,
     protocols::{
-        basecase::{self, Config as BasecaseConfig},
+        basecase::Config as BasecaseConfig,
         code_switch::Config as CodeSwitchConfig,
         irs_commit::Config as IrsConfig,
         mask_proximity::Config as MaskProximityConfig,
         params::{
-            basecase as basecase_solver,
             bounds::SoundnessBounded,
-            code_switch as code_switch_solver, mask_proximity as mask_proximity_solver,
+            code_switch as code_switch_solver,
             spec::{MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
             sumcheck as sumcheck_solver,
         },
@@ -83,26 +82,12 @@ impl<M: Embedding> ProtocolConfig<M> {
 
 impl<M: Embedding> SoundnessBounded for ProtocolConfig<M> {
     fn analytic_bits(&self) -> Bits {
-        let mut min_bits = f64::INFINITY;
+        let mut min_bits = f64::from(self.basecase.analytic_bits());
         for round in &self.rounds {
             min_bits = min_bits.min(f64::from(round.analytic_bits()));
             if let Some(mo) = &round.mask_oracle {
                 min_bits = min_bits.min(f64::from(mo.analytic_bits()));
             }
-        }
-        // Basecase sumcheck per-round bound applies in both modes; the γ-slot
-        // only contributes in ZK.
-        min_bits = min_bits.min(f64::from(sumcheck_solver::analytic_error_bits(
-            &self.basecase.commit,
-            None,
-        )));
-        if matches!(self.basecase.mode, basecase::BasecaseMode::ZeroKnowledge) {
-            min_bits = min_bits.min(f64::from(basecase_solver::analytic_error_bits(
-                &self.basecase.commit,
-            )));
-        }
-        if min_bits.is_infinite() {
-            return Bits::new(f64::from(self.security.target_security_bits));
         }
         Bits::new(min_bits.max(0.0))
     }
@@ -196,9 +181,6 @@ impl<F: Field> MaskOracleConfig<F> {
 
 impl<F: Field> SoundnessBounded for MaskOracleConfig<F> {
     fn analytic_bits(&self) -> Bits {
-        mask_proximity_solver::analytic_error_bits(
-            &self.mask_proximity.c_zk_commit,
-            self.mask_proximity.num_masks,
-        )
+        self.mask_proximity.analytic_bits()
     }
 }

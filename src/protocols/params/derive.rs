@@ -127,7 +127,6 @@ fn round_layout(tuning: &TuningSpec) -> RoundLayout {
 
 const fn round_context(shape: &RoundShape) -> RoundContext {
     RoundContext {
-        round_index: shape.round_index,
         vector_size: shape.source_vector_size,
         log_inv_rate: shape.source_log_inv_rate,
         folding_factor: shape.source_folding_factor,
@@ -136,7 +135,6 @@ const fn round_context(shape: &RoundShape) -> RoundContext {
 
 fn target_context<M: Embedding>(shape: &RoundShape, source: &IrsConfig<M>) -> RoundContext {
     RoundContext {
-        round_index: shape.round_index,
         vector_size: source.message_length(),
         log_inv_rate: shape.source_log_inv_rate + shape.source_folding_factor.saturating_sub(1),
         folding_factor: shape.target_folding_factor,
@@ -505,23 +503,6 @@ mod tests {
         }
     }
 
-    fn basecase_min_bits<M: Embedding>(plan: &ProtocolConfig<M>) -> f64 {
-        let sumcheck = f64::from(sumcheck_solver::analytic_error_bits(
-            &plan.basecase.commit,
-            None,
-        ));
-        if matches!(
-            plan.basecase.mode,
-            crate::protocols::basecase::BasecaseMode::ZeroKnowledge
-        ) {
-            sumcheck.min(f64::from(basecase_solver::analytic_error_bits(
-                &plan.basecase.commit,
-            )))
-        } else {
-            sumcheck
-        }
-    }
-
     #[test]
     fn analytic_bits_finite_and_positive_standard() {
         let spec = test_spec(Mode::Standard);
@@ -536,7 +517,7 @@ mod tests {
             .iter()
             .map(|r| f64::from(r.analytic_bits()))
             .fold(f64::INFINITY, f64::min);
-        let expected = min_round.min(basecase_min_bits(&plan));
+        let expected = min_round.min(f64::from(plan.basecase.analytic_bits()));
         assert_close(bits, expected);
     }
 
@@ -566,7 +547,9 @@ mod tests {
             .iter()
             .map(|r| f64::from(r.analytic_bits()))
             .fold(f64::INFINITY, f64::min);
-        let expected = mo_floor.min(min_round).min(basecase_min_bits(&plan));
+        let expected = mo_floor
+            .min(min_round)
+            .min(f64::from(plan.basecase.analytic_bits()));
         assert_close(plan_bits, expected);
     }
 

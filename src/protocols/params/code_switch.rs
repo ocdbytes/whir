@@ -238,7 +238,6 @@ mod tests {
         ) {
             // Break the t_ood ↔ c_zk.list_size cycle with a placeholder C_zk.
             let placeholder_source_ctx = RoundContext {
-                round_index: 0,
                 vector_size: 1usize << num_vars,
                 log_inv_rate,
                 folding_factor,
@@ -300,13 +299,11 @@ mod tests {
         const FOLDING_FACTOR: u32 = 2;
 
         let source_ctx = RoundContext {
-            round_index: 0,
             vector_size: SOURCE_VECTOR_SIZE,
             log_inv_rate: SOURCE_LOG_INV_RATE,
             folding_factor: FOLDING_FACTOR,
         };
         let target_ctx = RoundContext {
-            round_index: 1,
             vector_size: source_ctx.vector_size / (1 << source_ctx.folding_factor),
             log_inv_rate: source_ctx.log_inv_rate + source_ctx.folding_factor - 1,
             folding_factor: source_ctx.folding_factor,

@@ -9,6 +9,7 @@ use crate::{
         basecase::{self, Config as BasecaseConfig},
         irs_commit::Config as IrsConfig,
         params::{
+            bounds::SoundnessBounded,
             irs_commit as irs_solver,
             spec::{Mode as SpecMode, OodSampleBudget, RoundContext, SecuritySpec},
             sumcheck as sumcheck_solver,
@@ -28,7 +29,6 @@ pub fn solve<F: Field>(
     assert!(vector_size > 0, "basecase requires vector_size ≥ 1");
 
     let ctx = RoundContext {
-        round_index: 0,
         vector_size,
         log_inv_rate,
         folding_factor: 0,
@@ -75,6 +75,22 @@ pub fn analytic_error_bits<F: Field>(commit: &IrsConfig<Identity<F>>) -> Bits {
     Bits::new((field_bits - log_list).max(0.0))
 }
 
+impl<F: Field> SoundnessBounded for BasecaseConfig<F> {
+    /// `min(sumcheck round error, γ-slot error)`. The γ-slot only contributes
+    /// in ZK mode; Standard collapses to the sumcheck term.
+    fn analytic_bits(&self) -> Bits {
+        let sumcheck_term =
+            f64::from(sumcheck_solver::analytic_error_bits(&self.commit, None));
+        let min_bits = match self.mode {
+            basecase::BasecaseMode::Standard => sumcheck_term,
+            basecase::BasecaseMode::ZeroKnowledge => {
+                sumcheck_term.min(f64::from(analytic_error_bits(&self.commit)))
+            }
+        };
+        Bits::new(min_bits.max(0.0))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
@@ -108,7 +124,6 @@ mod tests {
 
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let ctx = RoundContext {
-            round_index: 0,
             vector_size: FIXTURE_VECTOR_SIZE,
             log_inv_rate: FIXTURE_LOG_INV_RATE,
             folding_factor: 0,

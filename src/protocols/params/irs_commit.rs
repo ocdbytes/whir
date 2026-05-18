@@ -196,7 +196,6 @@ mod tests {
     fn solve_works_with_basefield_embedding_zk() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let ctx = RoundContext {
-            round_index: 0,
             vector_size: SMOKE_VECTOR_SIZE,
             log_inv_rate: SMOKE_LOG_INV_RATE,
             folding_factor: SMOKE_FOLDING_FACTOR,

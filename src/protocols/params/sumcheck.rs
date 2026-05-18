@@ -106,7 +106,6 @@ mod tests {
 
     fn fixture_ctx() -> RoundContext {
         RoundContext {
-            round_index: 0,
             vector_size: 1 << FIXTURE_LOG_VECTOR_SIZE,
             log_inv_rate: FIXTURE_LOG_INV_RATE,
             folding_factor: FIXTURE_FOLDING_FACTOR,

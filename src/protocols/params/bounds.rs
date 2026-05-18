@@ -10,6 +10,7 @@ use crate::{
 
 /// Analytic soundness bits (excluding PoW) delivered by a protocol-level unit.
 /// Sub-protocol `Config` types lack the cross-protocol context to self-report.
+// Library-side callers land with protocol wiring; until then only tests use it.
 #[allow(dead_code)]
 pub trait SoundnessBounded {
     fn analytic_bits(&self) -> Bits;
@@ -89,13 +90,6 @@ pub fn one_minus_distance_log2(log_inv_rate: f64, johnson_slack: f64) -> f64 {
 /// log2 of the per-OOD-sample Schwartz-Zippel error: (k-1)/|F|.
 pub fn ood_per_sample_log2(message_length: usize, field_bits: f64) -> f64 {
     ((message_length - 1) as f64).log2() - field_bits
-}
-
-/// PoW difficulty to close a soundness gap: `max(0, target − achieved)`.
-// TODO(phase-6): re-wire from the cross-protocol PoW pass.
-#[allow(dead_code)]
-pub fn pow_bits_to_close_gap(target_security_bits: f64, achieved_security_bits: f64) -> Bits {
-    Bits::new((target_security_bits - achieved_security_bits).max(0.0))
 }
 
 #[cfg(test)]
@@ -246,13 +240,5 @@ mod tests {
             7.0 * LOG2_10 + 3.5 * MCA_LOG_INV_RATE + 2.0 * (MCA_MESSAGE_LENGTH as f64).log2()
                 - MCA_FIELD_BITS;
         assert_close(got, expected);
-    }
-
-    /// `pow_bits_to_close_gap` clamps negative gaps to zero (no anti-grind).
-    #[test]
-    fn pow_bits_to_close_gap_saturates_at_zero() {
-        assert_eq!(f64::from(pow_bits_to_close_gap(100.0, 120.0)), 0.0);
-        assert_eq!(f64::from(pow_bits_to_close_gap(100.0, 100.0)), 0.0);
-        assert_eq!(f64::from(pow_bits_to_close_gap(100.0, 60.0)), 40.0);
     }
 }
