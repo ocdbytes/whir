@@ -84,13 +84,13 @@ pub fn arb_standard_johnson_spec(
 /// `log_size ∈ 4..=8` (vector_size 16..256) leaves room for ≥ 2·folding_factor
 /// post-folding while capping proptest time.
 pub fn arb_round_ctx() -> impl Strategy<Value = RoundContext> {
-    (4u32..=8, 1u32..=4, 1u32..=3).prop_map(
-        |(log_size, log_inv_rate, folding_factor)| RoundContext {
+    (4u32..=8, 1u32..=4, 1u32..=3).prop_map(|(log_size, log_inv_rate, folding_factor)| {
+        RoundContext {
             vector_size: 1usize << log_size,
             log_inv_rate,
             folding_factor,
-        },
-    )
+        }
+    })
 }
 
 /// `None` in Standard; `Some(ℓ_zk=2, c_zk rate 1/2)` in ZK.

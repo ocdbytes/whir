@@ -79,8 +79,7 @@ impl<F: Field> SoundnessBounded for BasecaseConfig<F> {
     /// `min(sumcheck round error, γ-slot error)`. The γ-slot only contributes
     /// in ZK mode; Standard collapses to the sumcheck term.
     fn analytic_bits(&self) -> Bits {
-        let sumcheck_term =
-            f64::from(sumcheck_solver::analytic_error_bits(&self.commit, None));
+        let sumcheck_term = f64::from(sumcheck_solver::analytic_error_bits(&self.commit, None));
         let min_bits = match self.mode {
             basecase::BasecaseMode::Standard => sumcheck_term,
             basecase::BasecaseMode::ZeroKnowledge => {
