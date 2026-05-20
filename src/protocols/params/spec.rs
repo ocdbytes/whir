@@ -104,7 +104,7 @@ pub enum MaskCodeMessageLenTag {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LogInvRateTag {}
 
-/// Bound 2 OOD-sample budget.
+/// OOD-sample budget (Lemma 9.9 / bounds doc §5.2).
 pub type OodSampleBudget = Tagged<usize, OodSampleBudgetTag>;
 
 /// C_zk message length (Theorem 9.6: `ℓ_zk ≥ source mask length`).

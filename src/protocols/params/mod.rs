@@ -1,3 +1,9 @@
+//! Parameter selection for HVZK-WHIR.
+//!
+//! Soundness and ZK bound derivations (referred to in submodule comments as
+//! "the bounds doc, §N") live at
+//! <https://hackmd.io/@1q1q-TiuQN6fAkxaN41u-Q/ryBoT_UA-e>.
+
 pub mod basecase;
 pub(crate) mod bounds;
 pub mod code_switch;

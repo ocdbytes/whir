@@ -57,7 +57,7 @@ impl<M: Embedding> ProtocolConfig<M> {
     }
 
     /// HVZK privacy error in bits, summed across ZK rounds:
-    /// `−log Σ_r (t_ood_r² + t_ood_r) / (2|F|)` (Bound 3 + Bound 7).
+    /// `−log Σ_r (t_ood_r² + t_ood_r) / (2|F|)` (bounds doc, §5.3 + §5.7).
     /// Standard-mode plans return `target_security_bits` as a sentinel —
     /// HVZK isn't claimed when there are no ZK rounds.
     pub fn privacy_error_bits(&self) -> Bits {
@@ -108,7 +108,7 @@ pub struct RoundConfig<M: Embedding> {
 pub enum RoundMode {
     Standard,
     ZeroKnowledge {
-        /// Bound 2 / Lemma 9.9.
+        /// Lemma 9.9 OOD-sample budget (bounds doc §5.2).
         t_ood: OodSampleBudget,
         /// Slim view of this round's [`MaskOracleConfig`] (C_zk's list size +
         /// ℓ_zk) — denormalized so soundness routines can read it without
@@ -158,7 +158,8 @@ impl<M: Embedding> SoundnessBounded for RoundConfig<M> {
 pub struct MaskOracleConfig<F: Field> {
     /// `num_vectors = 2 · (k + 1)` (Construction 7.2: originals + fresh).
     pub c_zk: IrsConfig<Identity<F>>,
-    /// `next_pow2(r + t_ood)` for this round (Lemma 9.3).
+    /// `next_pow2(r + t_ood)` for this round: Theorem 9.6 witness layout
+    /// (`0^{ℓ_zk − r}` padding) + Lemma 9.3 `(ℓ_zk − r, 0)`-privacy precondition.
     pub l_zk: MaskCodeMessageLen,
     pub mask_proximity: MaskProximityConfig<F>,
 }

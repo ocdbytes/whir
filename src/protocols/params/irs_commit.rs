@@ -149,7 +149,7 @@ mod tests {
     }
 
     proptest! {
-        /// Lemma 9.5: mask covers all revealed evaluations.
+        /// Lemma 9.5 (part ii): mask covers all revealed evaluations.
         #[test]
         fn zk_mask_covers_lemma_9_5(
             spec in arb_zk_spec_default(),

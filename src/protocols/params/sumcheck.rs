@@ -69,7 +69,9 @@ const fn num_sumcheck_rounds(ctx: &RoundContext) -> usize {
     ctx.folding_factor as usize
 }
 
-/// Lemma 6.4, p.38: 3 coefficients suffice for a degree-2 round polynomial.
+/// Construction 6.3 step 4(a) sends `h_j ∈ F^{<max{2, ℓ_zk}}[X]`. WHIR's round
+/// polynomial is degree-2, so 3 coefficients suffice; `ℓ_zk = 3` is the
+/// smallest value that masks it (Lemma 6.4 requires only `ℓ_zk ≥ 2`).
 const fn zk_mask_length() -> usize {
     3
 }

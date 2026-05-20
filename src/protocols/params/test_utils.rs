@@ -154,7 +154,7 @@ pub fn build_test_c_zk(
 /// mirroring `derive::build_zk_round_data`. Using `target.list_size()` here
 /// instead would couple `t_ood` to the target's effective rate (which itself
 /// depends on `t_ood` via the mask), producing a non-monotone oscillation
-/// once the mask is tight (Lemma 9.5) rather than pow2-padded.
+/// once the mask is tight (Lemma 9.5 part ii) rather than pow2-padded.
 pub fn build_round_io<M: Embedding + Default>(
     spec: &SecuritySpec,
     log_inv_rate: u32,

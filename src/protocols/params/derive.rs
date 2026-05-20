@@ -143,8 +143,9 @@ fn target_context<M: Embedding>(shape: &RoundShape, source: &IrsConfig<M>) -> Ro
 
 /// Per-round ZK builder. C_zk holds `2 · (k + 1)` columns (Construction 7.2
 /// originals + fresh): `k` sumcheck masks (Lemma 6.4) + one `(r ‖ s)`
-/// code-switch mask (Construction 9.7). `ℓ_zk = next_pow2(r + t_ood)` per
-/// Lemma 9.3; `t_ood` solves Lemma 9.9 term 1.
+/// code-switch mask (Construction 9.7). `ℓ_zk = next_pow2(r + t_ood)` from
+/// Theorem 9.6's witness layout + Lemma 9.3's `r ≥ t` privacy precondition;
+/// `t_ood` solves Lemma 9.9 term 1.
 fn build_zk_round_config<M: Embedding + Default>(
     spec: &SecuritySpec,
     shape: &RoundShape,
@@ -255,7 +256,8 @@ fn build_round_config<M: Embedding + Default>(
     }
 }
 
-/// `ℓ_zk = next_pow2(r + t_ood)` (Lemma 9.3).
+/// `ℓ_zk = next_pow2(r + t_ood)`: Theorem 9.6 witness layout `0^{ℓ_zk − r}`
+/// combined with Lemma 9.3's `r ≥ t` privacy precondition.
 pub(super) const fn compute_l_zk<M: Embedding>(
     source: &IrsConfig<M>,
     t_ood: usize,
@@ -296,7 +298,8 @@ pub(super) fn compute_t_ood<M: Embedding>(
     let r = source.mask_length();
     for _ in 0..MAX_ITER {
         // Polynomial degree = `ℓ + ℓ_zk` where `ℓ_zk = next_pow2(r + t_ood)`
-        // (Lemma 9.3). Using `r + t_ood` would under-count when not pow2.
+        // (Theorem 9.6 / Lemma 9.3). Using `r + t_ood` would under-count when
+        // not pow2.
         let l_zk = (r + t_ood).next_power_of_two();
         let new_t_ood = solve_for_degree(message_length + l_zk);
         if new_t_ood == t_ood {
@@ -577,8 +580,8 @@ mod tests {
     /// Comfortably above `TIGHT_POW_BUDGET_BITS`.
     const OVER_BUDGET_INJECTED_BITS: f64 = 50.0;
 
-    /// Bound 3 + Bound 7: HVZK privacy error in bits matches the closed-form
-    /// `−log Σ_r (t_ood_r² + t_ood_r) / (2|F|)` over ZK rounds.
+    /// Bounds doc §5.3 + §5.7: HVZK privacy error in bits matches the closed
+    /// form `−log Σ_r (t_ood_r² + t_ood_r) / (2|F|)` over ZK rounds.
     #[test]
     fn privacy_error_bits_matches_bound_3_sum() {
         let spec = test_spec(Mode::ZeroKnowledge);
@@ -761,7 +764,7 @@ mod tests {
                 let num_masks = k + 1;
                 prop_assert_eq!(mask_oracle.c_zk.num_vectors, 2 * num_masks);
                 prop_assert_eq!(mask_oracle.mask_proximity.num_masks, num_masks);
-                // Bound 3 (Lemma 9.3): ℓ_zk ≥ r + t_ood for this round.
+                // Theorem 9.6 / Lemma 9.3: ℓ_zk ≥ r + t_ood for this round.
                 let source_mask = r.code_switch.source.mask_length();
                 prop_assert!(mask_oracle.l_zk.get() >= source_mask + t_ood.get());
             }

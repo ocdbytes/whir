@@ -33,7 +33,7 @@ pub fn solve<M: Embedding>(
         let l_zk = info.l_zk.get();
         assert!(
             l_zk >= source.mask_length() + t_ood,
-            "ℓ_zk ({l_zk}) < r + t_ood ({} + {}) — violates Bound 3",
+            "ℓ_zk ({l_zk}) < r + t_ood ({} + {}) — violates Theorem 9.6 witness sizing",
             source.mask_length(),
             t_ood,
         );
@@ -81,7 +81,7 @@ pub fn analytic_error_bits<M: Embedding>(
     // In-domain term — Lemma 9.9, term 2.
     let in_domain_term = source.rbr_queries();
 
-    // Combination term — Lemma 9.9, term 3 (γ-RLC, bounds.md §5.1).
+    // Combination term — Lemma 9.9, term 3 (γ-RLC, bounds doc §5.1).
     #[allow(clippy::cast_precision_loss)]
     let log_count = ((t_ood + source.in_domain_samples * source.interleaving_depth) as f64).log2();
     let combination_term = field_bits - log_count - combined_list.log2();
