@@ -207,7 +207,7 @@ fn build_zk_round_data<M: Embedding + Default>(
     let target_list_size = johnson_list_size(target_log_inv_rate);
 
     let mut t_ood = 0;
-    let mut source: IrsConfig<M> = irs_solver::solve(spec, &src_ctx, OodSampleBudget::new(0));
+    let mut source: IrsConfig<M> = irs_solver::solve(spec, &src_ctx, OodSampleBudget::ZERO);
     for _ in 0..LOCAL_MAX_ITER {
         let new_t_ood = compute_t_ood(spec, &source, target_list_size, Some(c_zk_list_size));
         if new_t_ood == t_ood {
@@ -237,12 +237,9 @@ fn build_round_config<M: Embedding + Default>(
     debug_assert!(mask_oracle.is_none(), "ZK path uses build_zk_round_config");
 
     let src_ctx = round_context(shape);
-    let source: IrsConfig<M> = irs_solver::solve(spec, &src_ctx, OodSampleBudget::new(0));
-    let target: IrsConfig<Identity<M::Target>> = irs_solver::solve(
-        spec,
-        &target_context(shape, &source),
-        OodSampleBudget::new(0),
-    );
+    let source: IrsConfig<M> = irs_solver::solve(spec, &src_ctx, OodSampleBudget::ZERO);
+    let target: IrsConfig<Identity<M::Target>> =
+        irs_solver::solve(spec, &target_context(shape, &source), OodSampleBudget::ZERO);
     let t_ood = compute_t_ood(spec, &source, target.list_size(), None);
 
     let sumcheck = sumcheck_solver::solve(spec, &src_ctx, &source, None);
@@ -275,7 +272,7 @@ pub(super) fn compute_t_ood<M: Embedding>(
 ) -> usize {
     const MAX_ITER: usize = 32;
 
-    let security_target = spec.protocol_security_target_bits();
+    let security_target = f64::from(spec.protocol_security_target_bits());
     let field_bits = M::Target::field_size_bits();
     let combined_list_size = target_list_size * c_zk_list_size.unwrap_or(1.0);
     let message_length = source.message_length();

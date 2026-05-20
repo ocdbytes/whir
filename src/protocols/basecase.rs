@@ -44,6 +44,28 @@ pub struct Config<F: Field> {
 }
 
 impl<F: Field> Config<F> {
+    /// `mode == ZeroKnowledge` iff `pow != PowConfig::none()`: ZK basecase has
+    /// a γ-combination PoW slot (Lemma 7.4); Standard has no γ challenge.
+    pub fn new(
+        commit: irs_commit::Config<Identity<F>>,
+        sumcheck: sumcheck::Config<F>,
+        mode: BasecaseMode,
+        pow: proof_of_work::Config,
+    ) -> Self {
+        let has_pow = pow != proof_of_work::Config::none();
+        debug_assert_eq!(
+            matches!(mode, BasecaseMode::ZeroKnowledge),
+            has_pow,
+            "ZK basecase needs PoW; Standard basecase must have none",
+        );
+        Self {
+            commit,
+            sumcheck,
+            mode,
+            pow,
+        }
+    }
+
     pub const fn size(&self) -> usize {
         self.sumcheck.initial_size
     }

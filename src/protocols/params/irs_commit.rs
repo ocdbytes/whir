@@ -22,7 +22,7 @@ pub fn solve<M: Embedding + Default>(
     ctx: &RoundContext,
     out_domain_samples: OodSampleBudget,
 ) -> IrsConfig<M> {
-    let security_target = spec.protocol_security_target_bits();
+    let security_target = f64::from(spec.protocol_security_target_bits());
     let rate = rate(f64::from(ctx.log_inv_rate));
     let interleaving_depth = 1_usize << ctx.folding_factor;
     // Construction 9.7 is Johnson-only — `Mode` cannot express unique-decoding.
@@ -79,7 +79,7 @@ pub fn solve_mask_code<M: Embedding + Default>(
         "num_vectors ({num_vectors}) must be even (mask-proximity original/fresh pairs)",
     );
 
-    let security_target = spec.protocol_security_target_bits();
+    let security_target = f64::from(spec.protocol_security_target_bits());
     let rate = rate(f64::from(log_inv_rate.get()));
 
     IrsConfig::new(

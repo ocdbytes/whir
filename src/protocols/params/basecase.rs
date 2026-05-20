@@ -33,7 +33,7 @@ pub fn solve<F: Field>(
         log_inv_rate,
         folding_factor: 0,
     };
-    let commit = irs_solver::solve(spec, &ctx, OodSampleBudget::new(0));
+    let commit = irs_solver::solve(spec, &ctx, OodSampleBudget::ZERO);
 
     let target_bits = Bits::new(f64::from(spec.target_security_bits));
     let sumcheck_pow = PowConfig::grind_to(
@@ -60,12 +60,7 @@ pub fn solve<F: Field>(
         }
     };
 
-    BasecaseConfig {
-        commit,
-        sumcheck,
-        mode,
-        pow,
-    }
+    BasecaseConfig::new(commit, sumcheck, mode, pow)
 }
 
 /// γ-combination soundness (Lemma 7.4 combination-randomness slot, paper p.45).
@@ -130,7 +125,7 @@ mod tests {
             folding_factor: 0,
         };
         let commit: IrsConfig<Identity<TestField>> =
-            irs_solver::solve(&spec, &ctx, OodSampleBudget::new(0));
+            irs_solver::solve(&spec, &ctx, OodSampleBudget::ZERO);
 
         let got = f64::from(analytic_error_bits(&commit));
         let field_bits = TestField::field_size_bits();
@@ -158,7 +153,7 @@ mod tests {
             folding_factor: 0,
         };
         let commit: IrsConfig<Identity<TestField>> =
-            irs_solver::solve(&spec, &ctx, OodSampleBudget::new(0));
+            irs_solver::solve(&spec, &ctx, OodSampleBudget::ZERO);
 
         let field_bits = TestField::field_size_bits();
         let log_list = commit.list_size().log2();

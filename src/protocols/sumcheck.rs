@@ -30,10 +30,33 @@ pub struct SumcheckOpening<F: Field> {
     pub mask_rlc: F,
 }
 
+/// ZK sumcheck mask polynomial dimension.
+///
+/// Validated at construction to be at least `MIN = 3` — the round polynomial
+/// has 3 coefficients (degree-2), so the mask must have at least as many to
+/// hide it. Lemma 6.4 itself only requires `ℓ_zk ≥ 2`; the `3` floor is a
+/// WHIR design choice tied to the degree-2 round polynomial (see
+/// `params::sumcheck::zk_mask_length`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SumcheckMaskLen(usize);
+
+impl SumcheckMaskLen {
+    pub const MIN: usize = 3;
+
+    pub const fn new(n: usize) -> Self {
+        assert!(n >= Self::MIN);
+        Self(n)
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SumcheckMode {
     Standard,
-    ZeroKnowledge { mask_length: usize },
+    ZeroKnowledge { mask_length: SumcheckMaskLen },
 }
 
 #[must_use]
@@ -58,10 +81,9 @@ impl<F: Field> Config<F> {
         mode: SumcheckMode,
     ) -> Self {
         assert!(num_rounds == 0 || initial_size.next_power_of_two() >= 1 << num_rounds);
-        if let SumcheckMode::ZeroKnowledge { mask_length } = &mode {
-            // Mask must cover all 3 sumcheck polynomial coefficients (c0, c1, c2).
-            assert!(*mask_length >= 3);
-            // Lemma 6.4 prerequisite.
+        // `SumcheckMaskLen::new` already enforces the ≥ 3 floor at construction;
+        // here we only need the field-characteristic precondition from Lemma 6.4.
+        if matches!(mode, SumcheckMode::ZeroKnowledge { .. }) {
             assert!(
                 !F::ONE.double().is_zero(),
                 "ZK sumcheck requires char(F) ≠ 2"
@@ -79,7 +101,7 @@ impl<F: Field> Config<F> {
     const fn mask_length(&self) -> usize {
         match &self.mode {
             SumcheckMode::Standard => 0,
-            SumcheckMode::ZeroKnowledge { mask_length } => *mask_length,
+            SumcheckMode::ZeroKnowledge { mask_length } => mask_length.get(),
         }
     }
 
@@ -202,8 +224,11 @@ impl<F: Field> Config<F> {
                     return (F::ZERO, F::ONE);
                 }
                 let sum_multiple = F::from(1 << self.num_rounds.saturating_sub(1));
-                let mask_sum =
-                    masks.chunks_exact(*mask_length).map(eval_01).sum::<F>() * sum_multiple;
+                let mask_sum = masks
+                    .chunks_exact(mask_length.get())
+                    .map(eval_01)
+                    .sum::<F>()
+                    * sum_multiple;
                 prover_state.prover_message(&mask_sum);
                 let mask_rlc = prover_state.verifier_message();
                 (mask_sum, mask_rlc)
@@ -285,7 +310,9 @@ impl<F: Field> fmt::Display for Config<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mode_str = match &self.mode {
             SumcheckMode::Standard => "standard".to_string(),
-            SumcheckMode::ZeroKnowledge { mask_length } => format!("zk ℓ_zk={mask_length}"),
+            SumcheckMode::ZeroKnowledge { mask_length } => {
+                format!("zk ℓ_zk={}", mask_length.get())
+            }
         };
         write!(
             f,
@@ -333,7 +360,9 @@ mod tests {
         pub fn arbitrary() -> impl Strategy<Value = Self> {
             let mode_strategy = prop_oneof![
                 3 => Just(SumcheckMode::Standard),
-                7 => (3_usize..20).prop_map(|mask_length| SumcheckMode::ZeroKnowledge { mask_length }),
+                7 => (3_usize..20).prop_map(|n| SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(n),
+                }),
             ];
             (0_usize..(1 << 12), 0_usize..12, mode_strategy).prop_map(
                 |(initial_size, num_rounds, mode)| {
@@ -438,7 +467,9 @@ mod tests {
                 2,
                 proof_of_work::Config::none(),
                 1,
-                SumcheckMode::ZeroKnowledge { mask_length: 3 },
+                SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(3),
+                },
             ),
         );
     }
@@ -451,7 +482,9 @@ mod tests {
                 3,
                 proof_of_work::Config::none(),
                 2,
-                SumcheckMode::ZeroKnowledge { mask_length: 3 },
+                SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(3),
+                },
             ),
         );
     }
@@ -464,7 +497,9 @@ mod tests {
                 5,
                 proof_of_work::Config::none(),
                 3,
-                SumcheckMode::ZeroKnowledge { mask_length: 3 },
+                SumcheckMode::ZeroKnowledge {
+                    mask_length: SumcheckMaskLen::new(3),
+                },
             ),
         );
     }

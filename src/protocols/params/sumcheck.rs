@@ -7,11 +7,12 @@ use crate::{
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
+            bounds::usize_to_f64,
             protocol_config::MaskOracleInfo,
             spec::{RoundContext, SecuritySpec},
         },
         proof_of_work::Config as PowConfig,
-        sumcheck::{self, Config as SumcheckConfig},
+        sumcheck::{self, Config as SumcheckConfig, SumcheckMaskLen},
     },
 };
 
@@ -50,9 +51,8 @@ pub fn analytic_error_bits<M: Embedding>(
     let prox_gaps = source_irs.rbr_soundness_fold_prox_gaps();
 
     let poly_id = mask_oracle.map_or(field_bits - log_list_size - 1.0, |info| {
-        let log_list_size_c_zk = info.c_zk_list_size.log2();
-        #[allow(clippy::cast_precision_loss)]
-        let log_l_zk = (info.l_zk.get() as f64).log2();
+        let log_list_size_c_zk = info.c_zk_list_size.get().log2();
+        let log_l_zk = usize_to_f64(info.l_zk.get()).log2();
         field_bits - log_list_size - log_list_size_c_zk - log_l_zk
     });
 
@@ -72,8 +72,8 @@ const fn num_sumcheck_rounds(ctx: &RoundContext) -> usize {
 /// Construction 6.3 step 4(a) sends `h_j ∈ F^{<max{2, ℓ_zk}}[X]`. WHIR's round
 /// polynomial is degree-2, so 3 coefficients suffice; `ℓ_zk = 3` is the
 /// smallest value that masks it (Lemma 6.4 requires only `ℓ_zk ≥ 2`).
-const fn zk_mask_length() -> usize {
-    3
+const fn zk_mask_length() -> SumcheckMaskLen {
+    SumcheckMaskLen::new(3)
 }
 
 #[cfg(test)]
@@ -84,7 +84,7 @@ mod tests {
     use super::*;
     use crate::protocols::params::{
         irs_commit as irs_solver,
-        spec::{MaskCodeMessageLen, Mode, OodSampleBudget},
+        spec::{ListSize, MaskCodeMessageLen, Mode, OodSampleBudget},
         test_utils::{
             arb_round_ctx, arb_standard_johnson_spec, arb_zk_spec, assert_close,
             assert_pow_closes_gap, build_minimal_mask_oracle, deterministic_spec, TestEmbedding,
@@ -98,7 +98,7 @@ mod tests {
     const FIXTURE_L_ZK: usize = 8;
 
     fn build_source_irs(spec: &SecuritySpec, ctx: &RoundContext) -> IrsConfig<TestEmbedding> {
-        irs_solver::solve(spec, ctx, OodSampleBudget::new(0))
+        irs_solver::solve(spec, ctx, OodSampleBudget::ZERO)
     }
 
     /// Smallest pow2 shape that still produces a non-degenerate IRS.
@@ -124,7 +124,7 @@ mod tests {
         let config = solve(&spec, &ctx, &source_irs, mask_oracle);
         match config.mode {
             sumcheck::SumcheckMode::ZeroKnowledge { mask_length } => {
-                assert_eq!(mask_length, 3);
+                assert_eq!(mask_length.get(), 3);
             }
             sumcheck::SumcheckMode::Standard => panic!("expected ZK"),
         }
@@ -157,7 +157,7 @@ mod tests {
         let ctx = fixture_ctx();
         let irs = build_source_irs(&spec, &ctx);
         let info = MaskOracleInfo {
-            c_zk_list_size: FIXTURE_C_ZK_LIST_SIZE,
+            c_zk_list_size: ListSize::new(FIXTURE_C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new(FIXTURE_L_ZK),
         };
 
@@ -184,7 +184,7 @@ mod tests {
         let ctx = fixture_ctx();
         let irs = build_source_irs(&spec, &ctx);
         let huge = MaskOracleInfo {
-            c_zk_list_size: 2_f64.powi(OVERSIZED_LOG_C_ZK_LIST),
+            c_zk_list_size: ListSize::new(2_f64.powi(OVERSIZED_LOG_C_ZK_LIST)),
             l_zk: MaskCodeMessageLen::new(1 << OVERSIZED_LOG_L_ZK),
         };
         let bits = f64::from(analytic_error_bits::<TestEmbedding>(&irs, Some(huge)));
@@ -254,9 +254,9 @@ mod tests {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let ctx = fixture_ctx();
         let source_irs: IrsConfig<TestNonIdentityEmbedding> =
-            irs_solver::solve(&spec, &ctx, OodSampleBudget::new(0));
+            irs_solver::solve(&spec, &ctx, OodSampleBudget::ZERO);
         let info = MaskOracleInfo {
-            c_zk_list_size: FIXTURE_C_ZK_LIST_SIZE,
+            c_zk_list_size: ListSize::new(FIXTURE_C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new(FIXTURE_L_ZK),
         };
         let config = solve(&spec, &ctx, &source_irs, Some(info));

@@ -12,7 +12,7 @@ use crate::{
     protocols::{
         code_switch::{self, Config as CodeSwitchConfig},
         irs_commit::Config as IrsConfig,
-        params::{protocol_config::MaskOracleInfo, spec::SecuritySpec},
+        params::{bounds::usize_to_f64, protocol_config::MaskOracleInfo, spec::SecuritySpec},
         proof_of_work::Config as PowConfig,
     },
 };
@@ -61,7 +61,8 @@ pub fn analytic_error_bits<M: Embedding>(
     assert!(t_ood > 0, "code-switch requires t_ood ≥ 1");
 
     let field_bits = M::Target::field_size_bits();
-    let combined_list = target.list_size() * mask_oracle.map_or(1.0, |info| info.c_zk_list_size);
+    let combined_list =
+        target.list_size() * mask_oracle.map_or(1.0, |info| info.c_zk_list_size.get());
     // OOD polynomial is over witness `[f; r_C; s]` of length `ℓ + ℓ_zk` (ZK) or
     // `ℓ` (Standard). The `s`-tail is sampled at full length `ℓ_zk − r` (not
     // just `t_ood`), so degree must use the realized `ℓ_zk`, not `r + t_ood`.
@@ -69,12 +70,10 @@ pub fn analytic_error_bits<M: Embedding>(
         || source.message_length(),
         |info| source.message_length() + info.l_zk.get(),
     );
-    #[allow(clippy::cast_precision_loss)]
-    let t_ood_f = t_ood as f64;
+    let t_ood_f = usize_to_f64(t_ood);
 
     // OOD term — Lemma 9.9, term 1.
-    #[allow(clippy::cast_precision_loss)]
-    let log_degree_minus_1 = ((degree - 1) as f64).log2();
+    let log_degree_minus_1 = usize_to_f64(degree - 1).log2();
     let log_l_choose_2 = (combined_list * (combined_list - 1.0) / 2.0).log2();
     let ood_term = t_ood_f * (field_bits - log_degree_minus_1) - log_l_choose_2;
 
@@ -82,8 +81,8 @@ pub fn analytic_error_bits<M: Embedding>(
     let in_domain_term = source.rbr_queries();
 
     // Combination term — Lemma 9.9, term 3 (γ-RLC, bounds doc §5.1).
-    #[allow(clippy::cast_precision_loss)]
-    let log_count = ((t_ood + source.in_domain_samples * source.interleaving_depth) as f64).log2();
+    let log_count =
+        usize_to_f64(t_ood + source.in_domain_samples * source.interleaving_depth).log2();
     let combination_term = field_bits - log_count - combined_list.log2();
 
     Bits::new(ood_term.min(in_domain_term).min(combination_term).max(0.0))
@@ -105,7 +104,10 @@ mod tests {
         bounds::johnson_list_size,
         derive::{compute_l_zk, compute_t_ood},
         irs_commit as irs_solver,
-        spec::{LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec},
+        spec::{
+            ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext,
+            SecuritySpec,
+        },
         test_utils::{
             arb_standard_johnson_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec,
             assert_close, assert_pow_closes_gap, build_round_io, deterministic_spec, TestEmbedding,
@@ -181,7 +183,7 @@ mod tests {
 
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
         let mask_oracle = MaskOracleInfo {
-            c_zk_list_size: C_ZK_LIST_SIZE,
+            c_zk_list_size: ListSize::new(C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new(L_ZK_USIZE),
         };
         let (source, target, t_ood) = build_round_io::<M>(
@@ -283,7 +285,7 @@ mod tests {
             let placeholder_source = irs_solver::solve::<M>(
                 &spec,
                 &placeholder_source_ctx,
-                OodSampleBudget::new(0),
+                OodSampleBudget::ZERO,
             );
             let c_zk_placeholder = irs_solver::solve_mask_code::<M>(
                 &spec,
@@ -315,7 +317,7 @@ mod tests {
                 compute_t_ood(&spec, &source, target_list_size, Some(c_zk.list_size()));
             prop_assert_eq!(t_ood, recomputed_t_ood, "placeholder ⇒ final C_zk fixed-point");
             let mask_oracle = MaskOracleInfo {
-                c_zk_list_size: c_zk.list_size(),
+                c_zk_list_size: ListSize::new(c_zk.list_size()),
                 l_zk,
             };
             let config = solve(&spec, source, target, t_ood, Some(mask_oracle));
@@ -365,13 +367,13 @@ mod tests {
         let source = irs_solver::solve::<TestNonIdentityEmbedding>(
             &spec,
             &source_ctx,
-            OodSampleBudget::new(0),
+            OodSampleBudget::ZERO,
         );
         // Standard target: codeword_length is t_ood-independent (mask = 0).
         let target = irs_solver::solve::<Identity<TestExtensionField>>(
             &spec,
             &target_ctx,
-            OodSampleBudget::new(0),
+            OodSampleBudget::ZERO,
         );
         let t_ood = compute_t_ood(&spec, &source, target.list_size(), None);
 
@@ -396,12 +398,12 @@ mod tests {
         let mut source = irs_solver::solve::<TestNonIdentityEmbedding>(
             &spec,
             &source_ctx,
-            OodSampleBudget::new(0),
+            OodSampleBudget::ZERO,
         );
         let mut target = irs_solver::solve::<Identity<TestExtensionField>>(
             &spec,
             &target_ctx,
-            OodSampleBudget::new(0),
+            OodSampleBudget::ZERO,
         );
         for _ in 0..SMOKE_FIXED_POINT_MAX_ITER {
             let new_t_ood = compute_t_ood(
@@ -419,7 +421,7 @@ mod tests {
         }
 
         let mask_oracle = MaskOracleInfo {
-            c_zk_list_size: SMOKE_C_ZK_LIST_SIZE,
+            c_zk_list_size: ListSize::new(SMOKE_C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new((source.mask_length() + t_ood).next_power_of_two()),
         };
         let config = solve(&spec, source, target, t_ood, Some(mask_oracle));

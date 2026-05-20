@@ -1,6 +1,8 @@
 use core::marker::PhantomData;
 
-use crate::engines::EngineId;
+use ordered_float::OrderedFloat;
+
+use crate::{bits::Bits, engines::EngineId};
 
 /// Phantom-typed newtype — `Tagged<T, A>` and `Tagged<T, B>` are distinct types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,9 +30,9 @@ pub struct SecuritySpec {
 }
 
 impl SecuritySpec {
-    pub fn protocol_security_target_bits(&self) -> f64 {
+    pub fn protocol_security_target_bits(&self) -> Bits {
         let pow = self.max_pow_bits.unwrap_or(0);
-        f64::from(self.target_security_bits.saturating_sub(pow))
+        Bits::new(f64::from(self.target_security_bits.saturating_sub(pow)))
     }
 }
 
@@ -107,11 +109,33 @@ pub enum LogInvRateTag {}
 /// OOD-sample budget (Lemma 9.9 / bounds doc §5.2).
 pub type OodSampleBudget = Tagged<usize, OodSampleBudgetTag>;
 
+impl Tagged<usize, OodSampleBudgetTag> {
+    /// Sentinel for "no OOD samples". Used by sub-protocols that don't
+    /// require an OOD challenge round (e.g. Standard mode, basecase).
+    pub const ZERO: Self = Self::new(0);
+}
+
 /// C_zk message length (Theorem 9.6: `ℓ_zk ≥ source mask length`).
 pub type MaskCodeMessageLen = Tagged<usize, MaskCodeMessageLenTag>;
 
 /// `rate = 2^-log_inv_rate`.
 pub type LogInvRate = Tagged<u32, LogInvRateTag>;
+
+/// Reed–Solomon list-decoding ball size `|Λ(C, δ)|`. Wraps `OrderedFloat<f64>`
+/// so it can be stored alongside the `Tagged` integer newtypes without losing
+/// `Eq`/`Hash`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ListSize(OrderedFloat<f64>);
+
+impl ListSize {
+    pub const fn new(v: f64) -> Self {
+        Self(OrderedFloat(v))
+    }
+
+    pub const fn get(self) -> f64 {
+        self.0 .0
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
@@ -136,7 +160,7 @@ mod tests {
     fn none_means_no_pow_credit() {
         assert_eq!(
             spec(None).protocol_security_target_bits(),
-            f64::from(TARGET_BITS),
+            Bits::new(f64::from(TARGET_BITS)),
         );
     }
 
@@ -151,8 +175,14 @@ mod tests {
     #[test]
     fn pow_credit_shifts_analytic_floor() {
         // Two below-target PoW budgets: `target − pow` shifts down 1:1.
-        assert_eq!(spec(Some(20)).protocol_security_target_bits(), 80.0);
-        assert_eq!(spec(Some(60)).protocol_security_target_bits(), 40.0);
+        assert_eq!(
+            spec(Some(20)).protocol_security_target_bits(),
+            Bits::new(80.0),
+        );
+        assert_eq!(
+            spec(Some(60)).protocol_security_target_bits(),
+            Bits::new(40.0),
+        );
     }
 
     #[test]
@@ -161,7 +191,7 @@ mod tests {
         let pow_over_target = TARGET_BITS + 100;
         assert_eq!(
             spec(Some(pow_over_target)).protocol_security_target_bits(),
-            0.0
+            Bits::new(0.0),
         );
     }
 }

@@ -19,7 +19,8 @@ use crate::{
             irs_commit as irs_solver,
             protocol_config::MaskOracleInfo,
             spec::{
-                LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec,
+                ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext,
+                SecuritySpec,
             },
         },
         proof_of_work::Config as PowConfig,
@@ -103,7 +104,7 @@ pub fn build_minimal_mask_oracle(spec: &SecuritySpec) -> Option<MaskOracleInfo> 
     let c_zk: IrsConfig<TestEmbedding> =
         irs_solver::solve_mask_code(spec, l_zk, 0, LogInvRate::new(1), 2);
     Some(MaskOracleInfo {
-        c_zk_list_size: c_zk.list_size(),
+        c_zk_list_size: ListSize::new(c_zk.list_size()),
         l_zk,
     })
 }
@@ -167,7 +168,7 @@ pub fn build_round_io<M: Embedding + Default>(
         log_inv_rate,
         folding_factor,
     };
-    let source = irs_solver::solve(spec, &source_ctx, OodSampleBudget::new(0));
+    let source = irs_solver::solve(spec, &source_ctx, OodSampleBudget::ZERO);
 
     let target_log_inv_rate = log_inv_rate + folding_factor - 1;
     let target_ctx = RoundContext {

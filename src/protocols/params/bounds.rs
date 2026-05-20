@@ -41,6 +41,13 @@ pub(super) fn rate(log_inv_rate: f64) -> f64 {
     2_f64.powf(-log_inv_rate)
 }
 
+/// Lossy `usize → f64` for analytic-error formulas. Single allow-site for
+/// `clippy::cast_precision_loss` so individual call sites can stay terse.
+#[allow(clippy::cast_precision_loss)]
+pub(super) const fn usize_to_f64(x: usize) -> f64 {
+    x as f64
+}
+
 fn unique_decoding(johnson_slack: f64) -> bool {
     johnson_slack == 0.0
 }

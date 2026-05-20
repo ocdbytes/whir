@@ -19,9 +19,9 @@ use crate::{
         irs_commit::Config as IrsConfig,
         mask_proximity::Config as MaskProximityConfig,
         params::{
-            bounds::SoundnessBounded,
+            bounds::{usize_to_f64, SoundnessBounded},
             code_switch as code_switch_solver,
-            spec::{MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
+            spec::{ListSize, MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
             sumcheck as sumcheck_solver,
         },
         proof_of_work::Config as PowConfig,
@@ -65,8 +65,7 @@ impl<M: Embedding> ProtocolConfig<M> {
         let mut total_error = 0.0_f64;
         for r in &self.rounds {
             if let RoundMode::ZeroKnowledge { t_ood, .. } = r.mode {
-                #[allow(clippy::cast_precision_loss)]
-                let t = t_ood.get() as f64;
+                let t = usize_to_f64(t_ood.get());
                 // ζ_ze ≤ (t_ood² + t_ood) / (2|F|). Compute in log space to
                 // stay numerically stable for large field_bits.
                 let log_err = f64::midpoint(t * t, t).log2() - field_bits;
@@ -85,9 +84,6 @@ impl<M: Embedding> SoundnessBounded for ProtocolConfig<M> {
         let mut min_bits = f64::from(self.basecase.analytic_bits());
         for round in &self.rounds {
             min_bits = min_bits.min(f64::from(round.analytic_bits()));
-            if let Some(mo) = &round.mask_oracle {
-                min_bits = min_bits.min(f64::from(mo.analytic_bits()));
-            }
         }
         Bits::new(min_bits.max(0.0))
     }
@@ -104,7 +100,7 @@ pub struct RoundConfig<M: Embedding> {
     pub mask_oracle: Option<MaskOracleConfig<M::Target>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RoundMode {
     Standard,
     ZeroKnowledge {
@@ -131,24 +127,33 @@ impl RoundMode {
 }
 
 impl<M: Embedding> SoundnessBounded for RoundConfig<M> {
+    /// Round-level analytic floor: the smallest of `sumcheck`, `code_switch`,
+    /// and (when present) the per-round mask-oracle proximity check. Folding
+    /// the mask-oracle term in here keeps `ProtocolConfig::analytic_bits`
+    /// a pure `min` over rounds + basecase.
     fn analytic_bits(&self) -> Bits {
         let source = &self.code_switch.source;
         let target = &self.code_switch.target;
         let mask_oracle = self.mode.mask_oracle();
 
-        let sumcheck_term = sumcheck_solver::analytic_error_bits(source, mask_oracle);
-        let code_switch_term = code_switch_solver::analytic_error_bits(
+        let sumcheck_term = f64::from(sumcheck_solver::analytic_error_bits(source, mask_oracle));
+        let code_switch_term = f64::from(code_switch_solver::analytic_error_bits(
             source,
             target,
             self.code_switch.out_domain_samples,
             mask_oracle,
-        );
+        ));
+        let mask_oracle_term = self
+            .mask_oracle
+            .as_ref()
+            .map_or(f64::INFINITY, |mo| f64::from(mo.analytic_bits()));
 
-        if f64::from(code_switch_term) < f64::from(sumcheck_term) {
-            code_switch_term
-        } else {
+        Bits::new(
             sumcheck_term
-        }
+                .min(code_switch_term)
+                .min(mask_oracle_term)
+                .max(0.0),
+        )
     }
 }
 
@@ -165,16 +170,16 @@ pub struct MaskOracleConfig<F: Field> {
 }
 
 /// Slim mask-oracle view (C_zk's list size + ℓ_zk).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MaskOracleInfo {
-    pub c_zk_list_size: f64,
+    pub c_zk_list_size: ListSize,
     pub l_zk: MaskCodeMessageLen,
 }
 
 impl<F: Field> MaskOracleConfig<F> {
     pub fn info(&self) -> MaskOracleInfo {
         MaskOracleInfo {
-            c_zk_list_size: self.c_zk.list_size(),
+            c_zk_list_size: ListSize::new(self.c_zk.list_size()),
             l_zk: self.l_zk,
         }
     }
