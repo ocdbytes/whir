@@ -108,6 +108,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
+        bounds::johnson_list_size,
         derive::{compute_l_zk, compute_t_ood},
         irs_commit as irs_solver,
         spec::{LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec},
@@ -266,8 +267,15 @@ mod tests {
                 LogInvRate::new(log_inv_rate),
                 2,
             );
+            // Use the same rate-only Johnson list as the planner / `build_round_io`.
+            // `target.list_size()` here would read the *effective* rate after
+            // `next_order` rounding, which (post Lemma-9.5 tight masking) differs
+            // from the requested rate and would spuriously shift `t_ood`. The
+            // assertion isolates the c_zk fixed-point, not the rate-drift artifact.
+            let target_log_inv_rate = f64::from(log_inv_rate + folding_factor - 1);
+            let target_list_size = johnson_list_size(target_log_inv_rate);
             let recomputed_t_ood =
-                compute_t_ood(&spec, &source, target.list_size(), Some(c_zk.list_size()));
+                compute_t_ood(&spec, &source, target_list_size, Some(c_zk.list_size()));
             prop_assert_eq!(t_ood, recomputed_t_ood, "placeholder ⇒ final C_zk fixed-point");
             let mask_oracle = MaskOracleInfo {
                 c_zk_list_size: c_zk.list_size(),

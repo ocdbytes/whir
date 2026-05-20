@@ -143,8 +143,13 @@ impl<M: Embedding> Config<M> {
         assert!(vector_size.is_multiple_of(interleaving_depth));
         assert!(rate > 0. && rate <= 1.);
         let masked_message_length = vector_size / interleaving_depth + mode.mask_length();
+        // `interleaved_encode` requires `codeword_length` to divide the NTT root
+        // order. `masked_message_length` is allowed to be arbitrary (the coset
+        // NTT zero-extends internally), so we only round the codeword side here.
         #[allow(clippy::cast_sign_loss)]
-        let codeword_length = (masked_message_length as f64 / rate).ceil() as usize;
+        let raw_codeword_length = (masked_message_length as f64 / rate).ceil() as usize;
+        let codeword_length = ntt::next_order::<M::Source>(raw_codeword_length)
+            .expect("codeword length exceeds NTT engine support");
         let rate = masked_message_length as f64 / codeword_length as f64;
 
         // η = slack to Johnson bound. We pick η = √ρ / 20.

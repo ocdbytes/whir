@@ -14,6 +14,7 @@ use crate::{
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
+            bounds::johnson_list_size,
             derive::compute_t_ood,
             irs_commit as irs_solver,
             protocol_config::MaskOracleInfo,
@@ -146,12 +147,14 @@ pub fn build_test_c_zk(
     )
 }
 
-/// Safety net for the `target_irs ↔ t_ood` loop in [`build_round_io`].
-/// Steady state converges in ≤ 2 iterations (`target.list_size()` is rate-only).
-const TARGET_STABILIZATION_MAX_ITER: usize = 8;
-
 /// Builds a self-consistent `(source, target, t_ood)` triplet matching the
 /// per-round shape that `code_switch::solve` expects.
+///
+/// `t_ood` is solved against the rate-only `johnson_list_size(target_log_inv_rate)`,
+/// mirroring `derive::build_zk_round_data`. Using `target.list_size()` here
+/// instead would couple `t_ood` to the target's effective rate (which itself
+/// depends on `t_ood` via the mask), producing a non-monotone oscillation
+/// once the mask is tight (Lemma 9.5) rather than pow2-padded.
 pub fn build_round_io<M: Embedding + Default>(
     spec: &SecuritySpec,
     log_inv_rate: u32,
@@ -166,20 +169,15 @@ pub fn build_round_io<M: Embedding + Default>(
     };
     let source = irs_solver::solve(spec, &source_ctx, OodSampleBudget::new(0));
 
+    let target_log_inv_rate = log_inv_rate + folding_factor - 1;
     let target_ctx = RoundContext {
         vector_size: source.message_length(),
-        log_inv_rate: log_inv_rate + folding_factor - 1,
+        log_inv_rate: target_log_inv_rate,
         folding_factor,
     };
 
-    let mut target = irs_solver::solve(spec, &target_ctx, OodSampleBudget::new(0));
-    for _ in 0..TARGET_STABILIZATION_MAX_ITER {
-        let t_ood = compute_t_ood(spec, &source, target.list_size(), c_zk_list_size);
-        let new_target = irs_solver::solve(spec, &target_ctx, OodSampleBudget::new(t_ood));
-        if new_target.codeword_length == target.codeword_length {
-            return (source, new_target, t_ood);
-        }
-        target = new_target;
-    }
-    panic!("target IRS did not stabilize");
+    let target_list_size = johnson_list_size(f64::from(target_log_inv_rate));
+    let t_ood = compute_t_ood(spec, &source, target_list_size, c_zk_list_size);
+    let target = irs_solver::solve(spec, &target_ctx, OodSampleBudget::new(t_ood));
+    (source, target, t_ood)
 }

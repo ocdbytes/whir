@@ -1,7 +1,8 @@
-//! IRS-commit parameter selection. ZK mask sized per Lemma 9.5, padded so
-//! `message + mask` is a pow2 (NTT-valid codeword length).
-
-use std::num::NonZeroUsize;
+//! IRS-commit parameter selection.
+//!
+//! ZK mask is sized per Lemma 9.5 (paper p.53) at the tight bound
+//! `in-domain + OOD` queries. Codeword NTT-smoothness is enforced inside
+//! [`IrsConfig::new`] on `codeword_length`, not by inflating the mask.
 
 use crate::{
     algebra::embedding::Embedding,
@@ -26,22 +27,15 @@ pub fn solve<M: Embedding + Default>(
     let interleaving_depth = 1_usize << ctx.folding_factor;
     // Construction 9.7 is Johnson-only — `Mode` cannot express unique-decoding.
     let unique_decoding = false;
-    let message_length = ctx.vector_size / interleaving_depth;
 
     let mode = match spec.mode {
         Mode::Standard => IrsMode::Standard,
         Mode::ZeroKnowledge => {
-            let min_mask = num_in_domain_queries(unique_decoding, security_target, rate)
+            // Lemma 9.5 (part ii): r-query perfect-ZK encoding requires
+            // `r ≥ in-domain + OOD`. Use the tight bound; do not pow2-pad here.
+            let mask_length = num_in_domain_queries(unique_decoding, security_target, rate)
                 .checked_add(out_domain_samples.get())
                 .expect("usize overflow");
-            // Lemma 9.5: mask covers in-domain + OOD queries.
-            // Pad masked length to a pow2 for NTT (the lemma is `≥`, so padding is safe).
-            let masked_message_length = message_length
-                .checked_add(min_mask.get())
-                .expect("masked_message_length overflow")
-                .next_power_of_two();
-            let mask_length = NonZeroUsize::new(masked_message_length - message_length)
-                .expect("min_mask ≥ 1 (NonZeroUsize) ⇒ next_pow2(ℓ + min_mask) > ℓ");
             IrsMode::ZeroKnowledge { mask_length }
         }
     };
