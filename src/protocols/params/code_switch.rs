@@ -49,16 +49,9 @@ pub fn solve<M: Embedding>(
     CodeSwitchConfig::new(source, target, t_ood, mode, pow)
 }
 
-/// Per-round code-switch soundness in bits: `min(ood_term, combination_term)`.
-///
-/// - OOD (Lemma 9.9, term 1):  `t_ood · (log|F| − log(deg − 1))  −  log(L choose 2)`
-/// - Combination (Bound 1, γ-RLC): `log|F| − log(count) − log L`
-///
-/// `L = |Λ(target)| · |Λ(C_zk)|` (mask-oracle absent ⇒ `|Λ(C_zk)| = 1`).
-/// `deg = ℓ + r + t_ood` in ZK, `ℓ` in Standard.
-/// `count = t_ood + t · ι` (OOD samples + in-domain ι-interleaved source queries).
-///
-/// `t_ood ≥ 1` per [`code_switch::Config::new`].
+/// Per-round code-switch soundness in bits: `min` over Lemma 9.9's three RBR
+/// error slots (OOD, in-domain, combination). `t_ood ≥ 1` per
+/// [`code_switch::Config::new`].
 pub fn analytic_error_bits<M: Embedding>(
     source: &IrsConfig<M>,
     target: &IrsConfig<Identity<M::Target>>,
@@ -85,14 +78,15 @@ pub fn analytic_error_bits<M: Embedding>(
     let log_l_choose_2 = (combined_list * (combined_list - 1.0) / 2.0).log2();
     let ood_term = t_ood_f * (field_bits - log_degree_minus_1) - log_l_choose_2;
 
-    // Combination term — Bound 1 (γ-RLC): `t_ood` OOD samples plus the
-    // in-domain batch of `t · ι` source columns, all RLC'd into one target
-    // codeword.
+    // In-domain term — Lemma 9.9, term 2.
+    let in_domain_term = source.rbr_queries();
+
+    // Combination term — Lemma 9.9, term 3 (γ-RLC, bounds.md §5.1).
     #[allow(clippy::cast_precision_loss)]
     let log_count = ((t_ood + source.in_domain_samples * source.interleaving_depth) as f64).log2();
     let combination_term = field_bits - log_count - combined_list.log2();
 
-    Bits::new(ood_term.min(combination_term).max(0.0))
+    Bits::new(ood_term.min(in_domain_term).min(combination_term).max(0.0))
 }
 
 /// Number of `(r ‖ s)` mask polynomials code-switch contributes to C_zk per
@@ -148,9 +142,8 @@ mod tests {
     const FORMULA_FOLDING_FACTOR: u32 = 2;
     const FORMULA_NUM_VARS: u32 = 6;
 
-    /// Standard OOD bound (Lemma 9.9 first term, no mask):
-    ///   `min(t_ood · (log|F| − log(ℓ−1)) − log(L choose 2), combination)`.
-    /// `L = target.list_size()`, `combination = log|F| − log(t_ood + t·ι) − log L`.
+    /// Standard `min(ood, in_domain, comb)` from Lemma 9.9's three RBR error
+    /// slots; `L = target.list_size()`.
     #[test]
     fn analytic_error_standard_formula() {
         let spec: SecuritySpec = deterministic_spec(Mode::Standard);
@@ -169,14 +162,15 @@ mod tests {
         let log_deg_m1 = ((degree - 1) as f64).log2();
         let l_choose_2 = target_list * (target_list - 1.0) / 2.0;
         let ood = (t_ood as f64) * (field_bits - log_deg_m1) - l_choose_2.log2();
+        let in_domain = source.rbr_queries();
         let count = t_ood + source.in_domain_samples * source.interleaving_depth;
         let comb = field_bits - (count as f64).log2() - target_list.log2();
-        let expected = ood.min(comb).max(0.0);
+        let expected = ood.min(in_domain).min(comb).max(0.0);
 
         assert_close(got, expected);
     }
 
-    /// ZK OOD bound: combined list `L = target × c_zk`, masked degree `ℓ + r + t_ood`,
+    /// ZK bound: combined list `L = target × c_zk`, masked degree `ℓ + ℓ_zk`,
     /// combination term also subtracts `log|Λ(C_zk)|`.
     #[test]
     fn analytic_error_zk_formula() {
@@ -211,11 +205,54 @@ mod tests {
         let log_deg_m1 = ((degree - 1) as f64).log2();
         let l_choose_2 = combined_list * (combined_list - 1.0) / 2.0;
         let ood = (t_ood as f64) * (field_bits - log_deg_m1) - l_choose_2.log2();
+        let in_domain = source.rbr_queries();
         let count = t_ood + source.in_domain_samples * source.interleaving_depth;
         let comb = field_bits - (count as f64).log2() - target_list.log2() - C_ZK_LIST_SIZE.log2();
-        let expected = ood.min(comb).max(0.0);
+        let expected = ood.min(in_domain).min(comb).max(0.0);
 
         assert_close(got, expected);
+    }
+
+    /// Low security target (16 bits) pins `source.rbr_queries()` below the
+    /// natural OOD and combination floors on `Field64`, forcing the `min` to
+    /// the arm
+    #[test]
+    fn analytic_error_uses_in_domain_when_limiting() {
+        const LIMITING_TARGET_BITS: u32 = 16;
+        const LIMITING_LOG_INV_RATE: u32 = 1;
+        const LIMITING_FOLDING_FACTOR: u32 = 1;
+        const LIMITING_NUM_VARS: u32 = 4;
+
+        let spec = SecuritySpec {
+            mode: Mode::Standard,
+            target_security_bits: LIMITING_TARGET_BITS,
+            max_pow_bits: None,
+            hash_id: crate::hash::BLAKE3,
+        };
+        let (source, target, t_ood) = build_round_io::<M>(
+            &spec,
+            LIMITING_LOG_INV_RATE,
+            LIMITING_FOLDING_FACTOR,
+            LIMITING_NUM_VARS,
+            None,
+        );
+
+        let field_bits = <TestField as FieldWithSize>::field_size_bits();
+        let target_list = target.list_size();
+        let degree = source.message_length();
+        let log_deg_m1 = ((degree - 1) as f64).log2();
+        let l_choose_2 = target_list * (target_list - 1.0) / 2.0;
+        let ood = (t_ood as f64) * (field_bits - log_deg_m1) - l_choose_2.log2();
+        let in_domain = source.rbr_queries();
+        let count = t_ood + source.in_domain_samples * source.interleaving_depth;
+        let comb = field_bits - (count as f64).log2() - target_list.log2();
+        assert!(
+            in_domain < ood && in_domain < comb,
+            "fixture wants in_domain to bind: in_domain {in_domain}, ood {ood}, comb {comb}",
+        );
+
+        let got = f64::from(analytic_error_bits(&source, &target, t_ood, None));
+        assert_close(got, in_domain.max(0.0));
     }
 
     proptest! {

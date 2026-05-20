@@ -68,11 +68,14 @@ pub fn solve<F: Field>(
     }
 }
 
-/// γ-combination soundness (Theorem 7.1, n=0): `log|F| − log|Λ(C^≡2, δ)|`.
+/// γ-combination soundness (Lemma 7.4 combination-randomness slot, paper p.45).
+/// At `n = 0` the `C_zk` factors vanish; `ε_mca(C, δ)` does not.
 pub fn analytic_error_bits<F: Field>(commit: &IrsConfig<Identity<F>>) -> Bits {
     let field_bits = F::field_size_bits();
     let log_list = commit.list_size().log2();
-    Bits::new((field_bits - log_list).max(0.0))
+    let prox_gaps = commit.rbr_soundness_fold_prox_gaps();
+    let poly_id = field_bits - log_list;
+    Bits::new(prox_gaps.min(poly_id).max(0.0))
 }
 
 impl<F: Field> SoundnessBounded for BasecaseConfig<F> {
@@ -111,7 +114,6 @@ mod tests {
         (1u32..=4, 1u32..=3)
     }
 
-    /// γ-combination soundness (Theorem 7.1, n=0): `log|F| − log|Λ(C^≡2, δ)|`.
     /// Builds the commit directly via the IRS solver to bypass `solve`'s PoW
     /// grind (which would assert against the cap for default test targets).
     #[test]
@@ -133,9 +135,42 @@ mod tests {
         let got = f64::from(analytic_error_bits(&commit));
         let field_bits = TestField::field_size_bits();
         let log_list = commit.list_size().log2();
-        let expected = (field_bits - log_list).max(0.0);
+        let prox_gaps = commit.rbr_soundness_fold_prox_gaps();
+        let poly_id = field_bits - log_list;
+        let expected = prox_gaps.min(poly_id).max(0.0);
 
         assert_close(got, expected);
+    }
+
+    /// At `log_inv_rate = 1` on `Field64`, `ε_mca` is below the poly-identity
+    /// term — pins the `min` to the arm that earlier returned `poly_id` alone.
+    #[test]
+    fn analytic_error_uses_eps_mca_when_limiting() {
+        use crate::protocols::params::{
+            irs_commit as irs_solver,
+            spec::{Mode, OodSampleBudget, RoundContext},
+        };
+
+        let spec = deterministic_spec(Mode::ZeroKnowledge);
+        let ctx = RoundContext {
+            vector_size: FIXTURE_VECTOR_SIZE,
+            log_inv_rate: 1,
+            folding_factor: 0,
+        };
+        let commit: IrsConfig<Identity<TestField>> =
+            irs_solver::solve(&spec, &ctx, OodSampleBudget::new(0));
+
+        let field_bits = TestField::field_size_bits();
+        let log_list = commit.list_size().log2();
+        let prox_gaps = commit.rbr_soundness_fold_prox_gaps();
+        let poly_id = field_bits - log_list;
+        assert!(
+            prox_gaps < poly_id,
+            "fixture wants prox_gaps to bind: prox_gaps {prox_gaps} ≥ poly_id {poly_id}",
+        );
+
+        let got = f64::from(analytic_error_bits(&commit));
+        assert_close(got, prox_gaps.max(0.0));
     }
 
     proptest! {
