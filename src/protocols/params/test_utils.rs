@@ -178,7 +178,8 @@ pub fn build_round_io<M: Embedding + Default>(
     };
 
     let target_list_size = johnson_list_size(f64::from(target_log_inv_rate));
-    let t_ood = compute_t_ood(spec, &source, target_list_size, c_zk_list_size);
+    let t_ood = compute_t_ood(spec, &source, target_list_size, c_zk_list_size, 0)
+        .expect("compute_t_ood diverged in test fixture");
     let target = irs_solver::solve(spec, &target_ctx, OodSampleBudget::new(t_ood));
     (source, target, t_ood)
 }

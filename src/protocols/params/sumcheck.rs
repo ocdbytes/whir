@@ -8,6 +8,7 @@ use crate::{
         irs_commit::Config as IrsConfig,
         params::{
             bounds::usize_to_f64,
+            error::{DeriveError, PowResultExt, PowSlot},
             protocol_config::MaskOracleInfo,
             spec::{RoundContext, SecuritySpec},
         },
@@ -17,25 +18,33 @@ use crate::{
 };
 
 /// `mask_oracle` is `Some` iff ZK; only C_zk's list size + ℓ_zk are read here.
+/// `slot` is the [`PowSlot`] that labels grinding failures (basecase or per-round).
 pub fn solve<M: Embedding>(
     spec: &SecuritySpec,
     ctx: &RoundContext,
     source_irs: &IrsConfig<M>,
     mask_oracle: Option<MaskOracleInfo>,
-) -> SumcheckConfig<M::Target> {
+    slot: PowSlot,
+) -> Result<SumcheckConfig<M::Target>, DeriveError> {
     let num_rounds = num_sumcheck_rounds(ctx);
     let round_pow = PowConfig::grind_to(
         Bits::new(f64::from(spec.target_security_bits)),
         analytic_error_bits(source_irs, mask_oracle),
         spec.hash_id,
-    );
+    )
+    .at_slot(slot)?;
     let mode = match mask_oracle {
         None => sumcheck::SumcheckMode::Standard,
         Some(_) => sumcheck::SumcheckMode::ZeroKnowledge {
             mask_length: zk_mask_length(),
         },
     };
-    SumcheckConfig::new(ctx.vector_size, round_pow, num_rounds, mode)
+    Ok(SumcheckConfig::new(
+        ctx.vector_size,
+        round_pow,
+        num_rounds,
+        mode,
+    ))
 }
 
 /// Per-sumcheck-round soundness in bits: `min(ε_mca, poly_identity_term)`.
@@ -83,6 +92,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
+        error::RoundSlot,
         irs_commit as irs_solver,
         spec::{ListSize, MaskCodeMessageLen, Mode, OodSampleBudget},
         test_utils::{
@@ -121,7 +131,17 @@ mod tests {
         let ctx = fixture_ctx();
         let source_irs = build_source_irs(&spec, &ctx);
         let mask_oracle = build_minimal_mask_oracle(&spec);
-        let config = solve(&spec, &ctx, &source_irs, mask_oracle);
+        let config = solve(
+            &spec,
+            &ctx,
+            &source_irs,
+            mask_oracle,
+            PowSlot::Round {
+                index: 0,
+                kind: RoundSlot::Sumcheck,
+            },
+        )
+        .unwrap();
         match config.mode {
             sumcheck::SumcheckMode::ZeroKnowledge { mask_length } => {
                 assert_eq!(mask_length.get(), 3);
@@ -199,7 +219,7 @@ mod tests {
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
             let mask_oracle = build_minimal_mask_oracle(&spec);
-            let config = solve(&spec, &ctx, &source_irs, mask_oracle);
+            let config = solve(&spec, &ctx, &source_irs, mask_oracle, PowSlot::Round { index: 0, kind: RoundSlot::Sumcheck }).unwrap();
             prop_assert!(matches!(config.mode, sumcheck::SumcheckMode::Standard));
         }
 
@@ -213,7 +233,7 @@ mod tests {
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
             let mask_oracle = build_minimal_mask_oracle(&spec);
-            let config = solve(&spec, &ctx, &source_irs, mask_oracle);
+            let config = solve(&spec, &ctx, &source_irs, mask_oracle, PowSlot::Round { index: 0, kind: RoundSlot::Sumcheck }).unwrap();
             prop_assert_eq!(config.num_rounds, ctx.folding_factor as usize);
         }
 
@@ -243,7 +263,7 @@ mod tests {
             let source_irs = build_source_irs(&spec, &ctx);
             let mask_oracle = build_minimal_mask_oracle(&spec);
             let error = analytic_error_bits(&source_irs, mask_oracle);
-            let config = solve(&spec, &ctx, &source_irs, mask_oracle);
+            let config = solve(&spec, &ctx, &source_irs, mask_oracle, PowSlot::Round { index: 0, kind: RoundSlot::Sumcheck }).unwrap();
             assert_pow_closes_gap(&spec, error, &config.round_pow);
         }
     }
@@ -259,7 +279,17 @@ mod tests {
             c_zk_list_size: ListSize::new(FIXTURE_C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new(FIXTURE_L_ZK),
         };
-        let config = solve(&spec, &ctx, &source_irs, Some(info));
+        let config = solve(
+            &spec,
+            &ctx,
+            &source_irs,
+            Some(info),
+            PowSlot::Round {
+                index: 0,
+                kind: RoundSlot::Sumcheck,
+            },
+        )
+        .unwrap();
         assert!(matches!(
             config.mode,
             sumcheck::SumcheckMode::ZeroKnowledge { .. }

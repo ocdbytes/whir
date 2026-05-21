@@ -21,6 +21,7 @@ use crate::{
         params::{
             bounds::{usize_to_f64, SoundnessBounded},
             code_switch as code_switch_solver,
+            error::{BasecaseSlot, DeriveError, PowSlot, RoundSlot},
             spec::{ListSize, MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
             sumcheck as sumcheck_solver,
         },
@@ -39,21 +40,64 @@ pub struct ProtocolConfig<M: Embedding> {
 
 impl<M: Embedding> ProtocolConfig<M> {
     /// Returns `true` if every PoW slot's difficulty fits within
-    /// `security.max_pow_bits`. Cheap pre-flight check that fails before the
-    /// 60-bit cap assertion inside `proof_of_work::threshold`.
+    /// `security.max_pow_bits`. Boolean predicate kept for callers that want
+    /// to re-check after manual inspection; [`Self::validate_pow_budget`] is
+    /// the typed version used internally by [`super::derive::ProtocolConfig::derive`].
     pub fn check_pow_bits(&self) -> bool {
+        self.validate_pow_budget().is_ok()
+    }
+
+    /// Same check as [`Self::check_pow_bits`] but returns the specific slot
+    /// and required-vs-max difficulties on failure. Auto-invoked by
+    /// `derive()`; callers don't normally need to call this directly.
+    pub fn validate_pow_budget(&self) -> Result<(), DeriveError> {
         let max = Bits::new(f64::from(self.security.max_pow_bits.unwrap_or(0)));
-        let within = |pow: &PowConfig| pow.difficulty() <= max;
-        if !self.rounds.iter().all(|r| {
-            within(&r.sumcheck.round_pow)
-                && within(&r.code_switch.pow)
-                && r.mask_oracle
-                    .as_ref()
-                    .is_none_or(|mo| within(&mo.mask_proximity.pow))
-        }) {
-            return false;
+        let check = |slot: PowSlot, pow: &PowConfig| -> Result<(), DeriveError> {
+            let required = pow.difficulty();
+            if required > max {
+                Err(DeriveError::PowBudgetExceeded {
+                    slot,
+                    required,
+                    max,
+                })
+            } else {
+                Ok(())
+            }
+        };
+        for r in &self.rounds {
+            check(
+                PowSlot::Round {
+                    index: r.round_index,
+                    kind: RoundSlot::Sumcheck,
+                },
+                &r.sumcheck.round_pow,
+            )?;
+            check(
+                PowSlot::Round {
+                    index: r.round_index,
+                    kind: RoundSlot::CodeSwitch,
+                },
+                &r.code_switch.pow,
+            )?;
+            if let Some(mo) = &r.mask_oracle {
+                check(
+                    PowSlot::Round {
+                        index: r.round_index,
+                        kind: RoundSlot::MaskProximity,
+                    },
+                    &mo.mask_proximity.pow,
+                )?;
+            }
         }
-        within(&self.basecase.sumcheck.round_pow) && within(&self.basecase.pow)
+        check(
+            PowSlot::Basecase(BasecaseSlot::Sumcheck),
+            &self.basecase.sumcheck.round_pow,
+        )?;
+        check(
+            PowSlot::Basecase(BasecaseSlot::GammaCombination),
+            &self.basecase.pow,
+        )?;
+        Ok(())
     }
 
     /// HVZK privacy error in bits, summed across ZK rounds:

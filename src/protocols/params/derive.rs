@@ -14,8 +14,9 @@ use crate::{
         params::{
             basecase as basecase_solver,
             bounds::johnson_list_size,
-            code_switch as code_switch_solver, irs_commit as irs_solver,
-            mask_proximity as mask_proximity_solver,
+            code_switch as code_switch_solver,
+            error::{DeriveError, PowSlot, RoundSlot},
+            irs_commit as irs_solver, mask_proximity as mask_proximity_solver,
             protocol_config::{
                 MaskOracleConfig, MaskOracleInfo, ProtocolConfig, RoundConfig, RoundMode,
             },
@@ -31,7 +32,11 @@ use crate::{
 impl<M: Embedding + Default> ProtocolConfig<M> {
     /// In ZK each round owns its mask oracle; the `ℓ_zk ↔ c_zk ↔ t_ood`
     /// fixed-point runs independently per round.
-    pub fn derive(spec: SecuritySpec, tuning: TuningSpec) -> Self {
+    ///
+    /// Fails with [`DeriveError`] when the spec/tuning combination is
+    /// infeasible: a PoW slot exceeds the grind cap, a fixed point diverges,
+    /// or any slot exceeds `spec.max_pow_bits` (post-derivation validation).
+    pub fn derive(spec: SecuritySpec, tuning: TuningSpec) -> Result<Self, DeriveError> {
         let RoundLayout {
             shapes,
             basecase_vector_size,
@@ -42,24 +47,26 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             Mode::Standard => shapes
                 .iter()
                 .map(|shape| build_round_config::<M>(&spec, shape, None))
-                .collect(),
+                .collect::<Result<_, _>>()?,
             Mode::ZeroKnowledge => {
                 let c_zk_log_inv_rate = LogInvRate::new(tuning.starting_log_inv_rate);
                 shapes
                     .iter()
                     .map(|shape| build_zk_round_config::<M>(&spec, shape, c_zk_log_inv_rate))
-                    .collect()
+                    .collect::<Result<_, _>>()?
             }
         };
 
-        let basecase = basecase_solver::solve(&spec, basecase_vector_size, basecase_log_inv_rate);
+        let basecase = basecase_solver::solve(&spec, basecase_vector_size, basecase_log_inv_rate)?;
 
-        Self {
+        let plan = Self {
             security: spec,
             tuning,
             rounds,
             basecase,
-        }
+        };
+        plan.validate_pow_budget()?;
+        Ok(plan)
     }
 }
 
@@ -150,7 +157,7 @@ fn build_zk_round_config<M: Embedding + Default>(
     spec: &SecuritySpec,
     shape: &RoundShape,
     c_zk_log_inv_rate: LogInvRate,
-) -> RoundConfig<M> {
+) -> Result<RoundConfig<M>, DeriveError> {
     let ctx = round_context(shape);
     let num_masks = sumcheck_solver::masks_required(&ctx) + code_switch_solver::masks_required();
     // C_zk.list_size depends only on rate — no IRS build needed for it.
@@ -160,7 +167,7 @@ fn build_zk_round_config<M: Embedding + Default>(
         source,
         target,
         t_ood,
-    } = build_zk_round_data::<M>(spec, shape, c_zk_list_size);
+    } = build_zk_round_data::<M>(spec, shape, c_zk_list_size)?;
 
     let l_zk = compute_l_zk(&source, t_ood);
     let c_zk: IrsConfig<Identity<M::Target>> = irs_solver::solve_mask_code(
@@ -171,15 +178,30 @@ fn build_zk_round_config<M: Embedding + Default>(
         2 * num_masks,
     );
     let mask_oracle = MaskOracleConfig {
-        mask_proximity: mask_proximity_solver::solve(spec, c_zk.clone(), num_masks),
+        mask_proximity: mask_proximity_solver::solve(
+            spec,
+            c_zk.clone(),
+            num_masks,
+            shape.round_index,
+        )?,
         c_zk,
         l_zk,
     };
     let info = mask_oracle.info();
 
-    let sumcheck = sumcheck_solver::solve(spec, &ctx, &source, Some(info));
-    let code_switch = code_switch_solver::solve(spec, source, target, t_ood, Some(info));
-    RoundConfig {
+    let sumcheck = sumcheck_solver::solve(
+        spec,
+        &ctx,
+        &source,
+        Some(info),
+        PowSlot::Round {
+            index: shape.round_index,
+            kind: RoundSlot::Sumcheck,
+        },
+    )?;
+    let code_switch =
+        code_switch_solver::solve(spec, source, target, t_ood, Some(info), shape.round_index)?;
+    Ok(RoundConfig {
         round_index: shape.round_index,
         sumcheck,
         code_switch,
@@ -188,7 +210,7 @@ fn build_zk_round_config<M: Embedding + Default>(
             mask_oracle: info,
         },
         mask_oracle: Some(mask_oracle),
-    }
+    })
 }
 
 /// Local `t_ood ↔ r` fixed-point. `r = source.mask_length()` is a step function
@@ -198,7 +220,7 @@ fn build_zk_round_data<M: Embedding + Default>(
     spec: &SecuritySpec,
     shape: &RoundShape,
     c_zk_list_size: f64,
-) -> RoundData<M> {
+) -> Result<RoundData<M>, DeriveError> {
     const LOCAL_MAX_ITER: usize = 16;
 
     let src_ctx = round_context(shape);
@@ -209,48 +231,66 @@ fn build_zk_round_data<M: Embedding + Default>(
     let mut t_ood = 0;
     let mut source: IrsConfig<M> = irs_solver::solve(spec, &src_ctx, OodSampleBudget::ZERO);
     for _ in 0..LOCAL_MAX_ITER {
-        let new_t_ood = compute_t_ood(spec, &source, target_list_size, Some(c_zk_list_size));
+        let new_t_ood = compute_t_ood(
+            spec,
+            &source,
+            target_list_size,
+            Some(c_zk_list_size),
+            shape.round_index,
+        )?;
         if new_t_ood == t_ood {
             let target: IrsConfig<Identity<M::Target>> = irs_solver::solve(
                 spec,
                 &target_context(shape, &source),
                 OodSampleBudget::new(t_ood),
             );
-            return RoundData {
+            return Ok(RoundData {
                 source,
                 target,
                 t_ood,
-            };
+            });
         }
         t_ood = new_t_ood;
         source = irs_solver::solve(spec, &src_ctx, OodSampleBudget::new(t_ood));
     }
 
-    panic!("per-round ZK fixed-point did not converge");
+    Err(DeriveError::PerRoundFixedPointDidNotConverge {
+        round_index: shape.round_index,
+    })
 }
 
 fn build_round_config<M: Embedding + Default>(
     spec: &SecuritySpec,
     shape: &RoundShape,
     mask_oracle: Option<MaskOracleInfo>,
-) -> RoundConfig<M> {
+) -> Result<RoundConfig<M>, DeriveError> {
     debug_assert!(mask_oracle.is_none(), "ZK path uses build_zk_round_config");
 
     let src_ctx = round_context(shape);
     let source: IrsConfig<M> = irs_solver::solve(spec, &src_ctx, OodSampleBudget::ZERO);
     let target: IrsConfig<Identity<M::Target>> =
         irs_solver::solve(spec, &target_context(shape, &source), OodSampleBudget::ZERO);
-    let t_ood = compute_t_ood(spec, &source, target.list_size(), None);
+    let t_ood = compute_t_ood(spec, &source, target.list_size(), None, shape.round_index)?;
 
-    let sumcheck = sumcheck_solver::solve(spec, &src_ctx, &source, None);
-    let code_switch = code_switch_solver::solve(spec, source, target, t_ood, None);
-    RoundConfig {
+    let sumcheck = sumcheck_solver::solve(
+        spec,
+        &src_ctx,
+        &source,
+        None,
+        PowSlot::Round {
+            index: shape.round_index,
+            kind: RoundSlot::Sumcheck,
+        },
+    )?;
+    let code_switch =
+        code_switch_solver::solve(spec, source, target, t_ood, None, shape.round_index)?;
+    Ok(RoundConfig {
         round_index: shape.round_index,
         sumcheck,
         code_switch,
         mode: RoundMode::Standard,
         mask_oracle: None,
-    }
+    })
 }
 
 /// `ℓ_zk = next_pow2(r + t_ood)`: Theorem 9.6 witness layout `0^{ℓ_zk − r}`
@@ -269,7 +309,8 @@ pub(super) fn compute_t_ood<M: Embedding>(
     source: &IrsConfig<M>,
     target_list_size: f64,
     c_zk_list_size: Option<f64>,
-) -> usize {
+    round_index: usize,
+) -> Result<usize, DeriveError> {
     const MAX_ITER: usize = 32;
 
     let security_target = f64::from(spec.protocol_security_target_bits());
@@ -289,7 +330,7 @@ pub(super) fn compute_t_ood<M: Embedding>(
 
     let mut t_ood = solve_for_degree(message_length);
     if matches!(spec.mode, Mode::Standard) {
-        return t_ood;
+        return Ok(t_ood);
     }
 
     let r = source.mask_length();
@@ -300,11 +341,11 @@ pub(super) fn compute_t_ood<M: Embedding>(
         let l_zk = (r + t_ood).next_power_of_two();
         let new_t_ood = solve_for_degree(message_length + l_zk);
         if new_t_ood == t_ood {
-            return t_ood;
+            return Ok(t_ood);
         }
         t_ood = new_t_ood;
     }
-    panic!("compute_t_ood did not converge in {MAX_ITER} iterations");
+    Err(DeriveError::TOodFixedPointDidNotConverge { round_index })
 }
 
 #[cfg(test)]
@@ -378,7 +419,9 @@ mod tests {
         SecuritySpec {
             mode,
             target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            max_pow_bits: None,
+            // Allow up to the grind cap; derive() auto-validates the budget
+            // and would reject configs that need any PoW under `None ⇒ 0`.
+            max_pow_bits: Some(LOOSE_POW_BUDGET_BITS),
             hash_id: hash::BLAKE3,
         }
     }
@@ -466,7 +509,7 @@ mod tests {
     fn derive_standard_with_no_rounds_uses_basecase_only() {
         let spec = test_spec(Mode::Standard);
         let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
-        let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning_with(vector_size));
+        let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning_with(vector_size)).unwrap();
         assert!(plan.rounds.is_empty());
         assert_eq!(plan.basecase.commit.vector_size, vector_size);
     }
@@ -479,7 +522,8 @@ mod tests {
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_NO_ROUNDS),
-        );
+        )
+        .unwrap();
         assert!(plan.rounds.is_empty());
         assert!(matches!(
             plan.basecase.mode,
@@ -494,7 +538,8 @@ mod tests {
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
-        );
+        )
+        .unwrap();
         for r in &plan.rounds {
             let RoundMode::ZeroKnowledge { t_ood, .. } = r.mode else {
                 panic!("expected ZK round")
@@ -509,7 +554,8 @@ mod tests {
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
-        );
+        )
+        .unwrap();
         let bits: f64 = plan.analytic_bits().into();
         assert!(bits.is_finite() && bits > 0.0, "bits = {bits}");
         let min_round = plan
@@ -527,7 +573,8 @@ mod tests {
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
-        );
+        )
+        .unwrap();
         let plan_bits: f64 = plan.analytic_bits().into();
         let mo_floor = plan
             .rounds
@@ -559,7 +606,8 @@ mod tests {
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
-        );
+        )
+        .unwrap();
         assert!(matches!(
             plan.basecase.mode,
             crate::protocols::basecase::BasecaseMode::ZeroKnowledge
@@ -571,10 +619,9 @@ mod tests {
 
     /// Matches `proof_of_work::threshold`'s 60-bit cap.
     const LOOSE_POW_BUDGET_BITS: u32 = 60;
-    /// Below any realistic analytic gap; forces `check_pow_bits` to reject
-    /// the injected slot in the negative test.
-    const TIGHT_POW_BUDGET_BITS: u32 = 10;
-    /// Comfortably above `TIGHT_POW_BUDGET_BITS`.
+    /// Sits between a moderate budget (30) and the grind cap (60) — used by
+    /// `check_pow_bits_detects_over_budget_slot` to inject a slot that fits
+    /// the cap but exceeds the test's `max_pow_bits`.
     const OVER_BUDGET_INJECTED_BITS: f64 = 50.0;
 
     /// Bounds doc §5.3 + §5.7: HVZK privacy error in bits matches the closed
@@ -585,7 +632,8 @@ mod tests {
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
-        );
+        )
+        .unwrap();
         let field_bits = <crate::algebra::fields::Field64 as FieldWithSize>::field_size_bits();
         let mut expected_total = 0.0_f64;
         for r in &plan.rounds {
@@ -608,7 +656,8 @@ mod tests {
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
-        );
+        )
+        .unwrap();
         assert_eq!(
             f64::from(plan.privacy_error_bits()),
             f64::from(PLAN_FIXTURE_TARGET_BITS),
@@ -627,26 +676,80 @@ mod tests {
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
-        );
+        )
+        .unwrap();
         assert!(plan.check_pow_bits());
     }
 
-    /// Hand-injected over-budget PoW slot fails the check.
+    /// Hand-injected over-budget PoW slot fails `check_pow_bits()`.
+    ///
+    /// Derive with a moderately tight budget (passes auto-validation because
+    /// the natural slot pow stays well below it), then mutate the basecase
+    /// pow to a value above that budget but still within the grind cap, and
+    /// verify the boolean check trips.
     #[test]
     fn check_pow_bits_detects_over_budget_slot() {
         use crate::{bits::Bits, protocols::proof_of_work::Config as PowConfig};
+        const MODERATE_POW_BUDGET_BITS: u32 = 30;
         let spec = SecuritySpec {
             mode: Mode::ZeroKnowledge,
             target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            max_pow_bits: Some(TIGHT_POW_BUDGET_BITS),
+            max_pow_bits: Some(MODERATE_POW_BUDGET_BITS),
             hash_id: hash::BLAKE3,
         };
         let mut plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
-        );
+        )
+        .unwrap();
         plan.basecase.pow = PowConfig::from_difficulty(Bits::new(OVER_BUDGET_INJECTED_BITS));
         assert!(!plan.check_pow_bits());
+    }
+
+    /// `derive()` reports `PowUngrindable` when the spec demands a per-slot
+    /// difficulty above the grind cap. `target_security_bits = 200` against
+    /// `analytic ≈ 64` on `Field64` gives `required ≈ 136` ≫ 60.
+    #[test]
+    fn derive_reports_pow_ungrindable() {
+        const UNREACHABLE_TARGET_BITS: u32 = 200;
+        let spec = SecuritySpec {
+            mode: Mode::Standard,
+            target_security_bits: UNREACHABLE_TARGET_BITS,
+            max_pow_bits: Some(LOOSE_POW_BUDGET_BITS),
+            hash_id: hash::BLAKE3,
+        };
+        let err = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .expect_err("target above grind cap must fail");
+        assert!(
+            matches!(err, DeriveError::PowUngrindable { .. }),
+            "got {err:?}",
+        );
+    }
+
+    /// `derive()` reports `PowBudgetExceeded` when a slot's required PoW
+    /// fits the grind cap but exceeds `spec.max_pow_bits`. `target = 40`
+    /// with `max_pow_bits = Some(5)` forces this on `Field64`.
+    #[test]
+    fn derive_reports_pow_budget_exceeded() {
+        const TIGHT_MAX_POW: u32 = 5;
+        let spec = SecuritySpec {
+            mode: Mode::ZeroKnowledge,
+            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
+            max_pow_bits: Some(TIGHT_MAX_POW),
+            hash_id: hash::BLAKE3,
+        };
+        let err = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .expect_err("tight max_pow_bits must trip auto-validation");
+        assert!(
+            matches!(err, DeriveError::PowBudgetExceeded { .. }),
+            "got {err:?}",
+        );
     }
 
     /// `analytic_error + pow ≥ target` for every PoW slot in the plan.
@@ -706,7 +809,7 @@ mod tests {
         #[test]
         fn derived_plan_meets_target_per_slot_standard(tuning in arb_tuning()) {
             let spec = test_spec(Mode::Standard);
-            let plan = ProtocolConfig::<TestEmbedding>::derive(spec.clone(), tuning);
+            let plan = ProtocolConfig::<TestEmbedding>::derive(spec.clone(), tuning).unwrap();
             assert_plan_meets_target_per_slot(&spec, &plan);
         }
 
@@ -718,7 +821,7 @@ mod tests {
                 tuning.folding_factor.at_round(0) + tuning.folding_factor.at_round(1);
             prop_assume!(tuning.vector_size.trailing_zeros() as usize >= log_threshold);
             let spec = test_spec(Mode::ZeroKnowledge);
-            let plan = ProtocolConfig::<TestEmbedding>::derive(spec.clone(), tuning);
+            let plan = ProtocolConfig::<TestEmbedding>::derive(spec.clone(), tuning).unwrap();
             assert_plan_meets_target_per_slot(&spec, &plan);
         }
 
@@ -727,7 +830,7 @@ mod tests {
         #[test]
         fn derive_standard_succeeds_over_tunings(tuning in arb_tuning()) {
             let spec = test_spec(Mode::Standard);
-            let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning);
+            let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning).unwrap();
             for r in &plan.rounds {
                 prop_assert!(matches!(r.mode, RoundMode::Standard));
                 prop_assert!(r.mask_oracle.is_none());
@@ -748,7 +851,7 @@ mod tests {
             prop_assume!(tuning.vector_size.trailing_zeros() as usize >= log_threshold);
 
             let spec = test_spec(Mode::ZeroKnowledge);
-            let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning);
+            let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning).unwrap();
             for r in &plan.rounds {
                 let mask_oracle = r
                     .mask_oracle
@@ -776,7 +879,7 @@ mod tests {
         #[test]
         fn analytic_bits_finite_and_non_negative_standard(tuning in arb_tuning()) {
             let spec = test_spec(Mode::Standard);
-            let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning);
+            let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning).unwrap();
             let analytic = f64::from(plan.analytic_bits());
             prop_assert!(analytic.is_finite());
             prop_assert!(analytic >= 0.0);

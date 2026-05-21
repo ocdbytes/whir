@@ -10,6 +10,7 @@ use crate::{
         irs_commit::Config as IrsConfig,
         params::{
             bounds::SoundnessBounded,
+            error::{BasecaseSlot, DeriveError, PowResultExt, PowSlot},
             irs_commit as irs_solver,
             spec::{Mode as SpecMode, OodSampleBudget, RoundContext, SecuritySpec},
             sumcheck as sumcheck_solver,
@@ -25,7 +26,7 @@ pub fn solve<F: Field>(
     spec: &SecuritySpec,
     vector_size: usize,
     log_inv_rate: u32,
-) -> BasecaseConfig<F> {
+) -> Result<BasecaseConfig<F>, DeriveError> {
     assert!(vector_size > 0, "basecase requires vector_size ≥ 1");
 
     let ctx = RoundContext {
@@ -40,7 +41,8 @@ pub fn solve<F: Field>(
         target_bits,
         sumcheck_solver::analytic_error_bits(&commit, None),
         spec.hash_id,
-    );
+    )
+    .at_slot(PowSlot::Basecase(BasecaseSlot::Sumcheck))?;
     let sumcheck = SumcheckConfig::new(
         vector_size,
         sumcheck_pow,
@@ -57,10 +59,11 @@ pub fn solve<F: Field>(
         basecase::BasecaseMode::Standard => PowConfig::none(),
         basecase::BasecaseMode::ZeroKnowledge => {
             PowConfig::grind_to(target_bits, analytic_error_bits(&commit), spec.hash_id)
+                .at_slot(PowSlot::Basecase(BasecaseSlot::GammaCombination))?
         }
     };
 
-    BasecaseConfig::new(commit, sumcheck, mode, pow)
+    Ok(BasecaseConfig::new(commit, sumcheck, mode, pow))
 }
 
 /// γ-combination soundness (Lemma 7.4 combination-randomness slot, paper p.45).
@@ -174,7 +177,7 @@ mod tests {
             spec in arb_standard_johnson_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
-            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
+            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
             prop_assert!(matches!(config.mode, basecase::BasecaseMode::Standard));
             prop_assert_eq!(config.commit.interleaving_depth, 1);
             prop_assert_eq!(config.commit.num_vectors, 1);
@@ -186,7 +189,7 @@ mod tests {
             spec in arb_zk_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
-            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
+            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
             prop_assert!(matches!(config.mode, basecase::BasecaseMode::ZeroKnowledge));
             prop_assert!(config.commit.mask_length() > 0);
         }
@@ -196,7 +199,7 @@ mod tests {
             spec in arb_zk_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
-            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
+            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
             assert_pow_closes_gap(&spec, analytic_error_bits(&config.commit), &config.pow);
         }
 
@@ -205,7 +208,7 @@ mod tests {
             spec in arb_standard_johnson_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
-            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate);
+            let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
             prop_assert_eq!(config.pow, PowConfig::none());
         }
     }

@@ -11,6 +11,7 @@ use crate::{
         mask_proximity::Config as MaskProximityConfig,
         params::{
             bounds::{usize_to_f64, SoundnessBounded},
+            error::{DeriveError, PowResultExt, PowSlot, RoundSlot},
             spec::SecuritySpec,
         },
         proof_of_work::Config as PowConfig,
@@ -23,11 +24,15 @@ pub fn solve<F: Field>(
     spec: &SecuritySpec,
     c_zk: IrsConfig<Identity<F>>,
     num_masks: usize,
-) -> MaskProximityConfig<F> {
+    round_index: usize,
+) -> Result<MaskProximityConfig<F>, DeriveError> {
     let target_bits = Bits::new(f64::from(spec.target_security_bits));
     let analytic = analytic_error_bits(&c_zk, num_masks);
-    let pow = PowConfig::grind_to(target_bits, analytic, spec.hash_id);
-    MaskProximityConfig::new(c_zk, num_masks, pow)
+    let pow = PowConfig::grind_to(target_bits, analytic, spec.hash_id).at_slot(PowSlot::Round {
+        index: round_index,
+        kind: RoundSlot::MaskProximity,
+    })?;
+    Ok(MaskProximityConfig::new(c_zk, num_masks, pow))
 }
 
 /// γ-combination soundness (Lemma 7.4):
@@ -114,7 +119,7 @@ mod tests {
             l_zk_log in 1u32..=5,
         ) {
             let c_zk = build_test_c_zk(&spec, 1usize << l_zk_log, log_inv_rate, num_masks);
-            let config = solve(&spec, c_zk, num_masks);
+            let config = solve(&spec, c_zk, num_masks, 0).unwrap();
             prop_assert_eq!(config.num_masks, num_masks);
             prop_assert_eq!(config.c_zk_commit.num_vectors, 2 * num_masks);
             prop_assert_eq!(config.c_zk_commit.interleaving_depth, 1);
@@ -130,7 +135,7 @@ mod tests {
         ) {
             let c_zk = build_test_c_zk(&spec, 1usize << l_zk_log, log_inv_rate, num_masks);
             let analytic = analytic_error_bits(&c_zk, num_masks);
-            let config = solve(&spec, c_zk, num_masks);
+            let config = solve(&spec, c_zk, num_masks, 0).unwrap();
             assert_pow_closes_gap(&spec, analytic, &config.pow);
         }
     }
@@ -143,7 +148,7 @@ mod tests {
     fn solve_rejects_mismatched_num_vectors() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let c_zk = build_test_c_zk(&spec, 2, 1, 2);
-        let _ = solve(&spec, c_zk, 3);
+        let _ = solve(&spec, c_zk, 3, 0);
     }
 
     #[test]
@@ -170,6 +175,6 @@ mod tests {
             RATE,
             IrsMode::Standard,
         );
-        let _ = solve(&spec, c_zk, NUM_MASKS);
+        let _ = solve(&spec, c_zk, NUM_MASKS, 0);
     }
 }

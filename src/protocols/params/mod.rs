@@ -12,6 +12,7 @@ pub(crate) mod basecase;
 pub(crate) mod bounds;
 pub(crate) mod code_switch;
 pub mod derive;
+pub mod error;
 pub(crate) mod irs_commit;
 pub(crate) mod mask_proximity;
 pub mod protocol_config;
@@ -21,6 +22,7 @@ pub(crate) mod sumcheck;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
+pub use error::{BasecaseSlot, DeriveError, PowSlot, RoundSlot};
 pub use protocol_config::{
     MaskOracleConfig, MaskOracleInfo, ProtocolConfig, RoundConfig, RoundMode,
 };
