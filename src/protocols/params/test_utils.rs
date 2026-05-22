@@ -14,13 +14,13 @@ use crate::{
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
-            bounds::johnson_list_size,
             derive::compute_t_ood,
             irs_commit as irs_solver,
             protocol_config::MaskOracleInfo,
-            spec::{DecodingRegime,
-                ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, PowBudget,
-                RoundContext, SecuritySpec, ZkSpec,
+            regime::johnson_list_size,
+            spec::{
+                DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
+                PowBudget, RoundContext, SecuritySpec, ZkSpec,
             },
         },
         proof_of_work::Config as PowConfig,
@@ -51,7 +51,7 @@ pub const EPS: f64 = 1e-9;
 pub fn deterministic_spec(mode: Mode) -> SecuritySpec {
     SecuritySpec {
         mode,
-            decoding_regime: DecodingRegime::Johnson,
+        decoding_regime: DecodingRegime::Johnson,
         target_security_bits: FIXTURE_TARGET_BITS,
         pow_budget: PowBudget::Forbidden,
         hash_id: hash::BLAKE3,
@@ -72,7 +72,7 @@ pub fn arb_spec(
     ];
     (target_range, pow_strategy).prop_map(move |(target, pow_budget)| SecuritySpec {
         mode,
-            decoding_regime: DecodingRegime::Johnson,
+        decoding_regime: DecodingRegime::Johnson,
         target_security_bits: target,
         pow_budget,
         hash_id: hash::BLAKE3,

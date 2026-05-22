@@ -10,8 +10,8 @@ use crate::{
         irs_commit::Config as IrsConfig,
         mask_proximity::Config as MaskProximityConfig,
         params::{
-            bounds::{usize_to_f64, SoundnessBounded},
-            error::{DeriveError, PowResultExt, PowSlot, RoundSlot},
+            bounds::usize_to_f64,
+            error::{DeriveError, Pow, PowResultExt},
             spec::SecuritySpec,
         },
         proof_of_work::Config as PowConfig,
@@ -28,10 +28,8 @@ pub fn solve<F: Field>(
 ) -> Result<MaskProximityConfig<F>, DeriveError> {
     let target_bits = Bits::new(f64::from(spec.target_security_bits));
     let analytic = analytic_error_bits(&c_zk, num_masks);
-    let pow = PowConfig::grind_to(target_bits, analytic, spec.hash_id).at_slot(PowSlot::Round {
-        index: round_index,
-        kind: RoundSlot::MaskProximity,
-    })?;
+    let pow = PowConfig::grind_to(target_bits, analytic, spec.hash_id)
+        .at(Pow::RoundMaskProximity { index: round_index })?;
     Ok(MaskProximityConfig::new(c_zk, num_masks, pow))
 }
 
@@ -47,8 +45,9 @@ pub fn analytic_error_bits<F: Field>(c_zk: &IrsConfig<Identity<F>>, num_masks: u
     Bits::new((field_bits - log_combined).max(0.0))
 }
 
-impl<F: Field> SoundnessBounded for MaskProximityConfig<F> {
-    fn analytic_bits(&self) -> Bits {
+impl<F: Field> MaskProximityConfig<F> {
+    /// Analytic soundness bits (excluding PoW) for the Lemma 7.4 γ-combination.
+    pub fn analytic_bits(&self) -> Bits {
         analytic_error_bits(&self.c_zk_commit, self.num_masks)
     }
 }
@@ -65,7 +64,7 @@ mod tests {
         protocols::{
             irs_commit::IrsMode,
             params::{
-                spec::Mode,
+                spec::{DecodingRegime, Mode},
                 test_utils::{
                     arb_zk_spec, assert_close, assert_pow_closes_gap, build_test_c_zk,
                     deterministic_spec, TEST_TARGET_RANGE,
@@ -157,7 +156,6 @@ mod tests {
         // All values except `NON_UNIT_INTERLEAVING_DEPTH` are chosen to satisfy
         // `Config::new`'s divisibility/pow2 constraints.
         const SECURITY_TARGET_BITS: f64 = 80.0;
-        const UNIQUE_DECODING: bool = false;
         const NUM_VECTORS: usize = 2;
         const VECTOR_SIZE: usize = 8;
         const NON_UNIT_INTERLEAVING_DEPTH: usize = 2;
@@ -167,7 +165,7 @@ mod tests {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let c_zk = IrsConfig::<Identity<Field64>>::new(
             SECURITY_TARGET_BITS,
-            UNIQUE_DECODING,
+            DecodingRegime::Johnson,
             hash::BLAKE3,
             NUM_VECTORS,
             VECTOR_SIZE,

@@ -9,8 +9,7 @@ use crate::{
         basecase::{self, Config as BasecaseConfig},
         irs_commit::Config as IrsConfig,
         params::{
-            bounds::SoundnessBounded,
-            error::{BasecaseSlot, DeriveError, PowResultExt, PowSlot},
+            error::{DeriveError, Pow, PowResultExt},
             irs_commit as irs_solver,
             spec::{Mode as SpecMode, OodSampleBudget, RoundContext, SecuritySpec},
             sumcheck as sumcheck_solver,
@@ -42,7 +41,7 @@ pub fn solve<F: Field>(
         sumcheck_solver::analytic_error_bits(&commit, None),
         spec.hash_id,
     )
-    .at_slot(PowSlot::Basecase(BasecaseSlot::Sumcheck))?;
+    .at(Pow::BasecaseSumcheck)?;
     let sumcheck = SumcheckConfig::new(
         vector_size,
         sumcheck_pow,
@@ -59,7 +58,7 @@ pub fn solve<F: Field>(
         basecase::BasecaseMode::Standard => PowConfig::none(),
         basecase::BasecaseMode::ZeroKnowledge => {
             PowConfig::grind_to(target_bits, analytic_error_bits(&commit), spec.hash_id)
-                .at_slot(PowSlot::Basecase(BasecaseSlot::GammaCombination))?
+                .at(Pow::BasecaseGammaCombination)?
         }
     };
 
@@ -76,10 +75,11 @@ pub fn analytic_error_bits<F: Field>(commit: &IrsConfig<Identity<F>>) -> Bits {
     Bits::new(prox_gaps.min(poly_id).max(0.0))
 }
 
-impl<F: Field> SoundnessBounded for BasecaseConfig<F> {
-    /// `min(sumcheck round error, γ-slot error)`. The γ-slot only contributes
-    /// in ZK mode; Standard collapses to the sumcheck term.
-    fn analytic_bits(&self) -> Bits {
+impl<F: Field> BasecaseConfig<F> {
+    /// Analytic soundness bits (excluding PoW): `min(sumcheck round error, γ-slot error)`.
+    /// The γ-slot only contributes in ZK mode; Standard collapses to the
+    /// sumcheck term.
+    pub fn analytic_bits(&self) -> Bits {
         let sumcheck_term = f64::from(sumcheck_solver::analytic_error_bits(&self.commit, None));
         let min_bits = match self.mode {
             basecase::BasecaseMode::Standard => sumcheck_term,
@@ -141,7 +141,7 @@ mod tests {
     }
 
     /// At `log_inv_rate = 1` on `Field64`, `ε_mca` is below the poly-identity
-    /// term — pins the `min` to the arm that earlier returned `poly_id` alone.
+    /// term — pins the `min` to the prox-gaps arm rather than `poly_id`.
     #[test]
     fn analytic_error_uses_eps_mca_when_limiting() {
         use crate::protocols::params::{

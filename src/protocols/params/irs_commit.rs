@@ -26,14 +26,13 @@ pub fn solve<M: Embedding + Default>(
     let security_target = f64::from(spec.protocol_security_target_bits());
     let rate = rate(f64::from(ctx.log_inv_rate));
     let interleaving_depth = 1_usize << ctx.folding_factor;
-    let unique_decoding = spec.decoding_regime.unique_decoding();
 
     let mode = match spec.mode {
         Mode::Standard => IrsMode::Standard,
         Mode::ZeroKnowledge => {
             // Lemma 9.5 (part ii): r-query perfect-ZK encoding requires
             // `r ≥ in-domain + OOD`. Use the tight bound; do not pow2-pad here.
-            let mask_length = num_in_domain_queries(unique_decoding, security_target, rate)
+            let mask_length = num_in_domain_queries(spec.decoding_regime, security_target, rate)
                 .checked_add(out_domain_samples.get())
                 .expect("usize overflow");
             IrsMode::ZeroKnowledge { mask_length }
@@ -42,7 +41,7 @@ pub fn solve<M: Embedding + Default>(
 
     IrsConfig::new(
         security_target,
-        unique_decoding,
+        spec.decoding_regime,
         spec.hash_id,
         1, // one vector committed per round
         ctx.vector_size,
@@ -75,13 +74,12 @@ pub fn solve_mask_code<M: Embedding + Default>(
         "num_vectors ({num_vectors}) must be even (mask-proximity original/fresh pairs)",
     );
 
-    let spec = spec.get();
     let security_target = f64::from(spec.protocol_security_target_bits());
     let rate = rate(f64::from(log_inv_rate.get()));
 
     IrsConfig::new(
         security_target,
-        spec.decoding_regime.unique_decoding(),
+        spec.decoding_regime,
         spec.hash_id,
         num_vectors,
         l_zk,
@@ -114,7 +112,13 @@ mod tests {
     fn solve_mask_code_rejects_non_pow2_l_zk() {
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
         let zk_spec = ZkSpec::try_new(&spec).unwrap();
-        let _ = solve_mask_code::<M>(zk_spec, MaskCodeMessageLen::new(3), 0, LogInvRate::new(1), 2);
+        let _ = solve_mask_code::<M>(
+            zk_spec,
+            MaskCodeMessageLen::new(3),
+            0,
+            LogInvRate::new(1),
+            2,
+        );
     }
 
     #[test]
@@ -122,7 +126,13 @@ mod tests {
     fn solve_mask_code_rejects_l_zk_below_source_mask_length() {
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
         let zk_spec = ZkSpec::try_new(&spec).unwrap();
-        let _ = solve_mask_code::<M>(zk_spec, MaskCodeMessageLen::new(2), 4, LogInvRate::new(1), 2);
+        let _ = solve_mask_code::<M>(
+            zk_spec,
+            MaskCodeMessageLen::new(2),
+            4,
+            LogInvRate::new(1),
+            2,
+        );
     }
 
     #[test]
@@ -130,7 +140,13 @@ mod tests {
     fn solve_mask_code_rejects_odd_num_vectors() {
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
         let zk_spec = ZkSpec::try_new(&spec).unwrap();
-        let _ = solve_mask_code::<M>(zk_spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 3);
+        let _ = solve_mask_code::<M>(
+            zk_spec,
+            MaskCodeMessageLen::new(2),
+            0,
+            LogInvRate::new(1),
+            3,
+        );
     }
 
     /// `irs_commit::solve` doesn't grind PoW, so this range can sit higher than

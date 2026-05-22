@@ -43,14 +43,14 @@ impl BlindingSizePolicy {
             .saturating_sub(main_whir_params.pow_bits);
         #[allow(clippy::cast_possible_wrap)]
         let q_delta_1 = irs_commit::num_in_domain_queries(
-            main_whir_params.unique_decoding,
+            main_whir_params.decoding_regime,
             protocol_security_level_main as f64,
             0.5_f64.powi(main_whir_params.starting_log_inv_rate as i32),
         )
         .get();
         #[allow(clippy::cast_possible_wrap)]
         let q_delta_2 = irs_commit::num_in_domain_queries(
-            main_whir_params.unique_decoding,
+            main_whir_params.decoding_regime,
             main_whir_params.security_level as f64,
             0.5_f64.powi(main_whir_params.starting_log_inv_rate as i32),
         )
@@ -257,6 +257,7 @@ mod tests {
         },
         hash,
         parameters::ProtocolParameters,
+        protocols::params::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
     };
 
@@ -277,7 +278,7 @@ mod tests {
 
     fn make_test_config(num_polynomials: usize) -> Config<F> {
         let whir_params = ProtocolParameters {
-            unique_decoding: false,
+            decoding_regime: DecodingRegime::Johnson,
             security_level: 16,
             pow_bits: 0,
             initial_folding_factor: 2,

@@ -1,6 +1,13 @@
-use core::{marker::PhantomData, num::NonZeroU32};
+use core::{
+    fmt::{self, Display, Formatter},
+    marker::PhantomData,
+    num::NonZeroU32,
+    ops::Deref,
+    str::FromStr,
+};
 
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
 
 use crate::{bits::Bits, engines::EngineId};
 
@@ -147,6 +154,10 @@ pub enum Mode {
 /// Constructed only via [`ZkSpec::try_new`], which performs the mode check
 /// once at the boundary. ZK-only solvers accept `ZkSpec` to make
 /// "ZK mode required" a compile-time precondition instead of a runtime assert.
+///
+/// `Deref<Target = SecuritySpec>` is implemented so fields and inherent
+/// methods are reachable directly (`zk_spec.target_security_bits`). For sites
+/// that need to pass `&SecuritySpec` explicitly, use [`Self::as_inner`].
 #[derive(Debug, Clone, Copy)]
 pub struct ZkSpec<'a>(&'a SecuritySpec);
 
@@ -156,7 +167,20 @@ impl<'a> ZkSpec<'a> {
         matches!(spec.mode, Mode::ZeroKnowledge).then_some(Self(spec))
     }
 
-    pub const fn get(self) -> &'a SecuritySpec {
+    /// Explicit unwrap — `&SecuritySpec` with the wrapper's lifetime.
+    ///
+    /// Prefer field access through `Deref` for reads; reach for `as_inner`
+    /// when you specifically need to hand `&SecuritySpec` to a function whose
+    /// signature is not in deref-coercion position (e.g. trait method
+    /// dispatch).
+    pub const fn as_inner(self) -> &'a SecuritySpec {
+        self.0
+    }
+}
+
+impl Deref for ZkSpec<'_> {
+    type Target = SecuritySpec;
+    fn deref(&self) -> &SecuritySpec {
         self.0
     }
 }
@@ -174,17 +198,51 @@ impl<'a> ZkSpec<'a> {
 /// radius. At high security targets or deep folding, `Unique` may exceed
 /// the grind cap on per-round PoW and [`super::derive::ProtocolConfig::derive`]
 /// will return `PowUngrindable`. Pick `Johnson` for those cases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DecodingRegime {
     Unique,
     Johnson,
 }
 
-impl DecodingRegime {
-    /// Bridge to [`super::super::irs_commit::Config::new`]'s `unique_decoding`
-    /// parameter.
-    pub const fn unique_decoding(self) -> bool {
-        matches!(self, Self::Unique)
+impl Display for DecodingRegime {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unique => f.write_str("Unique"),
+            Self::Johnson => f.write_str("Johnson"),
+        }
+    }
+}
+
+impl FromStr for DecodingRegime {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Unique" => Ok(Self::Unique),
+            "Johnson" => Ok(Self::Johnson),
+            _ => Err(format!(
+                "invalid decoding regime: {s}, options are: Unique, Johnson"
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod decoding_regime_tests {
+    use super::*;
+
+    #[test]
+    fn from_str_round_trips_display() {
+        for r in [DecodingRegime::Unique, DecodingRegime::Johnson] {
+            assert_eq!(r.to_string().parse::<DecodingRegime>().unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn from_str_rejects_unknown() {
+        assert!("johnson".parse::<DecodingRegime>().is_err()); // case-sensitive
+        assert!("".parse::<DecodingRegime>().is_err());
+        assert!("Capacity".parse::<DecodingRegime>().is_err());
     }
 }
 

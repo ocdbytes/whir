@@ -14,7 +14,7 @@ use crate::{
         irs_commit::Config as IrsConfig,
         params::{
             bounds::usize_to_f64,
-            error::{DeriveError, PowResultExt, PowSlot, RoundSlot},
+            error::{DeriveError, Pow, PowResultExt},
             protocol_config::MaskOracleInfo,
             spec::SecuritySpec,
         },
@@ -50,10 +50,8 @@ pub fn solve<M: Embedding>(
 
     let target_bits = Bits::new(f64::from(spec.target_security_bits));
     let analytic = analytic_error_bits(&source, &target, t_ood, mask_oracle);
-    let pow = PowConfig::grind_to(target_bits, analytic, spec.hash_id).at_slot(PowSlot::Round {
-        index: round_index,
-        kind: RoundSlot::CodeSwitch,
-    })?;
+    let pow = PowConfig::grind_to(target_bits, analytic, spec.hash_id)
+        .at(Pow::RoundCodeSwitch { index: round_index })?;
 
     Ok(CodeSwitchConfig::new(source, target, t_ood, mode, pow))
 }
@@ -110,12 +108,12 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
-        bounds::johnson_list_size,
         derive::{compute_l_zk, compute_t_ood},
         irs_commit as irs_solver,
-        spec::{DecodingRegime,
-            ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, PowBudget,
-            RoundContext, SecuritySpec, ZkSpec,
+        regime::johnson_list_size,
+        spec::{
+            DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
+            PowBudget, RoundContext, SecuritySpec, ZkSpec,
         },
         test_utils::{
             arb_standard_johnson_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec,

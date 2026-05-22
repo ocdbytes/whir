@@ -15,14 +15,13 @@ use std::{f64, fmt, num::NonZeroUsize};
 
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
-use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
 use crate::{
     algebra::{
-        dot, embedding::Embedding, lift, linear_form::UnivariateEvaluation,
+        dot, embedding::Embedding, fields::FieldWithSize, lift, linear_form::UnivariateEvaluation,
         mixed_univariate_evaluate, ntt, random_vector,
     },
     engines::EngineId,
@@ -30,9 +29,7 @@ use crate::{
     protocols::{
         challenge_indices::challenge_indices,
         matrix_commit,
-        params::bounds::{
-            eps_mca_log2, list_size_log2, one_minus_distance_log2, ood_per_sample_log2, CodeParams,
-        },
+        params::{bounds::ood_per_sample_log2, regime::DecodingRegimeParams, spec::DecodingRegime},
     },
     transcript::{
         Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState, VerificationResult,
@@ -81,9 +78,8 @@ pub struct Config<M: Embedding> {
     /// The matrix commitment configuration.
     pub matrix_commit: matrix_commit::Config<M::Source>,
 
-    /// Slack to the Jonhnson bound in list decoding.
-    /// Zero indicates unique decoding.
-    pub johnson_slack: OrderedFloat<f64>,
+    /// Materialized Reed–Solomon decoding regime (Unique / Johnson w/ slack).
+    pub regime: DecodingRegimeParams,
 
     /// The number of in-domain samples.
     pub in_domain_samples: usize,
@@ -129,7 +125,7 @@ impl<M: Embedding> Config<M> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         security_target: f64,
-        unique_decoding: bool,
+        decoding_regime: DecodingRegime,
         hash_id: EngineId,
         num_vectors: usize,
         vector_size: usize,
@@ -152,14 +148,8 @@ impl<M: Embedding> Config<M> {
             .expect("codeword length exceeds NTT engine support");
         let rate = masked_message_length as f64 / codeword_length as f64;
 
-        // η = slack to Johnson bound. We pick η = √ρ / 20.
-        // TODO: Optimize picking η.
-        let johnson_slack = if unique_decoding {
-            0.0
-        } else {
-            rate.sqrt() / 20.
-        };
-        let in_domain_samples = num_in_domain_queries(unique_decoding, security_target, rate).get();
+        let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
+        let in_domain_samples = num_in_domain_queries(decoding_regime, security_target, rate).get();
 
         Self {
             embedding: Typed::<M>::default(),
@@ -172,7 +162,7 @@ impl<M: Embedding> Config<M> {
                 codeword_length,
                 interleaving_depth * num_vectors,
             ),
-            johnson_slack: OrderedFloat(johnson_slack),
+            regime,
             in_domain_samples,
             deduplicate_in_domain: false,
             mode,
@@ -222,8 +212,8 @@ impl<M: Embedding> Config<M> {
         self.masked_message_length() as f64 / self.codeword_length as f64
     }
 
-    pub fn unique_decoding(&self) -> bool {
-        self.johnson_slack == 0.0
+    pub const fn unique_decoding(&self) -> bool {
+        self.regime.is_unique()
     }
 
     fn log_inv_rate(&self) -> f64 {
@@ -232,23 +222,23 @@ impl<M: Embedding> Config<M> {
 
     /// Compute a list size bound.
     pub fn list_size(&self) -> f64 {
-        2_f64.powf(list_size_log2(
-            self.log_inv_rate(),
-            self.johnson_slack.into_inner(),
-        ))
+        self.regime.list_size(self.log_inv_rate())
     }
 
     /// Round-by-round soundness of the in-domain queries in bits.
     pub fn rbr_queries(&self) -> f64 {
         // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
-        -(self.in_domain_samples as f64)
-            * one_minus_distance_log2(self.log_inv_rate(), self.johnson_slack.into_inner())
+        -(self.in_domain_samples as f64) * self.regime.one_minus_distance_log2(self.log_inv_rate())
     }
 
     /// Round-by-round soundness of the proximity-gaps fold in bits.
     /// See WHIR Theorem 4.8.
     pub fn rbr_soundness_fold_prox_gaps(&self) -> f64 {
-        -eps_mca_log2(&CodeParams::from_irs(self))
+        -self.regime.eps_mca_log2(
+            self.log_inv_rate(),
+            self.masked_message_length(),
+            M::Target::field_size_bits(),
+        )
     }
 
     /// Commit to one or more vectors.
@@ -533,13 +523,13 @@ impl<M: Embedding> fmt::Display for Config<M> {
 /// See [STIR] Lemma 4.5.
 #[allow(clippy::cast_sign_loss)]
 pub fn num_ood_samples(
-    unique_decoding: bool,
+    decoding_regime: DecodingRegime,
     security_target: f64,
     field_size_bits: f64,
     list_size: f64,
     degree: usize,
 ) -> usize {
-    if unique_decoding {
+    if matches!(decoding_regime, DecodingRegime::Unique) {
         return 0;
     }
     let log_per_sample = -ood_per_sample_log2(degree, field_size_bits);
@@ -559,19 +549,13 @@ pub fn num_ood_samples(
 // TODO: A method with cleaner abstraction.
 #[allow(clippy::cast_sign_loss)]
 pub(crate) fn num_in_domain_queries(
-    unique_decoding: bool,
+    decoding_regime: DecodingRegime,
     security_target: f64,
     rate: f64,
 ) -> NonZeroUsize {
-    // η = slack to Johnson bound. We pick η = √ρ / 20.
-    // TODO: Optimize picking η.
-    let johnson_slack = if unique_decoding {
-        0.0
-    } else {
-        rate.sqrt() / 20.
-    };
+    let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
     // Query error is (1 - δ)^q in bits = -q · log2(1 - δ).
-    let log_one_minus_delta = one_minus_distance_log2(-rate.log2(), johnson_slack);
+    let log_one_minus_delta = regime.one_minus_distance_log2(-rate.log2());
     let q = (security_target / -log_one_minus_delta).ceil() as usize;
     NonZeroUsize::new(q).unwrap_or(NonZeroUsize::MIN)
 }
@@ -646,7 +630,7 @@ pub(crate) mod tests {
                         codeword_length,
                         interleaving_depth,
                         matrix_commit,
-                        johnson_slack: OrderedFloat::default(),
+                        regime: DecodingRegimeParams::Unique,
                         in_domain_samples,
                         deduplicate_in_domain,
                         mode,

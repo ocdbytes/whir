@@ -180,6 +180,7 @@ mod tests {
         },
         hash,
         parameters::ProtocolParameters,
+        protocols::params::DecodingRegime,
         transcript::{codecs::Empty, DomainSeparator, ProverState, VerifierState},
         utils::test_serde,
     };
@@ -223,7 +224,7 @@ mod tests {
         initial_folding_factor: usize,
         folding_factor: usize,
         num_points: usize,
-        unique_decoding: bool,
+        decoding_regime: DecodingRegime,
         pow_bits: usize,
     ) {
         // Number of coefficients in the multilinear polynomial (2^num_variables)
@@ -235,7 +236,7 @@ mod tests {
             pow_bits,
             initial_folding_factor,
             folding_factor,
-            unique_decoding,
+            decoding_regime,
             starting_log_inv_rate: 1,
             batch_size: 1,
             hash_id: hash::SHA2,
@@ -321,14 +322,14 @@ mod tests {
             let num_variables = folding_factor..=3 * folding_factor;
             for num_variable in num_variables {
                 for num_points in [0, 1, 2] {
-                    for unique_decoding in [true, false] {
+                    for decoding_regime in [DecodingRegime::Unique, DecodingRegime::Johnson] {
                         for pow_bits in [0, 5, 10] {
                             eprintln!();
                             dbg!(
                                 folding_factor,
                                 num_variable,
                                 num_points,
-                                unique_decoding,
+                                decoding_regime,
                                 pow_bits
                             );
 
@@ -337,7 +338,7 @@ mod tests {
                                 folding_factor,
                                 folding_factor,
                                 num_points,
-                                unique_decoding,
+                                decoding_regime,
                                 pow_bits,
                             );
                         }
@@ -349,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_fail() {
-        make_whir_things(3, 2, 2, 0, false, 0);
+        make_whir_things(3, 2, 2, 0, DecodingRegime::Johnson, 0);
     }
 
     #[test]
@@ -379,7 +380,7 @@ mod tests {
                             initial_folding_factor,
                             folding_factor,
                             num_points,
-                            false,
+                            DecodingRegime::Johnson,
                             5,
                         );
                     }
@@ -398,7 +399,7 @@ mod tests {
         folding_factor: usize,
         num_points_per_poly: usize,
         num_vectors: usize,
-        unique_decoding: bool,
+        decoding_regime: DecodingRegime,
         pow_bits: usize,
     ) {
         let num_coeffs = 1 << num_variables;
@@ -408,7 +409,7 @@ mod tests {
             pow_bits,
             initial_folding_factor,
             folding_factor,
-            unique_decoding,
+            decoding_regime,
             starting_log_inv_rate: 1,
             batch_size: 1,
             hash_id: hash::SHA2,
@@ -529,7 +530,7 @@ mod tests {
                                 folding_factor,
                                 num_points_per_poly,
                                 num_polys,
-                                false,
+                                DecodingRegime::Johnson,
                                 0, // pow_bits
                             );
                         }
@@ -548,7 +549,8 @@ mod tests {
             2, // folding_factor
             2, // num_points_per_poly
             1, // num_polynomials (single!)
-            false, 0,
+            DecodingRegime::Johnson,
+            0,
         );
     }
 
@@ -576,7 +578,7 @@ mod tests {
             pow_bits: 0,
             initial_folding_factor,
             folding_factor,
-            unique_decoding: false,
+            decoding_regime: DecodingRegime::Johnson,
             starting_log_inv_rate: 1,
             batch_size: 1,
             hash_id: hash::SHA2,
@@ -672,7 +674,7 @@ mod tests {
         num_points_per_poly: usize,
         num_witnesses: usize,
         batch_size: usize,
-        unique_decoding: bool,
+        decoding_regime: DecodingRegime,
         pow_bits: usize,
     ) {
         let num_coeffs = 1 << num_variables;
@@ -682,7 +684,7 @@ mod tests {
             pow_bits,
             initial_folding_factor,
             folding_factor,
-            unique_decoding,
+            decoding_regime,
             starting_log_inv_rate: 1,
             batch_size, // KEY: batch_size > 1
             hash_id: hash::SHA2,
@@ -788,7 +790,7 @@ mod tests {
                         1, // num_points_per_poly
                         num_witness,
                         batch_size,
-                        false,
+                        DecodingRegime::Johnson,
                         0, // pow_bits
                     );
                 }
@@ -803,7 +805,7 @@ mod tests {
         initial_folding_factor: usize,
         folding_factor: usize,
         num_points: usize,
-        unique_decoding: bool,
+        decoding_regime: DecodingRegime,
         pow_bits: usize,
     ) {
         eprintln!("\n---------------------");
@@ -813,7 +815,7 @@ mod tests {
         eprintln!("  initial_folding : {initial_folding_factor}");
         eprintln!("  folding_factor  : {folding_factor}");
         eprintln!("  num_points      : {num_points:?}");
-        eprintln!("  unique_decoding : {unique_decoding:?}");
+        eprintln!("  decoding_regime : {decoding_regime:?}");
         eprintln!("  pow_bits        : {pow_bits}");
 
         // Number of coefficients in the multilinear polynomial (2^num_variables)
@@ -825,7 +827,7 @@ mod tests {
             pow_bits,
             initial_folding_factor,
             folding_factor,
-            unique_decoding,
+            decoding_regime,
             starting_log_inv_rate: 1,
             batch_size,
             hash_id: hash::SHA2,
@@ -910,7 +912,7 @@ mod tests {
     #[test]
     fn test_batched_whir() {
         let folding_factors = [1, 4];
-        let unique_decoding_options = [false, true];
+        let decoding_regime_options = [DecodingRegime::Johnson, DecodingRegime::Unique];
         let num_points = [0, 2];
         let pow_bits = [0, 10];
 
@@ -918,7 +920,7 @@ mod tests {
             let num_variables = (2 * folding_factor)..=3 * folding_factor;
             for num_variable in num_variables {
                 for num_points in num_points {
-                    for unique_decoding in unique_decoding_options {
+                    for decoding_regime in decoding_regime_options {
                         for pow_bits in pow_bits {
                             for batch_size in 1..=4 {
                                 make_batched_whir_things(
@@ -927,7 +929,7 @@ mod tests {
                                     folding_factor,
                                     folding_factor,
                                     num_points,
-                                    unique_decoding,
+                                    decoding_regime,
                                     pow_bits,
                                 );
                             }

@@ -16,17 +16,18 @@ pub mod error;
 pub(crate) mod irs_commit;
 pub(crate) mod mask_proximity;
 pub mod protocol_config;
+pub(crate) mod regime;
 pub mod spec;
 pub(crate) mod sumcheck;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
 
-pub use error::{BasecaseSlot, DeriveError, PowSlot, RoundSlot};
+pub use error::{ChainSource, ChainTarget, DeriveError, FixedPointLoop, Pow};
 pub use protocol_config::{
     MaskOracleConfig, MaskOracleInfo, ProtocolConfig, RoundConfig, RoundMode,
 };
 pub use spec::{
-    DecodingRegime, FoldingFactor, ListSize, LogInvRate, MaskCodeMessageLen, Mode,
-    OodSampleBudget, PowBudget, RoundContext, SecuritySpec, TuningSpec, ZkSpec,
+    DecodingRegime, FoldingFactor, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
+    PowBudget, RoundContext, SecuritySpec, TuningSpec, ZkSpec,
 };

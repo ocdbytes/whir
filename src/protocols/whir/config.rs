@@ -55,7 +55,7 @@ impl<M: Embedding> Config<M> {
         #[allow(clippy::cast_possible_wrap)]
         let initial_committer = irs_commit::Config::new(
             protocol_security_level,
-            whir_parameters.unique_decoding,
+            whir_parameters.decoding_regime,
             whir_parameters.hash_id,
             whir_parameters.batch_size,
             size,
@@ -64,7 +64,7 @@ impl<M: Embedding> Config<M> {
             IrsMode::Standard,
         );
         let initial_out_domain_samples = num_ood_samples(
-            whir_parameters.unique_decoding,
+            whir_parameters.decoding_regime,
             protocol_security_level,
             field_size_bits,
             initial_committer.list_size(),
@@ -103,7 +103,7 @@ impl<M: Embedding> Config<M> {
             #[allow(clippy::cast_possible_wrap)]
             let irs_committer = irs_commit::Config::new(
                 protocol_security_level,
-                whir_parameters.unique_decoding,
+                whir_parameters.decoding_regime,
                 whir_parameters.hash_id,
                 1,
                 1 << num_variables,
@@ -112,7 +112,7 @@ impl<M: Embedding> Config<M> {
                 IrsMode::Standard,
             );
             let round_out_domain_samples = num_ood_samples(
-                whir_parameters.unique_decoding,
+                whir_parameters.decoding_regime,
                 protocol_security_level,
                 field_size_bits,
                 irs_committer.list_size(),
@@ -512,8 +512,6 @@ impl<F: Field> Display for RoundConfig<F> {
 
 #[cfg(test)]
 mod tests {
-    use ordered_float::OrderedFloat;
-
     use super::*;
     use crate::{
         algebra::{
@@ -522,7 +520,7 @@ mod tests {
         },
         bits::Bits,
         hash,
-        protocols::matrix_commit,
+        protocols::{matrix_commit, params::regime::DecodingRegimeParams},
         type_info::Typed,
         utils::test_serde,
     };
@@ -534,7 +532,7 @@ mod tests {
             pow_bits: 20,
             initial_folding_factor: 4,
             folding_factor: 4,
-            unique_decoding: false,
+            decoding_regime: crate::protocols::params::DecodingRegime::Johnson,
             starting_log_inv_rate: 1,
             batch_size: 1,
             hash_id: hash::BLAKE3,
@@ -584,7 +582,7 @@ mod tests {
                     codeword_length: 1 << (10 + 3 - 2),
                     interleaving_depth: 1 << 2,
                     matrix_commit: matrix_commit::Config::<Field64_3>::new(0, 0),
-                    johnson_slack: OrderedFloat::default(),
+                    regime: DecodingRegimeParams::Unique,
                     in_domain_samples: 5,
                     deduplicate_in_domain: true,
                 },
@@ -606,7 +604,7 @@ mod tests {
                     codeword_length: 1 << (10 + 4 - 2),
                     interleaving_depth: 1 << 2,
                     matrix_commit: matrix_commit::Config::<Field64_3>::new(0, 0),
-                    johnson_slack: OrderedFloat::default(),
+                    regime: DecodingRegimeParams::Unique,
                     in_domain_samples: 6,
                     deduplicate_in_domain: true,
                 },
