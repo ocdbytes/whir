@@ -27,6 +27,6 @@ pub use protocol_config::{
     MaskOracleConfig, MaskOracleInfo, ProtocolConfig, RoundConfig, RoundMode,
 };
 pub use spec::{
-    FoldingFactor, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext,
-    SecuritySpec, TuningSpec,
+    DecodingRegime, FoldingFactor, ListSize, LogInvRate, MaskCodeMessageLen, Mode,
+    OodSampleBudget, PowBudget, RoundContext, SecuritySpec, TuningSpec, ZkSpec,
 };

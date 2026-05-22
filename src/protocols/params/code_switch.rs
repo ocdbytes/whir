@@ -113,9 +113,9 @@ mod tests {
         bounds::johnson_list_size,
         derive::{compute_l_zk, compute_t_ood},
         irs_commit as irs_solver,
-        spec::{
-            ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext,
-            SecuritySpec,
+        spec::{DecodingRegime,
+            ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, PowBudget,
+            RoundContext, SecuritySpec, ZkSpec,
         },
         test_utils::{
             arb_standard_johnson_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec,
@@ -236,8 +236,9 @@ mod tests {
 
         let spec = SecuritySpec {
             mode: Mode::Standard,
+            decoding_regime: DecodingRegime::Johnson,
             target_security_bits: LIMITING_TARGET_BITS,
-            max_pow_bits: None,
+            pow_budget: PowBudget::Forbidden,
             hash_id: crate::hash::BLAKE3,
         };
         let (source, target, t_ood) = build_round_io::<M>(
@@ -296,8 +297,9 @@ mod tests {
                 &placeholder_source_ctx,
                 OodSampleBudget::ZERO,
             );
+            let zk_spec = ZkSpec::try_new(&spec).expect("arb_zk_spec");
             let c_zk_placeholder = irs_solver::solve_mask_code::<M>(
-                &spec,
+                zk_spec,
                 compute_l_zk(&placeholder_source, 1),
                 placeholder_source.mask_length(),
                 LogInvRate::new(log_inv_rate),
@@ -309,7 +311,7 @@ mod tests {
             let r = source.mask_length();
             let l_zk = compute_l_zk(&source, t_ood);
             let c_zk = irs_solver::solve_mask_code::<M>(
-                &spec,
+                zk_spec,
                 l_zk,
                 r,
                 LogInvRate::new(log_inv_rate),

@@ -1,8 +1,49 @@
-use core::marker::PhantomData;
+use core::{marker::PhantomData, num::NonZeroU32};
 
 use ordered_float::OrderedFloat;
 
 use crate::{bits::Bits, engines::EngineId};
+
+/// Per-slot proof-of-work policy.
+///
+/// The same `bits` value plays two roles, deliberately coupled:
+/// - **Planning credit**: [`SecuritySpec::protocol_security_target_bits`]
+///   subtracts `bits` from `target_security_bits` so solvers know the
+///   analytic floor they must reach.
+/// - **Validation cap**: [`super::protocol_config::ProtocolConfig::validate_pow_budget`]
+///   rejects any per-slot PoW that exceeds `bits`.
+///
+/// `Forbidden` is *not* `PerSlot { bits: 0 }`: the latter is unrepresentable
+/// (the variant takes a [`NonZeroU32`]). Use [`PowBudget::per_slot`] when
+/// converting from an arbitrary `u32` — it collapses `0` to `Forbidden`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PowBudget {
+    /// Per-slot grinding forbidden. Solvers still plan against the full
+    /// `target_security_bits`; any nonzero per-slot PoW the planner emits
+    /// is rejected by validation.
+    Forbidden,
+    /// Per-slot grinding allowed up to `bits`. Planning relaxes the
+    /// analytic target by `bits`; validation caps every slot at `bits`.
+    PerSlot { bits: NonZeroU32 },
+}
+
+impl PowBudget {
+    /// `Forbidden` when `bits == 0`, else `PerSlot { bits }`.
+    pub const fn per_slot(bits: u32) -> Self {
+        match NonZeroU32::new(bits) {
+            Some(bits) => Self::PerSlot { bits },
+            None => Self::Forbidden,
+        }
+    }
+
+    /// Bits of grinding allowed per slot. `0` for [`PowBudget::Forbidden`].
+    pub const fn bits(self) -> u32 {
+        match self {
+            Self::Forbidden => 0,
+            Self::PerSlot { bits } => bits.get(),
+        }
+    }
+}
 
 /// Phantom-typed newtype — `Tagged<T, A>` and `Tagged<T, B>` are distinct types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,17 +62,21 @@ impl<T: Copy, Tag> Tagged<T, Tag> {
 #[derive(Debug, Clone)]
 pub struct SecuritySpec {
     pub mode: Mode,
+    /// Reed–Solomon decoding regime — selects the proximity radius `δ` and
+    /// slack policy. See [`DecodingRegime`].
+    pub decoding_regime: DecodingRegime,
     pub target_security_bits: u32,
-    /// Per-slot PoW budget — every grinding slot may close at most this many
-    /// bits of gap to `target_security_bits`. Not a cumulative budget across
-    /// slots; `check_pow_bits` enforces it per-slot. `None` ⇒ `Some(0)`.
-    pub max_pow_bits: Option<u32>,
+    /// Per-slot PoW policy — both the planning credit subtracted from
+    /// `target_security_bits` and the per-slot cap enforced by
+    /// [`super::protocol_config::ProtocolConfig::validate_pow_budget`].
+    /// See [`PowBudget`] for the dual role.
+    pub pow_budget: PowBudget,
     pub hash_id: EngineId,
 }
 
 impl SecuritySpec {
     pub fn protocol_security_target_bits(&self) -> Bits {
-        let pow = self.max_pow_bits.unwrap_or(0);
+        let pow = self.pow_budget.bits();
         Bits::new(f64::from(self.target_security_bits.saturating_sub(pow)))
     }
 }
@@ -90,13 +135,57 @@ pub struct RoundContext {
     pub folding_factor: u32,
 }
 
-/// Both variants run in the Johnson regime — Construction 9.7's OOD-query
-/// requirement makes unique-decoding incompatible with code-switch, so it is
-/// not representable here.
+/// Standard vs. zero-knowledge selection. Orthogonal to [`DecodingRegime`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Standard,
     ZeroKnowledge,
+}
+
+/// A `SecuritySpec` borrow proven to be in [`Mode::ZeroKnowledge`].
+///
+/// Constructed only via [`ZkSpec::try_new`], which performs the mode check
+/// once at the boundary. ZK-only solvers accept `ZkSpec` to make
+/// "ZK mode required" a compile-time precondition instead of a runtime assert.
+#[derive(Debug, Clone, Copy)]
+pub struct ZkSpec<'a>(&'a SecuritySpec);
+
+impl<'a> ZkSpec<'a> {
+    /// Returns `Some` iff `spec.mode == Mode::ZeroKnowledge`.
+    pub fn try_new(spec: &'a SecuritySpec) -> Option<Self> {
+        matches!(spec.mode, Mode::ZeroKnowledge).then_some(Self(spec))
+    }
+
+    pub const fn get(self) -> &'a SecuritySpec {
+        self.0
+    }
+}
+
+/// Reed–Solomon decoding regime selection.
+///
+/// Picks the proximity radius `δ` and slack policy used by the IRS and
+/// downstream sub-protocols. `Johnson` uses the codebase's slack policy
+/// `η = √ρ / 20`; the list-decoding ball can hold `~10/ρ` codewords.
+/// `Unique` operates strictly inside the unique-decoding radius `(1 − ρ)/2`;
+/// the ball holds at most one.
+///
+/// WHIR's rate stepping (each round bumps `log_inv_rate` by
+/// `folding_factor − 1`) pushes ρ → 1, shrinking the unique-decoding
+/// radius. At high security targets or deep folding, `Unique` may exceed
+/// the grind cap on per-round PoW and [`super::derive::ProtocolConfig::derive`]
+/// will return `PowUngrindable`. Pick `Johnson` for those cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodingRegime {
+    Unique,
+    Johnson,
+}
+
+impl DecodingRegime {
+    /// Bridge to [`super::super::irs_commit::Config::new`]'s `unique_decoding`
+    /// parameter.
+    pub const fn unique_decoding(self) -> bool {
+        matches!(self, Self::Unique)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -147,40 +236,47 @@ mod tests {
     /// the tests below are round numbers (80, 40, 0) for readability.
     const TARGET_BITS: u32 = 100;
 
-    fn spec(max_pow_bits: Option<u32>) -> SecuritySpec {
+    fn spec(pow_budget: PowBudget) -> SecuritySpec {
         SecuritySpec {
             mode: Mode::ZeroKnowledge,
+            decoding_regime: DecodingRegime::Johnson,
             target_security_bits: TARGET_BITS,
-            max_pow_bits,
+            pow_budget,
             hash_id: hash::BLAKE3,
         }
     }
 
     #[test]
-    fn none_means_no_pow_credit() {
+    fn forbidden_means_no_pow_credit() {
         assert_eq!(
-            spec(None).protocol_security_target_bits(),
+            spec(PowBudget::Forbidden).protocol_security_target_bits(),
             Bits::new(f64::from(TARGET_BITS)),
         );
     }
 
     #[test]
-    fn some_zero_matches_none() {
-        assert_eq!(
-            spec(Some(0)).protocol_security_target_bits(),
-            spec(None).protocol_security_target_bits(),
-        );
+    fn per_slot_zero_collapses_to_forbidden() {
+        // `per_slot(0)` is the only documented way to ask for "no grinding"
+        // from a `u32`; it must produce the `Forbidden` variant, not a
+        // `PerSlot { bits: 0 }` (which is unrepresentable).
+        assert_eq!(PowBudget::per_slot(0), PowBudget::Forbidden);
+    }
+
+    #[test]
+    fn per_slot_bits_round_trip() {
+        assert_eq!(PowBudget::per_slot(20).bits(), 20);
+        assert_eq!(PowBudget::Forbidden.bits(), 0);
     }
 
     #[test]
     fn pow_credit_shifts_analytic_floor() {
         // Two below-target PoW budgets: `target − pow` shifts down 1:1.
         assert_eq!(
-            spec(Some(20)).protocol_security_target_bits(),
+            spec(PowBudget::per_slot(20)).protocol_security_target_bits(),
             Bits::new(80.0),
         );
         assert_eq!(
-            spec(Some(60)).protocol_security_target_bits(),
+            spec(PowBudget::per_slot(60)).protocol_security_target_bits(),
             Bits::new(40.0),
         );
     }
@@ -190,7 +286,7 @@ mod tests {
         // `pow > target` saturates rather than going negative.
         let pow_over_target = TARGET_BITS + 100;
         assert_eq!(
-            spec(Some(pow_over_target)).protocol_security_target_bits(),
+            spec(PowBudget::per_slot(pow_over_target)).protocol_security_target_bits(),
             Bits::new(0.0),
         );
     }

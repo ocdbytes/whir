@@ -40,7 +40,7 @@ pub struct ProtocolConfig<M: Embedding> {
 
 impl<M: Embedding> ProtocolConfig<M> {
     /// Returns `true` if every PoW slot's difficulty fits within
-    /// `security.max_pow_bits`. Boolean predicate kept for callers that want
+    /// `security.pow_budget`. Boolean predicate kept for callers that want
     /// to re-check after manual inspection; [`Self::validate_pow_budget`] is
     /// the typed version used internally by [`super::derive::ProtocolConfig::derive`].
     pub fn check_pow_bits(&self) -> bool {
@@ -51,7 +51,7 @@ impl<M: Embedding> ProtocolConfig<M> {
     /// and required-vs-max difficulties on failure. Auto-invoked by
     /// `derive()`; callers don't normally need to call this directly.
     pub fn validate_pow_budget(&self) -> Result<(), DeriveError> {
-        let max = Bits::new(f64::from(self.security.max_pow_bits.unwrap_or(0)));
+        let max = Bits::new(f64::from(self.security.pow_budget.bits()));
         let check = |slot: PowSlot, pow: &PowConfig| -> Result<(), DeriveError> {
             let required = pow.difficulty();
             if required > max {

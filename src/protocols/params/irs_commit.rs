@@ -12,6 +12,7 @@ use crate::{
             bounds::rate,
             spec::{
                 LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec,
+                ZkSpec,
             },
         },
     },
@@ -25,8 +26,7 @@ pub fn solve<M: Embedding + Default>(
     let security_target = f64::from(spec.protocol_security_target_bits());
     let rate = rate(f64::from(ctx.log_inv_rate));
     let interleaving_depth = 1_usize << ctx.folding_factor;
-    // Construction 9.7 is Johnson-only — `Mode` cannot express unique-decoding.
-    let unique_decoding = false;
+    let unique_decoding = spec.decoding_regime.unique_decoding();
 
     let mode = match spec.mode {
         Mode::Standard => IrsMode::Standard,
@@ -58,17 +58,13 @@ pub fn solve<M: Embedding + Default>(
 /// - `source_mask_length`: `r` from Theorem 9.6.
 /// - `num_vectors`: `2 * num_masks` (Construction 7.2: originals + fresh).
 pub fn solve_mask_code<M: Embedding + Default>(
-    spec: &SecuritySpec,
+    spec: ZkSpec<'_>,
     l_zk: MaskCodeMessageLen,
     source_mask_length: usize,
     log_inv_rate: LogInvRate,
     num_vectors: usize,
 ) -> IrsConfig<M> {
     let l_zk = l_zk.get();
-    assert!(
-        matches!(spec.mode, Mode::ZeroKnowledge),
-        "C_zk only exists in ZK mode"
-    );
     assert!(
         l_zk >= source_mask_length,
         "Theorem 9.6: ℓ_zk ({l_zk}) ≥ source mask length ({source_mask_length})",
@@ -79,12 +75,13 @@ pub fn solve_mask_code<M: Embedding + Default>(
         "num_vectors ({num_vectors}) must be even (mask-proximity original/fresh pairs)",
     );
 
+    let spec = spec.get();
     let security_target = f64::from(spec.protocol_security_target_bits());
     let rate = rate(f64::from(log_inv_rate.get()));
 
     IrsConfig::new(
         security_target,
-        false, // ZK ⇒ Johnson regime
+        spec.decoding_regime.unique_decoding(),
         spec.hash_id,
         num_vectors,
         l_zk,
@@ -107,31 +104,33 @@ mod tests {
     type M = TestEmbedding;
 
     #[test]
-    #[should_panic(expected = "C_zk only exists in ZK mode")]
-    fn solve_mask_code_rejects_standard_spec() {
+    fn zk_spec_rejects_standard_mode() {
         let spec: SecuritySpec = deterministic_spec(Mode::Standard);
-        let _ = solve_mask_code::<M>(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 2);
+        assert!(ZkSpec::try_new(&spec).is_none());
     }
 
     #[test]
     #[should_panic(expected = "must be a power of 2")]
     fn solve_mask_code_rejects_non_pow2_l_zk() {
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
-        let _ = solve_mask_code::<M>(&spec, MaskCodeMessageLen::new(3), 0, LogInvRate::new(1), 2);
+        let zk_spec = ZkSpec::try_new(&spec).unwrap();
+        let _ = solve_mask_code::<M>(zk_spec, MaskCodeMessageLen::new(3), 0, LogInvRate::new(1), 2);
     }
 
     #[test]
     #[should_panic(expected = "Theorem 9.6")]
     fn solve_mask_code_rejects_l_zk_below_source_mask_length() {
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
-        let _ = solve_mask_code::<M>(&spec, MaskCodeMessageLen::new(2), 4, LogInvRate::new(1), 2);
+        let zk_spec = ZkSpec::try_new(&spec).unwrap();
+        let _ = solve_mask_code::<M>(zk_spec, MaskCodeMessageLen::new(2), 4, LogInvRate::new(1), 2);
     }
 
     #[test]
     #[should_panic(expected = "must be even")]
     fn solve_mask_code_rejects_odd_num_vectors() {
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
-        let _ = solve_mask_code::<M>(&spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 3);
+        let zk_spec = ZkSpec::try_new(&spec).unwrap();
+        let _ = solve_mask_code::<M>(zk_spec, MaskCodeMessageLen::new(2), 0, LogInvRate::new(1), 3);
     }
 
     /// `irs_commit::solve` doesn't grind PoW, so this range can sit higher than

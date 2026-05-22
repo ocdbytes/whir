@@ -71,8 +71,8 @@ pub enum DeriveError {
     },
 
     /// A PoW slot fits the grind cap but exceeds the per-slot budget set by
-    /// [`super::spec::SecuritySpec::max_pow_bits`].
-    #[error("{slot} requires {required} bits, exceeds spec.max_pow_bits = {max}")]
+    /// [`super::spec::SecuritySpec::pow_budget`].
+    #[error("{slot} requires {required} bits, exceeds spec.pow_budget = {max}")]
     PowBudgetExceeded {
         slot: PowSlot,
         required: Bits,

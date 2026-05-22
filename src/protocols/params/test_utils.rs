@@ -18,9 +18,9 @@ use crate::{
             derive::compute_t_ood,
             irs_commit as irs_solver,
             protocol_config::MaskOracleInfo,
-            spec::{
-                ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext,
-                SecuritySpec,
+            spec::{DecodingRegime,
+                ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, PowBudget,
+                RoundContext, SecuritySpec, ZkSpec,
             },
         },
         proof_of_work::Config as PowConfig,
@@ -51,24 +51,30 @@ pub const EPS: f64 = 1e-9;
 pub fn deterministic_spec(mode: Mode) -> SecuritySpec {
     SecuritySpec {
         mode,
+            decoding_regime: DecodingRegime::Johnson,
         target_security_bits: FIXTURE_TARGET_BITS,
-        max_pow_bits: None,
+        pow_budget: PowBudget::Forbidden,
         hash_id: hash::BLAKE3,
     }
 }
 
-/// `max_pow_bits` ∈ `{None, Some(0..=16)}`; bounded so the analytic floor
-/// stays positive for the lowest test targets and the PoW gap stays under the
-/// 60-bit cap.
+/// `pow_budget` ∈ `{Forbidden, PerSlot{1..=16}}`; bounded so the analytic
+/// floor stays positive for the lowest test targets and the PoW gap stays
+/// under the 60-bit cap. `PerSlot { bits: 0 }` is unrepresentable, so we
+/// generate `Forbidden` for the "no grinding" case directly.
 pub fn arb_spec(
     mode: Mode,
     target_range: RangeInclusive<u32>,
 ) -> impl Strategy<Value = SecuritySpec> {
-    let pow_strategy = prop_oneof![Just(None), (0u32..=16).prop_map(Some)];
-    (target_range, pow_strategy).prop_map(move |(target, max_pow)| SecuritySpec {
+    let pow_strategy = prop_oneof![
+        Just(PowBudget::Forbidden),
+        (1u32..=16).prop_map(PowBudget::per_slot),
+    ];
+    (target_range, pow_strategy).prop_map(move |(target, pow_budget)| SecuritySpec {
         mode,
+            decoding_regime: DecodingRegime::Johnson,
         target_security_bits: target,
-        max_pow_bits: max_pow,
+        pow_budget,
         hash_id: hash::BLAKE3,
     })
 }
@@ -97,12 +103,10 @@ pub fn arb_round_ctx() -> impl Strategy<Value = RoundContext> {
 
 /// `None` in Standard; `Some(ℓ_zk=2, c_zk rate 1/2)` in ZK.
 pub fn build_minimal_mask_oracle(spec: &SecuritySpec) -> Option<MaskOracleInfo> {
-    if !matches!(spec.mode, Mode::ZeroKnowledge) {
-        return None;
-    }
+    let zk_spec = ZkSpec::try_new(spec)?;
     let l_zk = MaskCodeMessageLen::new(2);
     let c_zk: IrsConfig<TestEmbedding> =
-        irs_solver::solve_mask_code(spec, l_zk, 0, LogInvRate::new(1), 2);
+        irs_solver::solve_mask_code(zk_spec, l_zk, 0, LogInvRate::new(1), 2);
     Some(MaskOracleInfo {
         c_zk_list_size: ListSize::new(c_zk.list_size()),
         l_zk,
@@ -139,8 +143,9 @@ pub fn build_test_c_zk(
     log_inv_rate: u32,
     num_masks: usize,
 ) -> IrsConfig<TestEmbedding> {
+    let zk_spec = ZkSpec::try_new(spec).expect("build_test_c_zk requires a ZK spec");
     irs_solver::solve_mask_code(
-        spec,
+        zk_spec,
         MaskCodeMessageLen::new(l_zk),
         0,
         LogInvRate::new(log_inv_rate),

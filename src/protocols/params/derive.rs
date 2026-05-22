@@ -22,7 +22,7 @@ use crate::{
             },
             spec::{
                 LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec,
-                TuningSpec,
+                TuningSpec, ZkSpec,
             },
             sumcheck as sumcheck_solver,
         },
@@ -35,7 +35,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     ///
     /// Fails with [`DeriveError`] when the spec/tuning combination is
     /// infeasible: a PoW slot exceeds the grind cap, a fixed point diverges,
-    /// or any slot exceeds `spec.max_pow_bits` (post-derivation validation).
+    /// or any slot exceeds `spec.pow_budget` (post-derivation validation).
     pub fn derive(spec: SecuritySpec, tuning: TuningSpec) -> Result<Self, DeriveError> {
         let RoundLayout {
             shapes,
@@ -49,10 +49,12 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
                 .map(|shape| build_round_config::<M>(&spec, shape, None))
                 .collect::<Result<_, _>>()?,
             Mode::ZeroKnowledge => {
+                let zk_spec =
+                    ZkSpec::try_new(&spec).expect("matched Mode::ZeroKnowledge above");
                 let c_zk_log_inv_rate = LogInvRate::new(tuning.starting_log_inv_rate);
                 shapes
                     .iter()
-                    .map(|shape| build_zk_round_config::<M>(&spec, shape, c_zk_log_inv_rate))
+                    .map(|shape| build_zk_round_config::<M>(zk_spec, shape, c_zk_log_inv_rate))
                     .collect::<Result<_, _>>()?
             }
         };
@@ -154,10 +156,11 @@ fn target_context<M: Embedding>(shape: &RoundShape, source: &IrsConfig<M>) -> Ro
 /// Theorem 9.6's witness layout + Lemma 9.3's `r ≥ t` privacy precondition;
 /// `t_ood` solves Lemma 9.9 term 1.
 fn build_zk_round_config<M: Embedding + Default>(
-    spec: &SecuritySpec,
+    zk_spec: ZkSpec<'_>,
     shape: &RoundShape,
     c_zk_log_inv_rate: LogInvRate,
 ) -> Result<RoundConfig<M>, DeriveError> {
+    let spec = zk_spec.get();
     let ctx = round_context(shape);
     let num_masks = sumcheck_solver::masks_required(&ctx) + code_switch_solver::masks_required();
     // C_zk.list_size depends only on rate — no IRS build needed for it.
@@ -171,7 +174,7 @@ fn build_zk_round_config<M: Embedding + Default>(
 
     let l_zk = compute_l_zk(&source, t_ood);
     let c_zk: IrsConfig<Identity<M::Target>> = irs_solver::solve_mask_code(
-        spec,
+        zk_spec,
         l_zk,
         source.mask_length(),
         c_zk_log_inv_rate,
@@ -358,7 +361,7 @@ mod tests {
         hash,
         protocols::params::{
             bounds::SoundnessBounded,
-            spec::FoldingFactor,
+            spec::{DecodingRegime, FoldingFactor, PowBudget},
             test_utils::{assert_close, assert_pow_closes_gap, TestEmbedding},
         },
     };
@@ -418,10 +421,11 @@ mod tests {
     fn test_spec(mode: Mode) -> SecuritySpec {
         SecuritySpec {
             mode,
+            decoding_regime: DecodingRegime::Johnson,
             target_security_bits: PLAN_FIXTURE_TARGET_BITS,
             // Allow up to the grind cap; derive() auto-validates the budget
-            // and would reject configs that need any PoW under `None ⇒ 0`.
-            max_pow_bits: Some(LOOSE_POW_BUDGET_BITS),
+            // and would reject configs that need any PoW under `Forbidden`.
+            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
             hash_id: hash::BLAKE3,
         }
     }
@@ -621,7 +625,7 @@ mod tests {
     const LOOSE_POW_BUDGET_BITS: u32 = 60;
     /// Sits between a moderate budget (30) and the grind cap (60) — used by
     /// `check_pow_bits_detects_over_budget_slot` to inject a slot that fits
-    /// the cap but exceeds the test's `max_pow_bits`.
+    /// the cap but exceeds the test's `pow_budget`.
     const OVER_BUDGET_INJECTED_BITS: f64 = 50.0;
 
     /// Bounds doc §5.3 + §5.7: HVZK privacy error in bits matches the closed
@@ -664,13 +668,14 @@ mod tests {
         );
     }
 
-    /// Derived plans must satisfy their own `max_pow_bits` budget.
+    /// Derived plans must satisfy their own `pow_budget`.
     #[test]
     fn check_pow_bits_passes_on_derived_plan() {
         let spec = SecuritySpec {
             mode: Mode::ZeroKnowledge,
+            decoding_regime: DecodingRegime::Johnson,
             target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            max_pow_bits: Some(LOOSE_POW_BUDGET_BITS),
+            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
             hash_id: hash::BLAKE3,
         };
         let plan = ProtocolConfig::<TestEmbedding>::derive(
@@ -693,8 +698,9 @@ mod tests {
         const MODERATE_POW_BUDGET_BITS: u32 = 30;
         let spec = SecuritySpec {
             mode: Mode::ZeroKnowledge,
+            decoding_regime: DecodingRegime::Johnson,
             target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            max_pow_bits: Some(MODERATE_POW_BUDGET_BITS),
+            pow_budget: PowBudget::per_slot(MODERATE_POW_BUDGET_BITS),
             hash_id: hash::BLAKE3,
         };
         let mut plan = ProtocolConfig::<TestEmbedding>::derive(
@@ -714,8 +720,9 @@ mod tests {
         const UNREACHABLE_TARGET_BITS: u32 = 200;
         let spec = SecuritySpec {
             mode: Mode::Standard,
+            decoding_regime: DecodingRegime::Johnson,
             target_security_bits: UNREACHABLE_TARGET_BITS,
-            max_pow_bits: Some(LOOSE_POW_BUDGET_BITS),
+            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
             hash_id: hash::BLAKE3,
         };
         let err = ProtocolConfig::<TestEmbedding>::derive(
@@ -730,26 +737,69 @@ mod tests {
     }
 
     /// `derive()` reports `PowBudgetExceeded` when a slot's required PoW
-    /// fits the grind cap but exceeds `spec.max_pow_bits`. `target = 40`
-    /// with `max_pow_bits = Some(5)` forces this on `Field64`.
+    /// fits the grind cap but exceeds `spec.pow_budget`. `target = 40`
+    /// with `pow_budget = PerSlot { bits: 5 }` forces this on `Field64`.
     #[test]
     fn derive_reports_pow_budget_exceeded() {
         const TIGHT_MAX_POW: u32 = 5;
         let spec = SecuritySpec {
             mode: Mode::ZeroKnowledge,
+            decoding_regime: DecodingRegime::Johnson,
             target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            max_pow_bits: Some(TIGHT_MAX_POW),
+            pow_budget: PowBudget::per_slot(TIGHT_MAX_POW),
             hash_id: hash::BLAKE3,
         };
         let err = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
         )
-        .expect_err("tight max_pow_bits must trip auto-validation");
+        .expect_err("tight pow_budget must trip auto-validation");
         assert!(
             matches!(err, DeriveError::PowBudgetExceeded { .. }),
             "got {err:?}",
         );
+    }
+
+    /// Unique decoding threads through to the basecase IRS in Standard mode.
+    /// Uses a basecase-only tuning so the regime is unambiguous (no rate
+    /// stepping across rounds).
+    #[test]
+    fn derive_threads_unique_decoding_standard() {
+        let spec = SecuritySpec {
+            mode: Mode::Standard,
+            decoding_regime: DecodingRegime::Unique,
+            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
+            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
+            hash_id: hash::BLAKE3,
+        };
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_NO_ROUNDS),
+        )
+        .unwrap();
+        assert!(plan.rounds.is_empty());
+        assert!(plan.basecase.commit.unique_decoding());
+    }
+
+    /// Same threading check under ZK mode. Basecase-only avoids the per-round
+    /// code-switch (which still requires `t_ood ≥ 1` until Stage 2 of the
+    /// regime work lands).
+    #[test]
+    fn derive_threads_unique_decoding_zk() {
+        let spec = SecuritySpec {
+            mode: Mode::ZeroKnowledge,
+            decoding_regime: DecodingRegime::Unique,
+            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
+            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
+            hash_id: hash::BLAKE3,
+        };
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_NO_ROUNDS),
+        )
+        .unwrap();
+        assert!(plan.rounds.is_empty());
+        assert!(plan.basecase.commit.unique_decoding());
     }
 
     /// `analytic_error + pow ≥ target` for every PoW slot in the plan.

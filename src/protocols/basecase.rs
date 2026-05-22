@@ -44,8 +44,10 @@ pub struct Config<F: Field> {
 }
 
 impl<F: Field> Config<F> {
-    /// `mode == ZeroKnowledge` iff `pow != PowConfig::none()`: ZK basecase has
-    /// a γ-combination PoW slot (Lemma 7.4); Standard has no γ challenge.
+    /// Standard basecase has no γ challenge — PoW must be `none()`. ZK
+    /// basecase has a γ-combination slot (Lemma 7.4) and may or may not need
+    /// PoW depending on whether the analytic floor already clears the target
+    /// (under unique decoding it often does).
     pub fn new(
         commit: irs_commit::Config<Identity<F>>,
         sumcheck: sumcheck::Config<F>,
@@ -53,10 +55,9 @@ impl<F: Field> Config<F> {
         pow: proof_of_work::Config,
     ) -> Self {
         let has_pow = pow != proof_of_work::Config::none();
-        debug_assert_eq!(
-            matches!(mode, BasecaseMode::ZeroKnowledge),
-            has_pow,
-            "ZK basecase needs PoW; Standard basecase must have none",
+        debug_assert!(
+            !matches!(mode, BasecaseMode::Standard) || !has_pow,
+            "Standard basecase has no γ challenge — pow must be none()",
         );
         Self {
             commit,
