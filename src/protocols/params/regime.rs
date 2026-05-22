@@ -92,12 +92,17 @@ impl DecodingRegimeParams {
 /// Johnson list size at the canonical `η = √ρ / 20` slack, as a function of
 /// `log_inv_rate` only. Used by planners that need a list-size estimate before
 /// a target config exists.
+///
+/// Equals `IrsConfig::list_size()` exactly when the IRS has pow2 `vector_size`,
+/// `interleaving_depth = 1`, integer `log_inv_rate`, and lives on a 2-adic NTT
+/// field — the conditions `solve_mask_code` enforces for C_zk. Outside that
+/// regime, `ntt::next_order` may shift the effective rate and the helper
+/// underestimates.
 pub fn johnson_list_size(log_inv_rate: f64) -> f64 {
     DecodingRegimeParams::johnson_canonical(rate(log_inv_rate)).list_size(log_inv_rate)
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use crate::protocols::params::test_utils::assert_close;
@@ -124,7 +129,7 @@ mod tests {
     /// Unique-decoding regime gives `|Λ| = 1`, i.e. log = 0.
     #[test]
     fn list_size_log2_unique_decoding_is_zero() {
-        assert_eq!(DecodingRegimeParams::Unique.list_size_log2(2.0), 0.0);
+        assert_close(DecodingRegimeParams::Unique.list_size_log2(2.0), 0.0);
     }
 
     /// `η = √ρ / 20` substituted into `|Λ| = 1/(2η√ρ)` simplifies to `10/ρ`.

@@ -10,7 +10,13 @@ use std::fmt::{self, Display, Formatter};
 
 use thiserror::Error;
 
-use crate::{bits::Bits, protocols::proof_of_work::PowError};
+use crate::{
+    bits::Bits,
+    protocols::{
+        params::spec::SecuritySpec,
+        proof_of_work::{Config as PowConfig, PowError},
+    },
+};
 
 /// Identifies a single PoW grind in the derived protocol — basecase
 /// sub-protocol or a per-round sub-protocol at a specific round index. Used
@@ -80,17 +86,14 @@ impl Display for ChainTarget {
 /// Which fixed-point loop failed to converge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixedPointLoop {
-    /// `compute_t_ood`'s scalar iteration.
+    /// `derive::solve_t_ood` — combined `t_ood ↔ source` Kleene iteration.
     TOod,
-    /// `build_zk_round_data`'s outer `t_ood ↔ source.mask_length()` iteration.
-    ZkRound,
 }
 
 impl Display for FixedPointLoop {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::TOod => f.write_str("t_ood"),
-            Self::ZkRound => f.write_str("ZK per-round"),
         }
     }
 }
@@ -150,4 +153,27 @@ impl<T> PowResultExt<T> for Result<T, PowError> {
     fn at(self, pow: Pow) -> Result<T, DeriveError> {
         self.map_err(|source| DeriveError::PowUngrindable { pow, source })
     }
+}
+
+/// Grind `analytic → spec.target_security_bits`, then check the result against
+/// `spec.pow_budget` — both failures attributed to `pow_kind` at the same site.
+/// `ProtocolConfig::validate_pow_budget` remains as a defense-in-depth check
+/// for hand-mutated plans.
+pub(crate) fn grind_to_at(
+    spec: &SecuritySpec,
+    analytic: Bits,
+    pow_kind: Pow,
+) -> Result<PowConfig, DeriveError> {
+    let target = Bits::new(f64::from(spec.target_security_bits));
+    let pow = PowConfig::grind_to(target, analytic, spec.hash_id).at(pow_kind)?;
+    let required = pow.difficulty();
+    let max = Bits::new(f64::from(spec.pow_budget.bits()));
+    if required > max {
+        return Err(DeriveError::PowBudgetExceeded {
+            pow: pow_kind,
+            required,
+            max,
+        });
+    }
+    Ok(pow)
 }

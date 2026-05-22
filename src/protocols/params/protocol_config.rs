@@ -275,10 +275,10 @@ impl<M: Embedding> RoundConfig<M> {
 
     /// Convenience: borrow the round's mask oracle if this is a ZK round.
     /// Equivalent to pattern-matching on `mode()`.
-    pub const fn mask_oracle(&self) -> Option<&MaskOracleConfig<M::Target>> {
+    pub fn mask_oracle(&self) -> Option<&MaskOracleConfig<M::Target>> {
         match &self.mode {
             RoundMode::Standard => None,
-            RoundMode::ZeroKnowledge { mask_oracle, .. } => Some(mask_oracle),
+            RoundMode::ZeroKnowledge { mask_oracle, .. } => Some(mask_oracle.as_ref()),
         }
     }
 
@@ -289,19 +289,13 @@ impl<M: Embedding> RoundConfig<M> {
     }
 }
 
-/// Standard vs. ZK round. ZK variant carries the full per-round mask oracle
-/// — there is no longer a separate `MaskOracleInfo` slim view stored
-/// alongside it (which would duplicate `mask_oracle.info()`).
+/// Standard vs. ZK round.
 ///
-/// Not `Copy`: `MaskOracleConfig` owns a `MaskProximityConfig` and an
-/// `IrsConfig`, neither of which is `Copy`.
-///
-/// `large_enum_variant` allowed: the ZK variant carries `MaskOracleConfig`
-/// (~330B) while `Standard` is 0B, but a proof holds O(rounds) RoundModes
-/// (single-digit count) so the absolute overhead is a few KB. Boxing the
-/// payload would add per-access indirection without measurable savings.
+/// The ZK payload is boxed so the enum stays small: `MaskOracleConfig` is
+/// ~330 B while the `Standard` variant is 0 B, and proofs hold O(rounds)
+/// `RoundMode`s. Accessors expose `&MaskOracleConfig` so call sites are
+/// unaffected by the indirection.
 #[derive(Clone, Debug)]
-#[allow(clippy::large_enum_variant)]
 pub enum RoundMode<M: Embedding> {
     Standard,
     ZeroKnowledge {
@@ -309,7 +303,7 @@ pub enum RoundMode<M: Embedding> {
         t_ood: OodSampleBudget,
         /// Per-round mask oracle: C_zk codeword (sized for `2·(k+1)`
         /// columns) + ℓ_zk + mask-proximity check for `k+1` masks.
-        mask_oracle: MaskOracleConfig<M::Target>,
+        mask_oracle: Box<MaskOracleConfig<M::Target>>,
     },
 }
 

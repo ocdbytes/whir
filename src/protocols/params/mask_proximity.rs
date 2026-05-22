@@ -11,10 +11,9 @@ use crate::{
         mask_proximity::Config as MaskProximityConfig,
         params::{
             bounds::usize_to_f64,
-            error::{DeriveError, Pow, PowResultExt},
+            error::{grind_to_at, DeriveError, Pow},
             spec::SecuritySpec,
         },
-        proof_of_work::Config as PowConfig,
     },
 };
 
@@ -26,10 +25,12 @@ pub fn solve<F: Field>(
     num_masks: usize,
     round_index: usize,
 ) -> Result<MaskProximityConfig<F>, DeriveError> {
-    let target_bits = Bits::new(f64::from(spec.target_security_bits));
     let analytic = analytic_error_bits(&c_zk, num_masks);
-    let pow = PowConfig::grind_to(target_bits, analytic, spec.hash_id)
-        .at(Pow::RoundMaskProximity { index: round_index })?;
+    let pow = grind_to_at(
+        spec,
+        analytic,
+        Pow::RoundMaskProximity { index: round_index },
+    )?;
     Ok(MaskProximityConfig::new(c_zk, num_masks, pow))
 }
 
@@ -53,7 +54,6 @@ impl<F: Field> MaskProximityConfig<F> {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
 mod tests {
     use proptest::prelude::*;
 
@@ -106,7 +106,7 @@ mod tests {
         let c_zk = build_test_c_zk(&spec, 2, 1, 1);
         let bits = f64::from(analytic_error_bits(&c_zk, 0));
         let field_bits = <Field64 as FieldWithSize>::field_size_bits();
-        assert_eq!(bits, field_bits.max(0.0));
+        assert_close(bits, field_bits.max(0.0));
     }
 
     proptest! {

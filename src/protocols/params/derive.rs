@@ -26,6 +26,9 @@ use crate::{
     },
 };
 
+/// Paranoia guard on `solve_t_ood` — convergence proof on the function itself.
+const T_OOD_MAX_ITER: usize = 32;
+
 impl<M: Embedding + Default> ProtocolConfig<M> {
     /// In ZK each round owns its mask oracle; the `ℓ_zk ↔ c_zk ↔ t_ood`
     /// fixed-point runs independently per round.
@@ -81,12 +84,6 @@ struct RoundLayout {
     basecase_log_inv_rate: u32,
 }
 
-struct RoundData<M: Embedding> {
-    source: IrsConfig<M>,
-    target: IrsConfig<Identity<M::Target>>,
-    t_ood: usize,
-}
-
 /// Stops when there's no room for both a valid source and a valid target IRS.
 fn round_layout(tuning: &TuningSpec) -> RoundLayout {
     assert!(tuning.vector_size.is_power_of_two());
@@ -103,7 +100,6 @@ fn round_layout(tuning: &TuningSpec) -> RoundLayout {
         if num_vars < source_folding + target_folding {
             break;
         }
-        #[allow(clippy::cast_possible_truncation)]
         shapes.push(RoundShape {
             round_index: round,
             source_vector_size: 1usize << num_vars,
@@ -112,10 +108,7 @@ fn round_layout(tuning: &TuningSpec) -> RoundLayout {
             target_folding_factor: target_folding as u32,
         });
         num_vars -= source_folding;
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            log_inv_rate += (source_folding as u32).saturating_sub(1);
-        }
+        log_inv_rate += (source_folding as u32).saturating_sub(1);
     }
 
     RoundLayout {
@@ -157,11 +150,23 @@ fn build_zk_round_config<M: Embedding + Default>(
     // C_zk.list_size depends only on rate — no IRS build needed for it.
     let c_zk_list_size = johnson_list_size(f64::from(c_zk_log_inv_rate.get()));
 
-    let RoundData {
-        source,
-        target,
-        t_ood,
-    } = build_zk_round_data::<M>(spec, shape, c_zk_list_size)?;
+    let src_ctx = round_context(shape);
+    let target_log_inv_rate =
+        f64::from(shape.source_log_inv_rate + shape.source_folding_factor.saturating_sub(1));
+    let target_list_size = johnson_list_size(target_log_inv_rate);
+
+    let (source, t_ood) = solve_t_ood::<M>(
+        spec,
+        &src_ctx,
+        target_list_size,
+        Some(c_zk_list_size),
+        shape.round_index,
+    )?;
+    let target: IrsConfig<Identity<M::Target>> = irs_solver::solve(
+        spec,
+        &target_context(shape, &source),
+        OodSampleBudget::new(t_ood),
+    );
 
     let l_zk = compute_l_zk(&source, t_ood);
     let c_zk: IrsConfig<Identity<M::Target>> = irs_solver::solve_mask_code(
@@ -171,78 +176,38 @@ fn build_zk_round_config<M: Embedding + Default>(
         c_zk_log_inv_rate,
         2 * num_masks,
     );
+    debug_assert!(
+        (c_zk.list_size() - c_zk_list_size).abs() < 1e-9 * c_zk_list_size.max(1.0),
+        "c_zk.list_size() {} drifted from rate-only planner estimate {} — \
+         see `johnson_list_size` for the invariant",
+        c_zk.list_size(),
+        c_zk_list_size,
+    );
     let mask_proximity =
         mask_proximity_solver::solve(spec, c_zk.clone(), num_masks, shape.round_index)?;
     let mask_oracle = MaskOracleConfig::new(c_zk, l_zk, mask_proximity);
     let info = mask_oracle.info();
 
-    let sumcheck = sumcheck_solver::solve(
+    let sumcheck = sumcheck_solver::solve_zk(
         spec,
         &ctx,
         &source,
-        Some(info),
+        info,
         Pow::RoundSumcheck {
             index: shape.round_index,
         },
     )?;
     let code_switch =
-        code_switch_solver::solve(spec, source, target, t_ood, Some(info), shape.round_index)?;
+        code_switch_solver::solve_zk(spec, source, target, t_ood, info, shape.round_index)?;
     Ok(RoundConfig::new(
         shape.round_index,
         sumcheck,
         code_switch,
         RoundMode::ZeroKnowledge {
             t_ood: OodSampleBudget::new(t_ood),
-            mask_oracle,
+            mask_oracle: Box::new(mask_oracle),
         },
     ))
-}
-
-/// Local `t_ood ↔ r` fixed-point. `r = source.mask_length()` is a step function
-/// of `t_ood` (`next_pow2(ℓ + q + t_ood) − ℓ`); the loop re-iterates only when
-/// `t_ood` pushes `r` into the next pow-of-2 bucket.
-fn build_zk_round_data<M: Embedding + Default>(
-    spec: &SecuritySpec,
-    shape: &RoundShape,
-    c_zk_list_size: f64,
-) -> Result<RoundData<M>, DeriveError> {
-    const LOCAL_MAX_ITER: usize = 16;
-
-    let src_ctx = round_context(shape);
-    let target_log_inv_rate =
-        f64::from(shape.source_log_inv_rate + shape.source_folding_factor.saturating_sub(1));
-    let target_list_size = johnson_list_size(target_log_inv_rate);
-
-    let mut t_ood = 0;
-    let mut source: IrsConfig<M> = irs_solver::solve(spec, &src_ctx, OodSampleBudget::ZERO);
-    for _ in 0..LOCAL_MAX_ITER {
-        let new_t_ood = compute_t_ood(
-            spec,
-            &source,
-            target_list_size,
-            Some(c_zk_list_size),
-            shape.round_index,
-        )?;
-        if new_t_ood == t_ood {
-            let target: IrsConfig<Identity<M::Target>> = irs_solver::solve(
-                spec,
-                &target_context(shape, &source),
-                OodSampleBudget::new(t_ood),
-            );
-            return Ok(RoundData {
-                source,
-                target,
-                t_ood,
-            });
-        }
-        t_ood = new_t_ood;
-        source = irs_solver::solve(spec, &src_ctx, OodSampleBudget::new(t_ood));
-    }
-
-    Err(DeriveError::FixedPointDidNotConverge {
-        round_index: shape.round_index,
-        loop_kind: FixedPointLoop::ZkRound,
-    })
 }
 
 fn build_round_config<M: Embedding + Default>(
@@ -250,22 +215,25 @@ fn build_round_config<M: Embedding + Default>(
     shape: &RoundShape,
 ) -> Result<RoundConfig<M>, DeriveError> {
     let src_ctx = round_context(shape);
-    let source: IrsConfig<M> = irs_solver::solve(spec, &src_ctx, OodSampleBudget::ZERO);
+    let target_log_inv_rate =
+        f64::from(shape.source_log_inv_rate + shape.source_folding_factor.saturating_sub(1));
+    let target_list_size = johnson_list_size(target_log_inv_rate);
+
+    let (source, t_ood) =
+        solve_t_ood::<M>(spec, &src_ctx, target_list_size, None, shape.round_index)?;
     let target: IrsConfig<Identity<M::Target>> =
         irs_solver::solve(spec, &target_context(shape, &source), OodSampleBudget::ZERO);
-    let t_ood = compute_t_ood(spec, &source, target.list_size(), None, shape.round_index)?;
 
-    let sumcheck = sumcheck_solver::solve(
+    let sumcheck = sumcheck_solver::solve_standard(
         spec,
         &src_ctx,
         &source,
-        None,
         Pow::RoundSumcheck {
             index: shape.round_index,
         },
     )?;
     let code_switch =
-        code_switch_solver::solve(spec, source, target, t_ood, None, shape.round_index)?;
+        code_switch_solver::solve_standard(spec, source, target, t_ood, shape.round_index)?;
     Ok(RoundConfig::new(
         shape.round_index,
         sumcheck,
@@ -283,52 +251,70 @@ pub(super) const fn compute_l_zk<M: Embedding>(
     MaskCodeMessageLen::new((source.mask_length() + t_ood).next_power_of_two())
 }
 
-/// Solves Lemma 9.9 term 1 for `t_ood`. In ZK, `degree = ℓ + r + t_ood`
-/// couples back to `t_ood`, so iterate.
+/// One application of the Lemma 9.9 OOD step. ZK: `degree = ℓ + ℓ_zk(t_ood)`
+/// with `ℓ_zk = next_pow2(source.mask_length() + t_ood)`. Standard:
+/// `degree = ℓ`.
+///
+/// `Johnson` is forced even under `DecodingRegime::Unique` — Construction 9.7
+/// requires `t_ood ≥ 1` regardless of the decoding regime in `spec`.
 pub(super) fn compute_t_ood<M: Embedding>(
     spec: &SecuritySpec,
     source: &IrsConfig<M>,
     target_list_size: f64,
     c_zk_list_size: Option<f64>,
-    round_index: usize,
-) -> Result<usize, DeriveError> {
-    const MAX_ITER: usize = 32;
-
+    t_ood: usize,
+) -> usize {
     let security_target = f64::from(spec.protocol_security_target_bits());
     let field_bits = M::Target::field_size_bits();
     let combined_list_size = target_list_size * c_zk_list_size.unwrap_or(1.0);
     let message_length = source.message_length();
 
-    // `Johnson` force-computes OOD samples even when `spec.decoding_regime`
-    // is `Unique`. `compute_t_ood` is called from the ZK fixed-point loop,
-    // which needs the count for sizing the mask; bypassing the early-return
-    // in `num_ood_samples` is intentional.
-    let solve_for_degree = |degree: usize| {
-        irs_commit::num_ood_samples(
-            DecodingRegime::Johnson,
-            security_target,
-            field_bits,
-            combined_list_size,
-            degree,
-        )
+    let degree = if c_zk_list_size.is_some() {
+        let l_zk = (source.mask_length() + t_ood).next_power_of_two();
+        message_length + l_zk
+    } else {
+        message_length
     };
 
-    let mut t_ood = solve_for_degree(message_length);
-    if matches!(spec.mode, Mode::Standard) {
-        return Ok(t_ood);
+    irs_commit::num_ood_samples(
+        DecodingRegime::Johnson,
+        security_target,
+        field_bits,
+        combined_list_size,
+        degree,
+    )
+}
+
+/// Solves the per-round `t_ood` fixed-point and the source IRS together.
+///
+/// Convergence: `Φ(t) = num_ood_samples(ℓ + next_pow2(in_domain + 2·t))` is
+/// monotone non-decreasing on ℕ (`in_domain` depends only on the requested
+/// rate; `next_pow2` and `num_ood_samples` are monotone) and bounded above,
+/// so Kleene iteration from `t = 0` converges to the least fixed point in
+/// finitely many steps. Standard mode (`c_zk_list_size = None`) has `Φ`
+/// constant in `t`, so one application suffices.
+pub(super) fn solve_t_ood<M: Embedding + Default>(
+    spec: &SecuritySpec,
+    src_ctx: &RoundContext,
+    target_list_size: f64,
+    c_zk_list_size: Option<f64>,
+    round_index: usize,
+) -> Result<(IrsConfig<M>, usize), DeriveError> {
+    let mut source: IrsConfig<M> = irs_solver::solve(spec, src_ctx, OodSampleBudget::ZERO);
+
+    if c_zk_list_size.is_none() {
+        let t_ood = compute_t_ood(spec, &source, target_list_size, None, 0);
+        return Ok((source, t_ood));
     }
 
-    let r = source.mask_length();
-    for _ in 0..MAX_ITER {
-        // Polynomial degree = `ℓ + ℓ_zk` where `ℓ_zk = next_pow2(r + t_ood)`
-        // (Theorem 9.6 / Lemma 9.3). Using `r + t_ood` would under-count when
-        // not pow2.
-        let l_zk = (r + t_ood).next_power_of_two();
-        let new_t_ood = solve_for_degree(message_length + l_zk);
+    let mut t_ood = 0;
+    for _ in 0..T_OOD_MAX_ITER {
+        let new_t_ood = compute_t_ood(spec, &source, target_list_size, c_zk_list_size, t_ood);
         if new_t_ood == t_ood {
-            return Ok(t_ood);
+            return Ok((source, t_ood));
         }
         t_ood = new_t_ood;
+        source = irs_solver::solve(spec, src_ctx, OodSampleBudget::new(t_ood));
     }
     Err(DeriveError::FixedPointDidNotConverge {
         round_index,
@@ -337,7 +323,6 @@ pub(super) fn compute_t_ood<M: Embedding>(
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
 mod tests {
     use proptest::prelude::*;
 
@@ -642,7 +627,7 @@ mod tests {
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
         )
         .unwrap();
-        assert_eq!(
+        assert_close(
             f64::from(plan.privacy_error_bits()),
             f64::from(PLAN_FIXTURE_TARGET_BITS),
         );

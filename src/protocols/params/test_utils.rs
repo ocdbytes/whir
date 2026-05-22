@@ -14,7 +14,7 @@ use crate::{
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
-            derive::compute_t_ood,
+            derive::solve_t_ood,
             irs_commit as irs_solver,
             protocol_config::MaskOracleInfo,
             regime::johnson_list_size,
@@ -48,33 +48,30 @@ pub const FIXTURE_TARGET_BITS: u32 = 80;
 /// used in the analytic-error formulas.
 pub const EPS: f64 = 1e-9;
 
+/// Matches `proof_of_work::MAX_DIFFICULTY` so per-slot budget checks in
+/// `grind_to_at` never bite. Tests exercising budget enforcement build their
+/// own specs.
+pub const FIXTURE_POW_BUDGET_BITS: u32 = 60;
+
 pub fn deterministic_spec(mode: Mode) -> SecuritySpec {
     SecuritySpec {
         mode,
         decoding_regime: DecodingRegime::Johnson,
         target_security_bits: FIXTURE_TARGET_BITS,
-        pow_budget: PowBudget::Forbidden,
+        pow_budget: PowBudget::per_slot(FIXTURE_POW_BUDGET_BITS),
         hash_id: hash::BLAKE3,
     }
 }
 
-/// `pow_budget` ∈ `{Forbidden, PerSlot{1..=16}}`; bounded so the analytic
-/// floor stays positive for the lowest test targets and the PoW gap stays
-/// under the 60-bit cap. `PerSlot { bits: 0 }` is unrepresentable, so we
-/// generate `Forbidden` for the "no grinding" case directly.
 pub fn arb_spec(
     mode: Mode,
     target_range: RangeInclusive<u32>,
 ) -> impl Strategy<Value = SecuritySpec> {
-    let pow_strategy = prop_oneof![
-        Just(PowBudget::Forbidden),
-        (1u32..=16).prop_map(PowBudget::per_slot),
-    ];
-    (target_range, pow_strategy).prop_map(move |(target, pow_budget)| SecuritySpec {
+    target_range.prop_map(move |target| SecuritySpec {
         mode,
         decoding_regime: DecodingRegime::Johnson,
         target_security_bits: target,
-        pow_budget,
+        pow_budget: PowBudget::per_slot(FIXTURE_POW_BUDGET_BITS),
         hash_id: hash::BLAKE3,
     })
 }
@@ -157,10 +154,10 @@ pub fn build_test_c_zk(
 /// per-round shape that `code_switch::solve` expects.
 ///
 /// `t_ood` is solved against the rate-only `johnson_list_size(target_log_inv_rate)`,
-/// mirroring `derive::build_zk_round_data`. Using `target.list_size()` here
-/// instead would couple `t_ood` to the target's effective rate (which itself
-/// depends on `t_ood` via the mask), producing a non-monotone oscillation
-/// once the mask is tight (Lemma 9.5 part ii) rather than pow2-padded.
+/// mirroring `derive::solve_t_ood`. Using `target.list_size()` here instead
+/// would couple `t_ood` to the target's effective rate (which itself depends
+/// on `t_ood` via the mask), producing a non-monotone oscillation once the
+/// mask is tight (Lemma 9.5 part ii) rather than pow2-padded.
 pub fn build_round_io<M: Embedding + Default>(
     spec: &SecuritySpec,
     log_inv_rate: u32,
@@ -173,18 +170,16 @@ pub fn build_round_io<M: Embedding + Default>(
         log_inv_rate,
         folding_factor,
     };
-    let source = irs_solver::solve(spec, &source_ctx, OodSampleBudget::ZERO);
-
     let target_log_inv_rate = log_inv_rate + folding_factor - 1;
+    let target_list_size = johnson_list_size(f64::from(target_log_inv_rate));
+    let (source, t_ood) = solve_t_ood::<M>(spec, &source_ctx, target_list_size, c_zk_list_size, 0)
+        .expect("solve_t_ood diverged in test fixture");
+
     let target_ctx = RoundContext {
         vector_size: source.message_length(),
         log_inv_rate: target_log_inv_rate,
         folding_factor,
     };
-
-    let target_list_size = johnson_list_size(f64::from(target_log_inv_rate));
-    let t_ood = compute_t_ood(spec, &source, target_list_size, c_zk_list_size, 0)
-        .expect("compute_t_ood diverged in test fixture");
     let target = irs_solver::solve(spec, &target_ctx, OodSampleBudget::new(t_ood));
     (source, target, t_ood)
 }

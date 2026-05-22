@@ -9,7 +9,7 @@ use crate::{
         basecase::{self, Config as BasecaseConfig},
         irs_commit::Config as IrsConfig,
         params::{
-            error::{DeriveError, Pow, PowResultExt},
+            error::{grind_to_at, DeriveError, Pow},
             irs_commit as irs_solver,
             spec::{Mode as SpecMode, OodSampleBudget, RoundContext, SecuritySpec},
             sumcheck as sumcheck_solver,
@@ -35,13 +35,11 @@ pub fn solve<F: Field>(
     };
     let commit = irs_solver::solve(spec, &ctx, OodSampleBudget::ZERO);
 
-    let target_bits = Bits::new(f64::from(spec.target_security_bits));
-    let sumcheck_pow = PowConfig::grind_to(
-        target_bits,
+    let sumcheck_pow = grind_to_at(
+        spec,
         sumcheck_solver::analytic_error_bits(&commit, None),
-        spec.hash_id,
-    )
-    .at(Pow::BasecaseSumcheck)?;
+        Pow::BasecaseSumcheck,
+    )?;
     let sumcheck = SumcheckConfig::new(
         vector_size,
         sumcheck_pow,
@@ -56,10 +54,11 @@ pub fn solve<F: Field>(
 
     let pow = match mode {
         basecase::BasecaseMode::Standard => PowConfig::none(),
-        basecase::BasecaseMode::ZeroKnowledge => {
-            PowConfig::grind_to(target_bits, analytic_error_bits(&commit), spec.hash_id)
-                .at(Pow::BasecaseGammaCombination)?
-        }
+        basecase::BasecaseMode::ZeroKnowledge => grind_to_at(
+            spec,
+            analytic_error_bits(&commit),
+            Pow::BasecaseGammaCombination,
+        )?,
     };
 
     Ok(BasecaseConfig::new(commit, sumcheck, mode, pow))
@@ -92,7 +91,6 @@ impl<F: Field> BasecaseConfig<F> {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
 mod tests {
     use proptest::prelude::*;
 

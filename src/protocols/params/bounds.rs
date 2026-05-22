@@ -8,9 +8,8 @@ pub(super) fn rate(log_inv_rate: f64) -> f64 {
     2_f64.powf(-log_inv_rate)
 }
 
-/// Lossy `usize → f64` for analytic-error formulas. Single allow-site for
-/// `clippy::cast_precision_loss` so individual call sites can stay terse.
-#[allow(clippy::cast_precision_loss)]
+/// Lossy `usize → f64` for analytic-error formulas. Named so individual call
+/// sites can stay terse and intent-tagged.
 pub(super) const fn usize_to_f64(x: usize) -> f64 {
     x as f64
 }
@@ -21,7 +20,6 @@ pub fn ood_per_sample_log2(message_length: usize, field_bits: f64) -> f64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use crate::protocols::params::test_utils::assert_close;

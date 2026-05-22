@@ -8,42 +8,52 @@ use crate::{
         irs_commit::Config as IrsConfig,
         params::{
             bounds::usize_to_f64,
-            error::{DeriveError, Pow, PowResultExt},
+            error::{grind_to_at, DeriveError, Pow},
             protocol_config::MaskOracleInfo,
             spec::{RoundContext, SecuritySpec},
         },
-        proof_of_work::Config as PowConfig,
         sumcheck::{self, Config as SumcheckConfig, SumcheckMaskLen},
     },
 };
 
-/// `mask_oracle` is `Some` iff ZK; only C_zk's list size + ℓ_zk are read here.
-/// `pow` is the [`Pow`] that labels grinding failures (basecase or per-round).
-pub fn solve<M: Embedding>(
+/// Standard-mode sumcheck builder. `pow` labels grinding failures
+/// (basecase or per-round).
+pub fn solve_standard<M: Embedding>(
     spec: &SecuritySpec,
     ctx: &RoundContext,
     source_irs: &IrsConfig<M>,
-    mask_oracle: Option<MaskOracleInfo>,
     pow: Pow,
 ) -> Result<SumcheckConfig<M::Target>, DeriveError> {
-    let num_rounds = num_sumcheck_rounds(ctx);
-    let round_pow = PowConfig::grind_to(
-        Bits::new(f64::from(spec.target_security_bits)),
-        analytic_error_bits(source_irs, mask_oracle),
-        spec.hash_id,
-    )
-    .at(pow)?;
-    let mode = match mask_oracle {
-        None => sumcheck::SumcheckMode::Standard,
-        Some(_) => sumcheck::SumcheckMode::ZeroKnowledge {
-            mask_length: zk_mask_length(),
-        },
-    };
+    let round_pow = grind_to_at(spec, analytic_error_bits(source_irs, None), pow)?;
     Ok(SumcheckConfig::new(
         ctx.vector_size,
         round_pow,
-        num_rounds,
-        mode,
+        num_sumcheck_rounds(ctx),
+        sumcheck::SumcheckMode::Standard,
+    ))
+}
+
+/// ZK sumcheck builder. `mask_oracle` carries C_zk's list size + ℓ_zk; only
+/// those two values are read here. `pow` labels grinding failures.
+pub fn solve_zk<M: Embedding>(
+    spec: &SecuritySpec,
+    ctx: &RoundContext,
+    source_irs: &IrsConfig<M>,
+    mask_oracle: MaskOracleInfo,
+    pow: Pow,
+) -> Result<SumcheckConfig<M::Target>, DeriveError> {
+    let round_pow = grind_to_at(
+        spec,
+        analytic_error_bits(source_irs, Some(mask_oracle)),
+        pow,
+    )?;
+    Ok(SumcheckConfig::new(
+        ctx.vector_size,
+        round_pow,
+        num_sumcheck_rounds(ctx),
+        sumcheck::SumcheckMode::ZeroKnowledge {
+            mask_length: zk_mask_length(),
+        },
     ))
 }
 
@@ -86,7 +96,6 @@ const fn zk_mask_length() -> SumcheckMaskLen {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
 mod tests {
     use proptest::prelude::*;
 
@@ -129,8 +138,9 @@ mod tests {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let ctx = fixture_ctx();
         let source_irs = build_source_irs(&spec, &ctx);
-        let mask_oracle = build_minimal_mask_oracle(&spec);
-        let config = solve(
+        let mask_oracle =
+            build_minimal_mask_oracle(&spec).expect("ZK spec must produce a mask oracle");
+        let config = solve_zk(
             &spec,
             &ctx,
             &source_irs,
@@ -204,7 +214,7 @@ mod tests {
             l_zk: MaskCodeMessageLen::new(1 << OVERSIZED_LOG_L_ZK),
         };
         let bits = f64::from(analytic_error_bits::<TestEmbedding>(&irs, Some(huge)));
-        assert_eq!(bits, 0.0);
+        assert_close(bits, 0.0);
     }
 
     proptest! {
@@ -214,8 +224,8 @@ mod tests {
             ctx in arb_round_ctx(),
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
-            let mask_oracle = build_minimal_mask_oracle(&spec);
-            let config = solve(&spec, &ctx, &source_irs, mask_oracle, Pow::RoundSumcheck { index: 0 }).unwrap();
+            let pow = Pow::RoundSumcheck { index: 0 };
+            let config = solve_standard(&spec, &ctx, &source_irs, pow).unwrap();
             prop_assert!(matches!(config.mode, sumcheck::SumcheckMode::Standard));
         }
 
@@ -228,8 +238,11 @@ mod tests {
             ctx in arb_round_ctx(),
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
-            let mask_oracle = build_minimal_mask_oracle(&spec);
-            let config = solve(&spec, &ctx, &source_irs, mask_oracle, Pow::RoundSumcheck { index: 0 }).unwrap();
+            let pow = Pow::RoundSumcheck { index: 0 };
+            let config = build_minimal_mask_oracle(&spec).map_or_else(
+                || solve_standard(&spec, &ctx, &source_irs, pow).unwrap(),
+                |info| solve_zk(&spec, &ctx, &source_irs, info, pow).unwrap(),
+            );
             prop_assert_eq!(config.num_rounds, ctx.folding_factor as usize);
         }
 
@@ -259,7 +272,11 @@ mod tests {
             let source_irs = build_source_irs(&spec, &ctx);
             let mask_oracle = build_minimal_mask_oracle(&spec);
             let error = analytic_error_bits(&source_irs, mask_oracle);
-            let config = solve(&spec, &ctx, &source_irs, mask_oracle, Pow::RoundSumcheck { index: 0 }).unwrap();
+            let pow = Pow::RoundSumcheck { index: 0 };
+            let config = mask_oracle.map_or_else(
+                || solve_standard(&spec, &ctx, &source_irs, pow).unwrap(),
+                |info| solve_zk(&spec, &ctx, &source_irs, info, pow).unwrap(),
+            );
             assert_pow_closes_gap(&spec, error, &config.round_pow);
         }
     }
@@ -275,11 +292,11 @@ mod tests {
             c_zk_list_size: ListSize::new(FIXTURE_C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new(FIXTURE_L_ZK),
         };
-        let config = solve(
+        let config = solve_zk(
             &spec,
             &ctx,
             &source_irs,
-            Some(info),
+            info,
             Pow::RoundSumcheck { index: 0 },
         )
         .unwrap();
