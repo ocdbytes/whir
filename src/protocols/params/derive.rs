@@ -10,16 +10,18 @@ use crate::{
         fields::FieldWithSize,
     },
     protocols::{
-        irs_commit::{self, Config as IrsConfig},
+        irs_commit::Config as IrsConfig,
         params::{
-            basecase as basecase_solver, code_switch as code_switch_solver,
+            basecase as basecase_solver,
+            bounds::usize_to_f64,
+            code_switch as code_switch_solver,
             error::{DeriveError, FixedPointLoop, Pow},
             irs_commit as irs_solver, mask_proximity as mask_proximity_solver,
             protocol_config::{MaskOracleConfig, ProtocolConfig, RoundConfig, RoundMode},
             regime::list_size_estimate,
             spec::{
-                LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec,
-                TuningSpec, ZkSpec,
+                DecodingRegime, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
+                RoundContext, SecuritySpec, TuningSpec, ZkSpec,
             },
             sumcheck as sumcheck_solver,
         },
@@ -264,51 +266,20 @@ pub(super) const fn compute_l_zk<M: Embedding>(
     MaskCodeMessageLen::new((source.mask_length() + t_ood).next_power_of_two())
 }
 
-/// One application of the Lemma 9.9 OOD step. ZK: `degree = ℓ + ℓ_zk(t_ood)`
-/// with `ℓ_zk = next_pow2(source.mask_length() + t_ood)`. Standard:
-/// `degree = ℓ`.
+/// Per-round `(source, t_ood)` from a linear search over `t_ood`.
 ///
-/// Floored at `1`: Lemma 9.9's OOD term vanishes under `Unique` decoding
-/// (`|Λ| = 1`), but Construction 9.7's code-switch still needs at least one
-/// OOD point to bind the witness polynomial.
-pub(super) fn compute_t_ood<M: Embedding>(
-    spec: &SecuritySpec,
-    source: &IrsConfig<M>,
-    target_list_size: f64,
-    c_zk_list_size: Option<f64>,
-    t_ood: usize,
-) -> usize {
-    let security_target = f64::from(spec.protocol_security_target_bits());
-    let field_bits = M::Target::field_size_bits();
-    let combined_list_size = target_list_size * c_zk_list_size.unwrap_or(1.0);
-    let message_length = source.message_length();
-
-    let degree = if c_zk_list_size.is_some() {
-        let l_zk = (source.mask_length() + t_ood).next_power_of_two();
-        message_length + l_zk
-    } else {
-        message_length
-    };
-
-    let soundness_t_ood = irs_commit::num_ood_samples(
-        spec.decoding_regime,
-        security_target,
-        field_bits,
-        combined_list_size,
-        degree,
-    );
-    soundness_t_ood.max(1)
-}
-
-/// Solves the per-round `t_ood` fixed-point and the source IRS together.
+/// Mirrors Plonky3's `determine_ood_samples`: under `Unique`, OOD contributes
+/// no soundness (`|Λ| = 1`), so the search is skipped and `t_ood = 1` is
+/// returned for the Construction 9.7 binding floor. Under `Johnson`/`Capacity`,
+/// linearly searches `t_ood = 1..=T_OOD_MAX_ITER` and returns the smallest
+/// value where the OOD security bound `t · (|F| − log d) − 2·log|Λ_combined|
+/// + 1` meets `protocol_security_target_bits` (STIR Lemma 4.5 / Plonky3
+/// `ood_error`).
 ///
-/// Convergence: `Φ(t) = num_ood_samples(ℓ + next_pow2(in_domain + 2·t))` is
-/// monotone non-decreasing on ℕ (`in_domain` depends only on the requested
-/// rate; `next_pow2` and `num_ood_samples` are monotone; under `Capacity` the
-/// `c_zk_list_size(t)` factor is monotone too) and bounded above, so Kleene
-/// iteration from `t = 0` converges to the least fixed point in finitely many
-/// steps. Standard mode (`c_zk_log_inv_rate = None`) has `Φ` constant in
-/// `t`, so one application suffices.
+/// The bound is monotone-increasing in `t` for `|F| ≫ log d` (always the case
+/// here), so the first match is the minimum. Source is rebuilt per iteration
+/// because `source.mask_length()` depends on `t_ood` in ZK (Lemma 9.5 ii);
+/// the rebuild is cheap (struct fields only).
 pub(super) fn solve_t_ood<M: Embedding + Default>(
     spec: &SecuritySpec,
     src_ctx: &RoundContext,
@@ -316,30 +287,44 @@ pub(super) fn solve_t_ood<M: Embedding + Default>(
     c_zk_log_inv_rate: Option<f64>,
     round_index: usize,
 ) -> Result<(IrsConfig<M>, usize), DeriveError> {
-    let mut source: IrsConfig<M> = irs_solver::solve(spec, src_ctx, OodSampleBudget::ZERO);
+    if matches!(spec.decoding_regime, DecodingRegime::Unique) {
+        let source = irs_solver::solve(spec, src_ctx, OodSampleBudget::new(1));
+        return Ok((source, 1));
+    }
 
-    let Some(c_zk_log_inv_rate) = c_zk_log_inv_rate else {
-        let t_ood = compute_t_ood(spec, &source, target_list_size, None, 0);
-        return Ok((source, t_ood));
-    };
+    let security_target = f64::from(spec.protocol_security_target_bits());
+    let field_bits = M::Target::field_size_bits();
 
-    let mut t_ood = 0;
-    for _ in 0..T_OOD_MAX_ITER {
-        // Under `Capacity`, c_zk's list size depends on its message length
-        // ℓ_zk(t), so recompute per iteration. Under `Johnson`/`Unique` the
-        // result is t-independent — the recomputation is a no-op.
-        let l_zk = (source.mask_length() + t_ood).next_power_of_two();
-        let c_zk_list_size = list_size_estimate(
-            spec.decoding_regime,
-            (l_zk as f64).log2(),
-            c_zk_log_inv_rate,
+    for t_ood in 1..=T_OOD_MAX_ITER {
+        let source: IrsConfig<M> = irs_solver::solve(spec, src_ctx, OodSampleBudget::new(t_ood));
+
+        // `degree` and `log_combined_list` depend on `t_ood` in ZK via ℓ_zk;
+        // Standard collapses to `degree = ℓ` and `combined = target.list_size`.
+        let (log_degree, log_combined_list) = c_zk_log_inv_rate.map_or_else(
+            || {
+                (
+                    usize_to_f64(source.message_length()).log2(),
+                    target_list_size.log2(),
+                )
+            },
+            |c_zk_rate| {
+                let l_zk = (source.mask_length() + t_ood).next_power_of_two();
+                let c_zk_list =
+                    list_size_estimate(spec.decoding_regime, usize_to_f64(l_zk).log2(), c_zk_rate);
+                (
+                    usize_to_f64(source.message_length() + l_zk).log2(),
+                    (target_list_size * c_zk_list).log2(),
+                )
+            },
         );
-        let new_t_ood = compute_t_ood(spec, &source, target_list_size, Some(c_zk_list_size), t_ood);
-        if new_t_ood == t_ood {
+
+        // OOD security at MCA arity 2 (STIR Lemma 4.5 / Plonky3 `ood_error`):
+        //   bits = t · (|F| − log d) − 2·log|Λ_combined| + 1
+        let ood = usize_to_f64(t_ood);
+        let bits = ood * (field_bits - log_degree) - 2.0 * log_combined_list + 1.0;
+        if bits >= security_target {
             return Ok((source, t_ood));
         }
-        t_ood = new_t_ood;
-        source = irs_solver::solve(spec, src_ctx, OodSampleBudget::new(t_ood));
     }
     Err(DeriveError::FixedPointDidNotConverge {
         round_index,
@@ -529,9 +514,9 @@ mod tests {
         ));
     }
 
-    /// Lemma 9.9 fixed-point: every ZK round needs at least one OOD challenge.
+    /// Construction 9.7: every ZK round needs at least one OOD challenge.
     #[test]
-    fn compute_t_ood_nonzero_in_zk() {
+    fn t_ood_nonzero_in_zk() {
         let spec = test_spec(Mode::ZeroKnowledge);
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,

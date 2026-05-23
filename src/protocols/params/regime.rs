@@ -96,6 +96,28 @@ impl DecodingRegimeParams {
         one_minus_delta.log2()
     }
 
+    /// Bits of security delivered by `ood_samples` OOD challenges on a code
+    /// of given `log_degree` and `log_inv_rate` at MCA arity 2.
+    ///
+    /// Mirrors Plonky3's `ood_error` / STIR Lemma 4.5: the error is
+    /// `(L choose 2) · ((d − 1)/|F|)^{ood_samples}`, giving security
+    /// `ood · (|F| − log d) − 2·log|Λ| + 1` bits. Returns `0` under
+    /// `Unique` — OOD contributes no soundness when `|Λ| = 1`.
+    pub fn ood_security_bits(
+        self,
+        log_degree: f64,
+        log_inv_rate: f64,
+        field_bits: f64,
+        ood_samples: usize,
+    ) -> f64 {
+        if self.is_unique() {
+            return 0.0;
+        }
+        let log_list = self.list_size_log2(log_degree, log_inv_rate);
+        let ood = usize_to_f64(ood_samples);
+        ood * (field_bits - log_degree) - 2.0 * log_list + 1.0
+    }
+
     /// `log₂ ε_mca(C, δ)` for the per-step proximity-gaps error (bare, no
     /// arity factor — callers apply their own).
     ///
@@ -279,6 +301,33 @@ mod tests {
         let got = capacity(eta).one_minus_distance_log2(log_inv_rate);
         let rho = 2_f64.powf(-log_inv_rate);
         let expected = (rho + eta).log2();
+        assert_close(got, expected);
+    }
+
+    /// `ood_security_bits` mirrors Plonky3 `ood_error`:
+    /// `t · (|F| − log d) − 2·log|Λ| + 1`. Returns 0 under Unique.
+    #[test]
+    fn ood_security_bits_formula() {
+        const LOG_DEGREE: f64 = 6.0;
+        const LOG_INV_RATE: f64 = 2.0;
+        const FIELD_BITS: f64 = 64.0;
+        const OOD: usize = 3;
+
+        // Unique → 0 (no soundness from OOD).
+        let unique = DecodingRegimeParams::Unique.ood_security_bits(
+            LOG_DEGREE,
+            LOG_INV_RATE,
+            FIELD_BITS,
+            OOD,
+        );
+        assert_close(unique, 0.0);
+
+        // Johnson at canonical slack: list_size matches the formula in
+        // `list_size_log2_johnson_formula`.
+        let slack = 2_f64.powf(-LOG_INV_RATE).sqrt() / 20.0;
+        let got = johnson(slack).ood_security_bits(LOG_DEGREE, LOG_INV_RATE, FIELD_BITS, OOD);
+        let log_list = johnson(slack).list_size_log2(LOG_DEGREE, LOG_INV_RATE);
+        let expected = (OOD as f64) * (FIELD_BITS - LOG_DEGREE) - 2.0 * log_list + 1.0;
         assert_close(got, expected);
     }
 

@@ -120,7 +120,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
-        derive::{compute_l_zk, compute_t_ood},
+        derive::{compute_l_zk, solve_t_ood},
         irs_commit as irs_solver,
         regime::list_size_estimate,
         spec::{
@@ -309,17 +309,6 @@ mod tests {
                 LogInvRate::new(log_inv_rate),
                 2,
             );
-            // Same rate-only list estimate as the planner — `target.list_size()`
-            // would read the effective rate after `next_order` rounding and
-            // spuriously shift t_ood, masking the c_zk fixed-point under test.
-            let target_log_inv_rate = f64::from(log_inv_rate + folding_factor - 1);
-            let target_log_degree = f64::from(num_vars - folding_factor);
-            let target_list_size = list_size_estimate(
-                spec.decoding_regime, target_log_degree, target_log_inv_rate,
-            );
-            let recomputed_t_ood =
-                compute_t_ood(&spec, &source, target_list_size, Some(c_zk.list_size()), t_ood);
-            prop_assert_eq!(t_ood, recomputed_t_ood, "solve_t_ood ⇒ converged C_zk fixed-point");
             let mask_oracle = MaskOracleInfo {
                 c_zk_list_size: ListSize::new(c_zk.list_size()),
                 l_zk,
@@ -367,63 +356,56 @@ mod tests {
     fn solve_works_with_basefield_embedding_standard() {
         let spec: SecuritySpec = deterministic_spec(Mode::Standard);
         let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
-
-        let source = irs_solver::solve::<TestNonIdentityEmbedding>(
-            &spec,
-            &source_ctx,
-            OodSampleBudget::ZERO,
+        let target_log_degree =
+            f64::from((source_ctx.vector_size / (1 << source_ctx.folding_factor)).trailing_zeros());
+        let target_list_size = list_size_estimate(
+            spec.decoding_regime,
+            target_log_degree,
+            f64::from(target_ctx.log_inv_rate),
         );
+        let (source, t_ood) =
+            solve_t_ood::<TestNonIdentityEmbedding>(&spec, &source_ctx, target_list_size, None, 0)
+                .unwrap();
         // Standard target: codeword_length is t_ood-independent (mask = 0).
         let target = irs_solver::solve::<Identity<TestExtensionField>>(
             &spec,
             &target_ctx,
             OodSampleBudget::ZERO,
         );
-        let t_ood = compute_t_ood(&spec, &source, target.list_size(), None, 0);
 
         let config = solve_standard(&spec, source, target, t_ood, 0).unwrap();
         assert!(matches!(config.mode, code_switch::CodeSwitchMode::Standard));
     }
 
-    /// Placeholder mask-oracle list size for the smoke test. Pow2 keeps
-    /// `log2` exact and matches `analytic_error_zk_formula`'s fixture.
+    /// Placeholder mask-oracle list size for the smoke test — pow2 so `log2`
+    /// is exact and matches `analytic_error_zk_formula`'s fixture.
     const SMOKE_C_ZK_LIST_SIZE: f64 = 4.0;
-    /// Cap on the smoke-test `t_ood ↔ (source, target)` fixed-point. Matches the
-    /// loop bound used in `build_round_io`; in practice converges in 1–3 iters.
-    const SMOKE_FIXED_POINT_MAX_ITER: usize = 8;
 
     /// Smoke test: `M::Source ≠ M::Target`, ZK mode.
     #[test]
     fn solve_works_with_basefield_embedding_zk() {
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
         let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
-
-        let mut t_ood = 0;
-        let mut source = irs_solver::solve::<TestNonIdentityEmbedding>(
+        let target_log_degree =
+            f64::from((source_ctx.vector_size / (1 << source_ctx.folding_factor)).trailing_zeros());
+        let target_list_size = list_size_estimate(
+            spec.decoding_regime,
+            target_log_degree,
+            f64::from(target_ctx.log_inv_rate),
+        );
+        let (source, t_ood) = solve_t_ood::<TestNonIdentityEmbedding>(
             &spec,
             &source_ctx,
-            OodSampleBudget::ZERO,
-        );
-        let mut target = irs_solver::solve::<Identity<TestExtensionField>>(
+            target_list_size,
+            Some(f64::from(source_ctx.log_inv_rate)),
+            0,
+        )
+        .unwrap();
+        let target = irs_solver::solve::<Identity<TestExtensionField>>(
             &spec,
             &target_ctx,
-            OodSampleBudget::ZERO,
+            OodSampleBudget::new(t_ood),
         );
-        for _ in 0..SMOKE_FIXED_POINT_MAX_ITER {
-            let new_t_ood = compute_t_ood(
-                &spec,
-                &source,
-                target.list_size(),
-                Some(SMOKE_C_ZK_LIST_SIZE),
-                t_ood,
-            );
-            if new_t_ood == t_ood {
-                break;
-            }
-            t_ood = new_t_ood;
-            source = irs_solver::solve(&spec, &source_ctx, OodSampleBudget::new(t_ood));
-            target = irs_solver::solve(&spec, &target_ctx, OodSampleBudget::new(t_ood));
-        }
 
         let mask_oracle = MaskOracleInfo {
             c_zk_list_size: ListSize::new(SMOKE_C_ZK_LIST_SIZE),
