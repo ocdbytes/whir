@@ -74,23 +74,6 @@ impl<M: Embedding> ProtocolConfig<M> {
         &self.basecase
     }
 
-    /// `#[cfg(test)]` escape hatch: lets the negative test in
-    /// `derive::tests` inject an over-budget basecase PoW slot so that
-    /// `validate_pow_budget` can be exercised on a corrupted plan.
-    /// Not for production use — there is no equivalent on the public API.
-    #[cfg(test)]
-    pub(crate) const fn override_basecase_pow_for_test(&mut self, pow: PowConfig) {
-        self.basecase.pow = pow;
-    }
-
-    /// `#[cfg(test)]` escape hatch: lets chain-broken tests in
-    /// `derive::tests` drop the tail of `rounds` so the basecase's chained
-    /// `vector_size` no longer matches the new last round.
-    #[cfg(test)]
-    pub(crate) fn truncate_rounds_for_test(&mut self, len: usize) {
-        self.rounds.truncate(len);
-    }
-
     /// `true` if every PoW slot's difficulty fits within `security.pow_budget`.
     /// Boolean form of [`Self::validate_pow_budget`].
     pub fn check_pow_bits(&self) -> bool {
@@ -227,6 +210,37 @@ impl<M: Embedding> ProtocolConfig<M> {
             min_bits = min_bits.min(f64::from(round.analytic_bits()));
         }
         Bits::new(min_bits.max(0.0))
+    }
+}
+
+/// Test-only mutators. Grouped here so the production `impl` block above
+/// reads as the public API surface and these escape hatches aren't easily
+/// mistaken for it. Each one supports a specific negative test in
+/// `derive::tests`; there is no equivalent on the public API.
+#[cfg(test)]
+impl<M: Embedding> ProtocolConfig<M> {
+    /// Inject an over-budget basecase PoW slot so `validate_pow_budget` can
+    /// be exercised on a corrupted plan.
+    pub(crate) const fn override_basecase_pow_for_test(&mut self, pow: PowConfig) {
+        self.basecase.pow = pow;
+    }
+
+    /// Drop the tail of `rounds` so the basecase's chained `vector_size` no
+    /// longer matches the (new) last round — trips the basecase branch of
+    /// `validate_round_chaining`.
+    pub(crate) fn truncate_rounds_for_test(&mut self, len: usize) {
+        self.rounds.truncate(len);
+    }
+
+    /// Overwrite a round's code-switch target `vector_size` so the next
+    /// round's source no longer chains — trips the adjacent `windows(2)`
+    /// branch of `validate_round_chaining`, which truncation cannot reach.
+    pub(crate) fn corrupt_round_target_vector_size_for_test(
+        &mut self,
+        round_idx: usize,
+        new_size: usize,
+    ) {
+        self.rounds[round_idx].code_switch.target.vector_size = new_size;
     }
 }
 

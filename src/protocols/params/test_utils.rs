@@ -161,11 +161,11 @@ pub fn build_test_c_zk(
 /// Builds a self-consistent `(source, target, t_ood)` triplet matching the
 /// per-round shape that `code_switch::solve` expects.
 ///
-/// `t_ood` is solved against the rate-only `list_size_estimate(...)`,
-/// mirroring `derive::solve_t_ood`. Using `target.list_size()` here instead
-/// would couple `t_ood` to the target's effective rate (which itself depends
-/// on `t_ood` via the mask), producing a non-monotone oscillation once the
-/// mask is tight (Lemma 9.5 part ii) rather than pow2-padded.
+/// `t_ood` is solved against the rate-only `list_size_estimate(...)` rather
+/// than `target.list_size()`: the latter reads the target's effective rate
+/// (which itself depends on `t_ood` via the mask), producing a non-monotone
+/// oscillation once the mask is tight (Lemma 9.5 part ii) rather than
+/// pow2-padded.
 pub fn build_round_io<M: Embedding + Default>(
     spec: &SecuritySpec,
     log_inv_rate: u32,

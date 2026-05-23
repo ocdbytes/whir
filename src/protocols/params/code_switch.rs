@@ -109,7 +109,7 @@ pub fn analytic_error_bits<M: Embedding>(
 }
 
 /// Number of `(r ‖ s)` mask polynomials code-switch contributes to C_zk per
-/// round. Mirrors [`super::sumcheck::masks_required`].
+/// round.
 pub const fn masks_required() -> usize {
     1
 }
@@ -331,8 +331,8 @@ mod tests {
         }
     }
 
-    /// Shared shape for the `M::Source ≠ M::Target` smoke tests.
-    /// `target_ctx` mirrors the planner's per-round chaining.
+    /// Shared shape for the `M::Source ≠ M::Target` smoke tests. `target_ctx`
+    /// uses the same per-round chaining the planner does.
     fn non_identity_smoke_ctxs() -> (RoundContext, RoundContext) {
         const SOURCE_VECTOR_SIZE: usize = 64;
         const SOURCE_LOG_INV_RATE: u32 = 1;
@@ -349,6 +349,33 @@ mod tests {
             folding_factor: source_ctx.folding_factor,
         };
         (source_ctx, target_ctx)
+    }
+
+    /// `solve_zk` asserts `ℓ_zk ≥ source.mask_length() + t_ood` (Theorem 9.6
+    /// witness sizing). Build a self-consistent `(source, target, t_ood)`
+    /// and pass a deliberately-too-small `l_zk = 1` to trip the precondition.
+    #[test]
+    #[should_panic(expected = "violates Theorem 9.6")]
+    fn solve_zk_rejects_l_zk_below_r_plus_t_ood() {
+        const TOO_SMALL_L_ZK: usize = 1;
+
+        let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
+        let (source, target, t_ood) = build_round_io::<M>(
+            &spec,
+            FORMULA_LOG_INV_RATE,
+            FORMULA_FOLDING_FACTOR,
+            FORMULA_NUM_VARS,
+            Some(FORMULA_LOG_INV_RATE),
+        );
+        // `source.mask_length() + t_ood ≥ 1 + 1 > TOO_SMALL_L_ZK` in ZK,
+        // so the assert in solve_zk fires.
+        assert!(source.mask_length() + t_ood > TOO_SMALL_L_ZK);
+
+        let mask_oracle = MaskOracleInfo {
+            c_zk_list_size: ListSize::new(SMOKE_C_ZK_LIST_SIZE),
+            l_zk: MaskCodeMessageLen::new(TOO_SMALL_L_ZK),
+        };
+        let _ = solve_zk(&spec, source, target, t_ood, mask_oracle, 0);
     }
 
     /// Smoke test: `M::Source ≠ M::Target`, Standard mode.
@@ -378,7 +405,7 @@ mod tests {
     }
 
     /// Placeholder mask-oracle list size for the smoke test — pow2 so `log2`
-    /// is exact and matches `analytic_error_zk_formula`'s fixture.
+    /// is exact.
     const SMOKE_C_ZK_LIST_SIZE: f64 = 4.0;
 
     /// Smoke test: `M::Source ≠ M::Target`, ZK mode.

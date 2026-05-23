@@ -268,18 +268,19 @@ pub(super) const fn compute_l_zk<M: Embedding>(
 
 /// Per-round `(source, t_ood)` from a linear search over `t_ood`.
 ///
-/// Mirrors Plonky3's `determine_ood_samples`: under `Unique`, OOD contributes
-/// no soundness (`|Λ| = 1`), so the search is skipped and `t_ood = 1` is
-/// returned for the Construction 9.7 binding floor. Under `Johnson`/`Capacity`,
-/// linearly searches `t_ood = 1..=T_OOD_MAX_ITER` and returns the smallest
-/// value where the OOD security bound `t · (|F| − log d) − 2·log|Λ_combined|
-/// + 1` meets `protocol_security_target_bits` (STIR Lemma 4.5 / Plonky3
-/// `ood_error`).
+/// Under `Unique`, OOD contributes no soundness (`|Λ| = 1` ⇒ `(L choose 2) = 0`).
+/// The short-circuit returns `t_ood = 1` — the Construction 9.7 protocol-layer
+/// minimum, since [`crate::protocols::code_switch::Config::new`] asserts
+/// `out_domain_samples ≥ 1` (Steps 2-3 always execute).
 ///
-/// The bound is monotone-increasing in `t` for `|F| ≫ log d` (always the case
-/// here), so the first match is the minimum. Source is rebuilt per iteration
-/// because `source.mask_length()` depends on `t_ood` in ZK (Lemma 9.5 ii);
-/// the rebuild is cheap (struct fields only).
+/// Under `Johnson`, searches `t_ood = 1..=T_OOD_MAX_ITER` for the smallest
+/// value where the OOD security bound (STIR Lemma 4.5)
+/// `t · (|F| − log d) − 2·log|Λ_combined| + 1` meets
+/// `protocol_security_target_bits`. The bound is monotone-increasing in `t`
+/// for `|F| ≫ log d` (always the case here), so the first match is the
+/// minimum. Source is rebuilt per iteration because `source.mask_length()`
+/// depends on `t_ood` in ZK (Lemma 9.5 ii); the rebuild is cheap (struct
+/// fields only).
 pub(super) fn solve_t_ood<M: Embedding + Default>(
     spec: &SecuritySpec,
     src_ctx: &RoundContext,
@@ -288,6 +289,12 @@ pub(super) fn solve_t_ood<M: Embedding + Default>(
     round_index: usize,
 ) -> Result<(IrsConfig<M>, usize), DeriveError> {
     if matches!(spec.decoding_regime, DecodingRegime::Unique) {
+        // The short-circuit is not an optimization — the linear-search formula
+        // uses `log(L·(L−1)/2) ≈ 2·log L − 1`, which is exact for `L ≥ 2` but
+        // *underestimates* security by `+∞` when `L = 1` (the true `(L choose 2)`
+        // is 0, not L²/2). Letting the loop run would falsely demand `t_ood > 1`
+        // at high security targets even though OOD provides infinite soundness
+        // headroom under Unique. Pin `t_ood = 1` directly.
         let source = irs_solver::solve(spec, src_ctx, OodSampleBudget::new(1));
         return Ok((source, 1));
     }
@@ -318,8 +325,10 @@ pub(super) fn solve_t_ood<M: Embedding + Default>(
             },
         );
 
-        // OOD security at MCA arity 2 (STIR Lemma 4.5 / Plonky3 `ood_error`):
-        //   bits = t · (|F| − log d) − 2·log|Λ_combined| + 1
+        // STIR Lemma 4.5 (single-MCA OOD):
+        //   bits = t · (|F| − log d) − log(L · (L − 1) / 2)
+        // Approximate `log(L · (L − 1) / 2) ≈ 2·log L − 1` (exact-ish for L ≥ 2;
+        // the L = 1 case is handled by the Unique short-circuit above).
         let ood = usize_to_f64(t_ood);
         let bits = ood * (field_bits - log_degree) - 2.0 * log_combined_list + 1.0;
         if bits >= security_target {
@@ -514,10 +523,15 @@ mod tests {
         ));
     }
 
-    /// Construction 9.7: every ZK round needs at least one OOD challenge.
+    /// Johnson + ZK: each round runs a non-trivial OOD challenge to amplify
+    /// the list-decoding soundness gap (Lemma 9.9). `solve_t_ood`'s linear
+    /// search lands at the smallest `t_ood` clearing the security target.
     #[test]
-    fn t_ood_nonzero_in_zk() {
-        let spec = test_spec(Mode::ZeroKnowledge);
+    fn t_ood_nonzero_in_johnson_zk() {
+        let spec = SecuritySpec {
+            decoding_regime: DecodingRegime::Johnson,
+            ..test_spec(Mode::ZeroKnowledge)
+        };
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
@@ -528,6 +542,55 @@ mod tests {
                 panic!("expected ZK round")
             };
             assert!(t_ood.get() >= 1);
+        }
+    }
+
+    /// Unique + ZK: OOD contributes no soundness (`|Λ| = 1`), but
+    /// `protocols::code_switch::Config::new` requires `out_domain_samples ≥ 1`
+    /// to run Construction 9.7 Steps 2-3. `solve_t_ood` pins `t_ood = 1`
+    /// exactly — sharper than the Johnson-side `≥ 1` invariant.
+    #[test]
+    fn t_ood_pinned_to_one_in_unique_zk() {
+        let spec = SecuritySpec {
+            decoding_regime: DecodingRegime::Unique,
+            ..test_spec(Mode::ZeroKnowledge)
+        };
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        for r in plan.rounds() {
+            let RoundMode::ZeroKnowledge { t_ood, .. } = r.mode() else {
+                panic!("expected ZK round")
+            };
+            assert_eq!(t_ood.get(), 1);
+        }
+    }
+
+    /// Under Unique decoding, the C_zk mask oracle still carries the full
+    /// `2 · (k + 1)` columns — `k` sumcheck masks (Lemma 6.4) plus the
+    /// `(r ‖ s)` code-switch mask (Construction 9.7). With `t_ood = 1`, the
+    /// `s`-tail has length `ℓ_zk − r ≥ 1` and supports the
+    /// Vandermonde-surjectivity ZK argument (bounds doc §5.3 / Bound 3).
+    /// Pins the shape so an accidental "drop code-switch mask under Unique"
+    /// optimization can't slip in unnoticed.
+    #[test]
+    fn c_zk_keeps_code_switch_mask_under_unique() {
+        let spec = SecuritySpec {
+            decoding_regime: DecodingRegime::Unique,
+            ..test_spec(Mode::ZeroKnowledge)
+        };
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        for r in plan.rounds() {
+            let mask_oracle = r.mask_oracle().expect("ZK round has a mask oracle");
+            let k = r.code_switch().source.interleaving_depth.trailing_zeros() as usize;
+            let expected_num_masks = k + 1; // k sumcheck + 1 code-switch
+            assert_eq!(mask_oracle.c_zk().num_vectors, 2 * expected_num_masks);
         }
     }
 
@@ -646,15 +709,8 @@ mod tests {
     /// Derived plans must satisfy their own `pow_budget`.
     #[test]
     fn check_pow_bits_passes_on_derived_plan() {
-        let spec = SecuritySpec {
-            mode: Mode::ZeroKnowledge,
-            decoding_regime: DecodingRegime::Johnson,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
-        };
         let plan = ProtocolConfig::<TestEmbedding>::derive(
-            spec,
+            test_spec(Mode::ZeroKnowledge),
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
         )
         .unwrap();
@@ -672,11 +728,8 @@ mod tests {
         use crate::{bits::Bits, protocols::proof_of_work::Config as PowConfig};
         const MODERATE_POW_BUDGET_BITS: u32 = 30;
         let spec = SecuritySpec {
-            mode: Mode::ZeroKnowledge,
-            decoding_regime: DecodingRegime::Johnson,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
             pow_budget: PowBudget::per_slot(MODERATE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
+            ..test_spec(Mode::ZeroKnowledge)
         };
         let mut plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
@@ -687,6 +740,45 @@ mod tests {
             OVER_BUDGET_INJECTED_BITS,
         )));
         assert!(!plan.check_pow_bits());
+    }
+
+    /// `validate_round_chaining` trips when round `i`'s target `vector_size`
+    /// no longer matches round `i+1`'s source. Covers the adjacent-rounds
+    /// `windows(2)` branch — distinct from the basecase branch, which is
+    /// covered by `validate_round_chaining_detects_basecase_mismatch`.
+    #[test]
+    fn validate_round_chaining_detects_adjacent_round_mismatch() {
+        let spec = test_spec(Mode::ZeroKnowledge);
+        let mut plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        let n = plan.rounds().len();
+        assert!(n >= 2, "need ≥ 2 rounds to break a mid-chain link");
+        assert!(plan.check_all_invariants(), "fresh plan must validate");
+
+        // Round 0's natural target.vector_size is some power of 2; bumping
+        // it to a value the next round's source can't match (the source
+        // still carries the originally-derived size) breaks the chain.
+        let bad_size = plan.rounds()[0].code_switch().target.vector_size + 1;
+        plan.corrupt_round_target_vector_size_for_test(0, bad_size);
+
+        let err = plan
+            .validate_round_chaining()
+            .expect_err("adjacent-round mismatch must trip the chain check");
+        assert!(
+            matches!(
+                err,
+                DeriveError::RoundChainBroken {
+                    from: crate::protocols::params::error::ChainSource::Round(0),
+                    to: crate::protocols::params::error::ChainTarget::NextRound(1),
+                    ..
+                }
+            ),
+            "got {err:?}",
+        );
+        assert!(!plan.check_all_invariants());
     }
 
     /// `validate_round_chaining` trips when the basecase no longer chains
@@ -728,11 +820,8 @@ mod tests {
     fn derive_reports_pow_ungrindable() {
         const UNREACHABLE_TARGET_BITS: u32 = 200;
         let spec = SecuritySpec {
-            mode: Mode::Standard,
-            decoding_regime: DecodingRegime::Johnson,
             target_security_bits: UNREACHABLE_TARGET_BITS,
-            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
+            ..test_spec(Mode::Standard)
         };
         let err = ProtocolConfig::<TestEmbedding>::derive(
             spec,
@@ -752,11 +841,8 @@ mod tests {
     fn derive_reports_pow_budget_exceeded() {
         const TIGHT_MAX_POW: u32 = 5;
         let spec = SecuritySpec {
-            mode: Mode::ZeroKnowledge,
-            decoding_regime: DecodingRegime::Johnson,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
             pow_budget: PowBudget::per_slot(TIGHT_MAX_POW),
-            hash_id: hash::BLAKE3,
+            ..test_spec(Mode::ZeroKnowledge)
         };
         let err = ProtocolConfig::<TestEmbedding>::derive(
             spec,
@@ -775,11 +861,8 @@ mod tests {
     #[test]
     fn derive_threads_unique_decoding_standard() {
         let spec = SecuritySpec {
-            mode: Mode::Standard,
             decoding_regime: DecodingRegime::Unique,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
+            ..test_spec(Mode::Standard)
         };
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
@@ -794,11 +877,8 @@ mod tests {
     #[test]
     fn derive_threads_unique_decoding_zk() {
         let spec = SecuritySpec {
-            mode: Mode::ZeroKnowledge,
             decoding_regime: DecodingRegime::Unique,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
+            ..test_spec(Mode::ZeroKnowledge)
         };
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
@@ -815,11 +895,8 @@ mod tests {
     #[test]
     fn derive_multi_round_unique_decoding_succeeds() {
         let spec = SecuritySpec {
-            mode: Mode::Standard,
             decoding_regime: DecodingRegime::Unique,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
+            ..test_spec(Mode::Standard)
         };
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
@@ -841,11 +918,8 @@ mod tests {
     #[test]
     fn derive_multi_round_unique_decoding_zk_succeeds() {
         let spec = SecuritySpec {
-            mode: Mode::ZeroKnowledge,
             decoding_regime: DecodingRegime::Unique,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
+            ..test_spec(Mode::ZeroKnowledge)
         };
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
@@ -867,11 +941,8 @@ mod tests {
     #[test]
     fn derive_multi_round_capacity_decoding_succeeds() {
         let spec = SecuritySpec {
-            mode: Mode::Standard,
             decoding_regime: DecodingRegime::Capacity,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
+            ..test_spec(Mode::Standard)
         };
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,
@@ -889,11 +960,8 @@ mod tests {
     #[test]
     fn derive_multi_round_capacity_decoding_zk_succeeds() {
         let spec = SecuritySpec {
-            mode: Mode::ZeroKnowledge,
             decoding_regime: DecodingRegime::Capacity,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
+            ..test_spec(Mode::ZeroKnowledge)
         };
         let plan = ProtocolConfig::<TestEmbedding>::derive(
             spec,

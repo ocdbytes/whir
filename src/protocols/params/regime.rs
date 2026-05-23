@@ -12,7 +12,6 @@
 //!   (`O(n/η^5)`, m=10 at canonical slack) over BCIKS '20.
 //! - Capacity bound follows STIR Conjecture 5.6: `(1 − ρ − η, d/(ρ·η))`-list
 //!   decodability for RS codes.
-//! - Aligned with the Plonky3 `SecurityAssumption` parametrization.
 
 use std::f64::consts::LOG2_10;
 
@@ -99,10 +98,9 @@ impl DecodingRegimeParams {
     /// Bits of security delivered by `ood_samples` OOD challenges on a code
     /// of given `log_degree` and `log_inv_rate` at MCA arity 2.
     ///
-    /// Mirrors Plonky3's `ood_error` / STIR Lemma 4.5: the error is
-    /// `(L choose 2) · ((d − 1)/|F|)^{ood_samples}`, giving security
-    /// `ood · (|F| − log d) − 2·log|Λ| + 1` bits. Returns `0` under
-    /// `Unique` — OOD contributes no soundness when `|Λ| = 1`.
+    /// STIR Lemma 4.5: the error is `(L choose 2) · ((d − 1)/|F|)^{ood_samples}`,
+    /// giving security `ood · (|F| − log d) − 2·log|Λ| + 1` bits. Returns `0`
+    /// under `Unique` — OOD contributes no soundness when `|Λ| = 1`.
     pub fn ood_security_bits(
         self,
         log_degree: f64,
@@ -304,8 +302,8 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// `ood_security_bits` mirrors Plonky3 `ood_error`:
-    /// `t · (|F| − log d) − 2·log|Λ| + 1`. Returns 0 under Unique.
+    /// `ood_security_bits = t · (|F| − log d) − 2·log|Λ| + 1`. Returns 0
+    /// under Unique.
     #[test]
     fn ood_security_bits_formula() {
         const LOG_DEGREE: f64 = 6.0;
@@ -322,8 +320,6 @@ mod tests {
         );
         assert_close(unique, 0.0);
 
-        // Johnson at canonical slack: list_size matches the formula in
-        // `list_size_log2_johnson_formula`.
         let slack = 2_f64.powf(-LOG_INV_RATE).sqrt() / 20.0;
         let got = johnson(slack).ood_security_bits(LOG_DEGREE, LOG_INV_RATE, FIELD_BITS, OOD);
         let log_list = johnson(slack).list_size_log2(LOG_DEGREE, LOG_INV_RATE);
