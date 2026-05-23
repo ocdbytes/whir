@@ -5,6 +5,14 @@
 //! a user choice). The data-carrying [`DecodingRegimeParams`] is what gets
 //! stored on per-round configs once a rate is known: [`Self::from_policy`]
 //! is the single materialization point.
+//!
+//! # References
+//!
+//! - Johnson proximity-gap error follows the BCSS25 improvement
+//!   (`O(n/η^5)`, m=10 at canonical slack) over BCIKS '20.
+//! - Capacity bound follows STIR Conjecture 5.6: `(1 − ρ − η, d/(ρ·η))`-list
+//!   decodability for RS codes.
+//! - Aligned with the Plonky3 `SecurityAssumption` parametrization.
 
 use std::f64::consts::LOG2_10;
 
@@ -16,26 +24,27 @@ use crate::protocols::params::{
     spec::DecodingRegime,
 };
 
-/// Materialized decoding-regime parameters.
+/// Materialized decoding-regime parameters at a known rate.
 ///
-/// `Unique` carries no data; `Johnson { slack }` carries `η`. The two variants
-/// are statically distinct — there is no "Johnson with η = 0" representation,
-/// so callers can pattern-match without a sentinel-comparison branch.
+/// `Unique` carries no data; `Johnson` and `Capacity` each carry the slack `η`
+/// from their respective proximity boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DecodingRegimeParams {
     Unique,
     Johnson { slack: OrderedFloat<f64> },
+    Capacity { slack: OrderedFloat<f64> },
 }
 
 impl DecodingRegimeParams {
-    /// Materialize spec policy at a known rate. The canonical Johnson slack
-    /// (`η = √ρ / 20`) is centralized here — any tuning of `η` lives at this
-    /// site and propagates to every per-round config.
+    /// Materialize spec policy at a known rate. Canonical slacks (`√ρ/20` for
+    /// Johnson, `ρ/20` for Capacity) live here — any tuning of `η` propagates
+    /// to every per-round config through this single site.
     // TODO: Optimize picking η.
     pub fn from_policy(policy: DecodingRegime, rate: f64) -> Self {
         match policy {
             DecodingRegime::Unique => Self::Unique,
             DecodingRegime::Johnson => Self::johnson_canonical(rate),
+            DecodingRegime::Capacity => Self::capacity_canonical(rate),
         }
     }
 
@@ -46,22 +55,35 @@ impl DecodingRegimeParams {
         }
     }
 
+    /// Capacity regime with the canonical `η = ρ / 20` slack.
+    pub fn capacity_canonical(rate: f64) -> Self {
+        Self::Capacity {
+            slack: OrderedFloat(rate / 20.0),
+        }
+    }
+
     pub const fn is_unique(self) -> bool {
         matches!(self, Self::Unique)
     }
 
     /// `log₂ |Λ(C, δ)|`.
-    pub fn list_size_log2(self, log_inv_rate: f64) -> f64 {
+    ///
+    /// `log_degree` is `log₂` of the code's message length; it's only read in
+    /// the `Capacity` branch (STIR Conj 5.6 gives `|Λ| = d/(ρ·η)`). Johnson
+    /// and Unique ignore it.
+    pub fn list_size_log2(self, log_degree: f64, log_inv_rate: f64) -> f64 {
         match self {
             Self::Unique => 0.0,
             // Johnson: |Λ| = 1 / (2 η √ρ).
             Self::Johnson { slack } => -1.0 - slack.into_inner().log2() + 0.5 * log_inv_rate,
+            // Capacity (STIR Conj 5.6): |Λ| = d / (ρ · η).
+            Self::Capacity { slack } => log_degree + log_inv_rate - slack.into_inner().log2(),
         }
     }
 
     /// `|Λ(C, δ)|`.
-    pub fn list_size(self, log_inv_rate: f64) -> f64 {
-        2_f64.powf(self.list_size_log2(log_inv_rate))
+    pub fn list_size(self, log_degree: f64, log_inv_rate: f64) -> f64 {
+        2_f64.powf(self.list_size_log2(log_degree, log_inv_rate))
     }
 
     /// `log₂(1 − δ)`.
@@ -69,11 +91,22 @@ impl DecodingRegimeParams {
         let one_minus_delta = match self {
             Self::Unique => f64::midpoint(1.0, rate(log_inv_rate)),
             Self::Johnson { slack } => rate(log_inv_rate).sqrt() + slack.into_inner(),
+            Self::Capacity { slack } => rate(log_inv_rate) + slack.into_inner(),
         };
         one_minus_delta.log2()
     }
 
-    /// `log₂ ε_mca(C, δ)`.
+    /// `log₂ ε_mca(C, δ)` for the per-step proximity-gaps error (bare, no
+    /// arity factor — callers apply their own).
+    ///
+    /// - Unique: `(k − 1) / |F|`, log = `log k − |F|` (with `+ log ρ⁻¹` to
+    ///   pick up the `n/|F|` factor).
+    /// - Johnson: BCSS25 Theorem 1.5 at canonical `η = √ρ/20`, `m = 10`:
+    ///   `ε ≈ (2·10.5⁵/3) · n · ρ^{−3/2} / |F|`.
+    /// - Capacity: STIR Conj 5.6, `ε ≈ d / (η · ρ²) / |F|`.
+    ///
+    /// The formula expressions hardcode the canonical slack; debug-asserts
+    /// catch a non-canonical `slack` that would invalidate the constants.
     pub fn eps_mca_log2(self, log_inv_rate: f64, message_length: usize, field_bits: f64) -> f64 {
         let log_k = usize_to_f64(message_length).log2();
         let error = match self {
@@ -82,24 +115,31 @@ impl DecodingRegimeParams {
                 debug_assert!(
                     slack.into_inner().log2() >= -(0.5 * log_inv_rate + LOG2_10 + 1.0) - 1e-6
                 );
-                7.0 * LOG2_10 + 3.5 * log_inv_rate + 2.0 * log_k
+                // BCSS25 with m = 10: log_2(2·10.5⁵/3) + log n + 1.5·log ρ⁻¹.
+                let bcss25_const = (2.0 * 10.5_f64.powi(5) / 3.0).log2();
+                bcss25_const + log_k + 2.5 * log_inv_rate
+            }
+            Self::Capacity { slack } => {
+                debug_assert!(slack.into_inner().log2() >= -(log_inv_rate + LOG2_10 + 1.0) - 1e-6);
+                // d / (η · ρ²) at canonical η = ρ/20: log d + log 20 + 3·log ρ⁻¹.
+                log_k + 3.0 * log_inv_rate + LOG2_10 + 1.0
             }
         };
         error - field_bits
     }
 }
 
-/// Johnson list size at the canonical `η = √ρ / 20` slack, as a function of
-/// `log_inv_rate` only. Used by planners that need a list-size estimate before
-/// a target config exists.
+/// `|Λ|` at the given degree + rate under `regime`. Used before an IRS config
+/// exists.
 ///
-/// Equals `IrsConfig::list_size()` exactly when the IRS has pow2 `vector_size`,
-/// `interleaving_depth = 1`, integer `log_inv_rate`, and lives on a 2-adic NTT
-/// field — the conditions `solve_mask_code` enforces for C_zk. Outside that
-/// regime, `ntt::next_order` may shift the effective rate and the helper
-/// underestimates.
-pub fn johnson_list_size(log_inv_rate: f64) -> f64 {
-    DecodingRegimeParams::johnson_canonical(rate(log_inv_rate)).list_size(log_inv_rate)
+/// Matches `IrsConfig::list_size()` when the IRS is built under the same
+/// regime, with the same `masked_message_length`, and `ntt::next_order`
+/// doesn't pad the codeword (pow2 `vector_size`, `interleaving_depth = 1`,
+/// integer `log_inv_rate`, 2-adic field — the conditions `solve_mask_code`
+/// enforces for C_zk).
+pub fn list_size_estimate(regime: DecodingRegime, log_degree: f64, log_inv_rate: f64) -> f64 {
+    DecodingRegimeParams::from_policy(regime, rate(log_inv_rate))
+        .list_size(log_degree, log_inv_rate)
 }
 
 #[cfg(test)]
@@ -117,27 +157,43 @@ mod tests {
         }
     }
 
+    fn capacity(slack: f64) -> DecodingRegimeParams {
+        DecodingRegimeParams::Capacity {
+            slack: OrderedFloat(slack),
+        }
+    }
+
     /// Johnson list size: `|Λ| = 1 / (2η√ρ)`, log₂ form. Hand-evaluated at
     /// `log_inv_rate = 2`, `η = 0.1`: `−1 − log₂(0.1) + 1 ≈ 3.3219`.
+    /// `log_degree` is ignored by the Johnson branch.
     #[test]
     fn list_size_log2_johnson_formula() {
-        let got = johnson(0.1).list_size_log2(2.0);
+        let got = johnson(0.1).list_size_log2(/* log_degree */ 4.0, 2.0);
         let expected = -1.0 - 0.1_f64.log2() + 0.5 * 2.0;
+        assert_close(got, expected);
+    }
+
+    /// Capacity list size: `|Λ| = d / (ρ · η)`, log₂ form. At `log_degree = 4`,
+    /// `log_inv_rate = 2`, `η = 1/8`: `4 + 2 − log₂(1/8) = 4 + 2 + 3 = 9`.
+    #[test]
+    fn list_size_log2_capacity_formula() {
+        let got = capacity(0.125).list_size_log2(4.0, 2.0);
+        let expected = 4.0 + 2.0 - 0.125_f64.log2();
         assert_close(got, expected);
     }
 
     /// Unique-decoding regime gives `|Λ| = 1`, i.e. log = 0.
     #[test]
     fn list_size_log2_unique_decoding_is_zero() {
-        assert_close(DecodingRegimeParams::Unique.list_size_log2(2.0), 0.0);
+        assert_close(DecodingRegimeParams::Unique.list_size_log2(4.0, 2.0), 0.0);
     }
 
     /// `η = √ρ / 20` substituted into `|Λ| = 1/(2η√ρ)` simplifies to `10/ρ`.
-    /// So `johnson_list_size(b) = 10 · 2^b`.
+    /// So `list_size_estimate(Johnson, _, b) = 10 · 2^b`.
     #[test]
     fn johnson_list_size_closed_form() {
         for b in [1.0, 2.0, 3.0, 5.0] {
-            let got = johnson_list_size(b);
+            let got = list_size_estimate(DecodingRegime::Johnson, /* log_degree */ 4.0, b);
             let expected = 10.0 * 2_f64.powf(b);
             assert!(
                 (got - expected).abs() / expected < TIGHT_EPS,
@@ -146,9 +202,22 @@ mod tests {
         }
     }
 
-    /// `johnson_list_size(b)` must match `Config::list_size` once a config is
-    /// built at the same rate. Keeps the rate-only helper in sync with
-    /// `irs_commit::Config::new`'s canonical-slack materialization.
+    /// `η = ρ / 20` substituted into `|Λ| = d/(ρ · η)` simplifies to `20 · d / ρ²`.
+    #[test]
+    fn capacity_list_size_closed_form() {
+        for (log_d, b) in [(4.0, 1.0), (6.0, 2.0), (8.0, 3.0)] {
+            let got = list_size_estimate(DecodingRegime::Capacity, log_d, b);
+            let expected = 20.0 * 2_f64.powf(log_d) * 2_f64.powf(2.0 * b);
+            assert!(
+                (got - expected).abs() / expected < TIGHT_EPS,
+                "log_d={log_d}, log_inv_rate={b}: got {got} vs {expected}",
+            );
+        }
+    }
+
+    /// `list_size_estimate(Johnson, _, b)` must match `Config::list_size` once
+    /// a config is built at the same rate. Keeps the rate-only helper in sync
+    /// with `irs_commit::Config::new`'s canonical-slack materialization.
     #[test]
     fn johnson_list_size_matches_config_list_size() {
         use crate::{
@@ -172,7 +241,8 @@ mod tests {
             2_f64.powf(-f64::from(LOG_INV_RATE)),
             IrsMode::Standard,
         );
-        let got = johnson_list_size(f64::from(LOG_INV_RATE));
+        let log_degree = (config.masked_message_length() as f64).log2();
+        let got = list_size_estimate(DecodingRegime::Johnson, log_degree, f64::from(LOG_INV_RATE));
         let expected = config.list_size();
         assert!(
             (got - expected).abs() / expected < TIGHT_EPS,
@@ -201,6 +271,17 @@ mod tests {
         assert_close(got, expected);
     }
 
+    /// `1 − δ` in Capacity regime: `ρ + η`.
+    #[test]
+    fn one_minus_distance_log2_capacity() {
+        let log_inv_rate = 2.0;
+        let eta = 0.05;
+        let got = capacity(eta).one_minus_distance_log2(log_inv_rate);
+        let rho = 2_f64.powf(-log_inv_rate);
+        let expected = (rho + eta).log2();
+        assert_close(got, expected);
+    }
+
     /// MCA fixture — `message_length = 16 = 2^4` and `log_inv_rate = 2` give
     /// exact `log2(k) = 4`. `field_bits = 64.0` for Field64.
     const MCA_MESSAGE_LENGTH: usize = 16;
@@ -219,25 +300,41 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// MCA error, Johnson branch: `7·log₂10 + 3.5·log_inv_rate + 2·log k − field_bits`.
+    /// MCA error, Johnson (BCSS25): `log₂(2·10.5⁵/3) + log k + 2.5·log_inv_rate − field_bits`.
     #[test]
     fn eps_mca_log2_johnson_formula() {
-        // `η = 0.1` stays within the debug assertion's slack range.
-        const JOHNSON_SLACK: f64 = 0.1;
+        // `η = √ρ/20 ≈ 0.025` at `log_inv_rate = 2`. Use the canonical slack
+        // so the debug-assert in the formula is satisfied.
+        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE).sqrt() / 20.0;
 
-        let got = johnson(JOHNSON_SLACK).eps_mca_log2(
+        let got = johnson(canonical_slack).eps_mca_log2(
             MCA_LOG_INV_RATE,
             MCA_MESSAGE_LENGTH,
             MCA_FIELD_BITS,
         );
-        let expected =
-            7.0 * LOG2_10 + 3.5 * MCA_LOG_INV_RATE + 2.0 * (MCA_MESSAGE_LENGTH as f64).log2()
-                - MCA_FIELD_BITS;
+        let bcss25_const = (2.0 * 10.5_f64.powi(5) / 3.0).log2();
+        let expected = bcss25_const + (MCA_MESSAGE_LENGTH as f64).log2() + 2.5 * MCA_LOG_INV_RATE
+            - MCA_FIELD_BITS;
         assert_close(got, expected);
     }
 
-    /// `from_policy(Unique, _)` ignores rate; `from_policy(Johnson, rate)`
-    /// produces the same materialization as `johnson_canonical(rate)`.
+    /// MCA error, Capacity (STIR Conj 5.6 at canonical η):
+    /// `log k + 3·log_inv_rate + log₂10 + 1 − field_bits`.
+    #[test]
+    fn eps_mca_log2_capacity_formula() {
+        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE) / 20.0;
+
+        let got = capacity(canonical_slack).eps_mca_log2(
+            MCA_LOG_INV_RATE,
+            MCA_MESSAGE_LENGTH,
+            MCA_FIELD_BITS,
+        );
+        let expected = (MCA_MESSAGE_LENGTH as f64).log2() + 3.0 * MCA_LOG_INV_RATE + LOG2_10 + 1.0
+            - MCA_FIELD_BITS;
+        assert_close(got, expected);
+    }
+
+    /// `from_policy` dispatches to the canonical constructor for each regime.
     #[test]
     fn from_policy_matches_canonical() {
         assert_eq!(
@@ -247,6 +344,10 @@ mod tests {
         assert_eq!(
             DecodingRegimeParams::from_policy(DecodingRegime::Johnson, 0.25),
             DecodingRegimeParams::johnson_canonical(0.25),
+        );
+        assert_eq!(
+            DecodingRegimeParams::from_policy(DecodingRegime::Capacity, 0.25),
+            DecodingRegimeParams::capacity_canonical(0.25),
         );
     }
 }

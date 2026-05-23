@@ -16,10 +16,10 @@ use crate::{
             error::{DeriveError, FixedPointLoop, Pow},
             irs_commit as irs_solver, mask_proximity as mask_proximity_solver,
             protocol_config::{MaskOracleConfig, ProtocolConfig, RoundConfig, RoundMode},
-            regime::johnson_list_size,
+            regime::list_size_estimate,
             spec::{
-                DecodingRegime, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
-                RoundContext, SecuritySpec, TuningSpec, ZkSpec,
+                LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec,
+                TuningSpec, ZkSpec,
             },
             sumcheck as sumcheck_solver,
         },
@@ -147,19 +147,23 @@ fn build_zk_round_config<M: Embedding + Default>(
     let spec = zk_spec.as_inner();
     let ctx = round_context(shape);
     let num_masks = sumcheck_solver::masks_required(&ctx) + code_switch_solver::masks_required();
-    // C_zk.list_size depends only on rate — no IRS build needed for it.
-    let c_zk_list_size = johnson_list_size(f64::from(c_zk_log_inv_rate.get()));
+    let c_zk_log_inv_rate_f = f64::from(c_zk_log_inv_rate.get());
 
     let src_ctx = round_context(shape);
     let target_log_inv_rate =
         f64::from(shape.source_log_inv_rate + shape.source_folding_factor.saturating_sub(1));
-    let target_list_size = johnson_list_size(target_log_inv_rate);
+    // Target encodes one polynomial of length `source.message_length()` =
+    // `source_vector_size / 2^source_folding_factor`.
+    let target_log_degree =
+        f64::from(shape.source_vector_size.trailing_zeros() - shape.source_folding_factor);
+    let target_list_size =
+        list_size_estimate(spec.decoding_regime, target_log_degree, target_log_inv_rate);
 
     let (source, t_ood) = solve_t_ood::<M>(
         spec,
         &src_ctx,
         target_list_size,
-        Some(c_zk_list_size),
+        Some(c_zk_log_inv_rate_f),
         shape.round_index,
     )?;
     let target: IrsConfig<Identity<M::Target>> = irs_solver::solve(
@@ -176,12 +180,18 @@ fn build_zk_round_config<M: Embedding + Default>(
         c_zk_log_inv_rate,
         2 * num_masks,
     );
+    let c_zk_list_size_estimate = list_size_estimate(
+        spec.decoding_regime,
+        (l_zk.get() as f64).log2(),
+        c_zk_log_inv_rate_f,
+    );
     debug_assert!(
-        (c_zk.list_size() - c_zk_list_size).abs() < 1e-9 * c_zk_list_size.max(1.0),
-        "c_zk.list_size() {} drifted from rate-only planner estimate {} — \
-         see `johnson_list_size` for the invariant",
+        (c_zk.list_size() - c_zk_list_size_estimate).abs()
+            < 1e-9 * c_zk_list_size_estimate.max(1.0),
+        "c_zk.list_size() {} drifted from planner estimate {} — \
+         see `list_size_estimate` for the invariant",
         c_zk.list_size(),
-        c_zk_list_size,
+        c_zk_list_size_estimate,
     );
     let mask_proximity =
         mask_proximity_solver::solve(spec, c_zk.clone(), num_masks, shape.round_index)?;
@@ -217,7 +227,10 @@ fn build_round_config<M: Embedding + Default>(
     let src_ctx = round_context(shape);
     let target_log_inv_rate =
         f64::from(shape.source_log_inv_rate + shape.source_folding_factor.saturating_sub(1));
-    let target_list_size = johnson_list_size(target_log_inv_rate);
+    let target_log_degree =
+        f64::from(shape.source_vector_size.trailing_zeros() - shape.source_folding_factor);
+    let target_list_size =
+        list_size_estimate(spec.decoding_regime, target_log_degree, target_log_inv_rate);
 
     let (source, t_ood) =
         solve_t_ood::<M>(spec, &src_ctx, target_list_size, None, shape.round_index)?;
@@ -255,8 +268,9 @@ pub(super) const fn compute_l_zk<M: Embedding>(
 /// with `ℓ_zk = next_pow2(source.mask_length() + t_ood)`. Standard:
 /// `degree = ℓ`.
 ///
-/// `Johnson` is forced even under `DecodingRegime::Unique` — Construction 9.7
-/// requires `t_ood ≥ 1` regardless of the decoding regime in `spec`.
+/// Floored at `1`: Lemma 9.9's OOD term vanishes under `Unique` decoding
+/// (`|Λ| = 1`), but Construction 9.7's code-switch still needs at least one
+/// OOD point to bind the witness polynomial.
 pub(super) fn compute_t_ood<M: Embedding>(
     spec: &SecuritySpec,
     source: &IrsConfig<M>,
@@ -276,40 +290,51 @@ pub(super) fn compute_t_ood<M: Embedding>(
         message_length
     };
 
-    irs_commit::num_ood_samples(
-        DecodingRegime::Johnson,
+    let soundness_t_ood = irs_commit::num_ood_samples(
+        spec.decoding_regime,
         security_target,
         field_bits,
         combined_list_size,
         degree,
-    )
+    );
+    soundness_t_ood.max(1)
 }
 
 /// Solves the per-round `t_ood` fixed-point and the source IRS together.
 ///
 /// Convergence: `Φ(t) = num_ood_samples(ℓ + next_pow2(in_domain + 2·t))` is
 /// monotone non-decreasing on ℕ (`in_domain` depends only on the requested
-/// rate; `next_pow2` and `num_ood_samples` are monotone) and bounded above,
-/// so Kleene iteration from `t = 0` converges to the least fixed point in
-/// finitely many steps. Standard mode (`c_zk_list_size = None`) has `Φ`
-/// constant in `t`, so one application suffices.
+/// rate; `next_pow2` and `num_ood_samples` are monotone; under `Capacity` the
+/// `c_zk_list_size(t)` factor is monotone too) and bounded above, so Kleene
+/// iteration from `t = 0` converges to the least fixed point in finitely many
+/// steps. Standard mode (`c_zk_log_inv_rate = None`) has `Φ` constant in
+/// `t`, so one application suffices.
 pub(super) fn solve_t_ood<M: Embedding + Default>(
     spec: &SecuritySpec,
     src_ctx: &RoundContext,
     target_list_size: f64,
-    c_zk_list_size: Option<f64>,
+    c_zk_log_inv_rate: Option<f64>,
     round_index: usize,
 ) -> Result<(IrsConfig<M>, usize), DeriveError> {
     let mut source: IrsConfig<M> = irs_solver::solve(spec, src_ctx, OodSampleBudget::ZERO);
 
-    if c_zk_list_size.is_none() {
+    let Some(c_zk_log_inv_rate) = c_zk_log_inv_rate else {
         let t_ood = compute_t_ood(spec, &source, target_list_size, None, 0);
         return Ok((source, t_ood));
-    }
+    };
 
     let mut t_ood = 0;
     for _ in 0..T_OOD_MAX_ITER {
-        let new_t_ood = compute_t_ood(spec, &source, target_list_size, c_zk_list_size, t_ood);
+        // Under `Capacity`, c_zk's list size depends on its message length
+        // ℓ_zk(t), so recompute per iteration. Under `Johnson`/`Unique` the
+        // result is t-independent — the recomputation is a no-op.
+        let l_zk = (source.mask_length() + t_ood).next_power_of_two();
+        let c_zk_list_size = list_size_estimate(
+            spec.decoding_regime,
+            (l_zk as f64).log2(),
+            c_zk_log_inv_rate,
+        );
+        let new_t_ood = compute_t_ood(spec, &source, target_list_size, Some(c_zk_list_size), t_ood);
         if new_t_ood == t_ood {
             return Ok((source, t_ood));
         }
@@ -780,8 +805,7 @@ mod tests {
         assert!(plan.basecase().commit.unique_decoding());
     }
 
-    /// Same threading check under ZK mode. Basecase-only avoids the per-round
-    /// code-switch (which requires `t_ood ≥ 1`).
+    /// Same threading check under ZK mode (basecase-only fixture).
     #[test]
     fn derive_threads_unique_decoding_zk() {
         let spec = SecuritySpec {
@@ -798,6 +822,104 @@ mod tests {
         .unwrap();
         assert!(plan.rounds().is_empty());
         assert!(plan.basecase().commit.unique_decoding());
+    }
+
+    /// Multi-round derivation under Unique: every round's IRS carries the
+    /// Unique regime and every code-switch slot satisfies the Construction
+    /// 9.7 `t_ood ≥ 1` floor.
+    #[test]
+    fn derive_multi_round_unique_decoding_succeeds() {
+        let spec = SecuritySpec {
+            mode: Mode::Standard,
+            decoding_regime: DecodingRegime::Unique,
+            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
+            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
+            hash_id: hash::BLAKE3,
+        };
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        assert!(!plan.rounds().is_empty(), "expected multi-round plan");
+        for r in plan.rounds() {
+            let cs = r.code_switch();
+            assert!(cs.source.unique_decoding());
+            assert!(cs.target.unique_decoding());
+            assert!(cs.out_domain_samples >= 1, "Construction 9.7 floor");
+        }
+        assert!(plan.basecase().commit.unique_decoding());
+    }
+
+    /// ZK + Unique multi-round: per-round mask oracle still assembled, C_zk
+    /// built under Unique, code-switch carries `t_ood ≥ 1` per floor.
+    #[test]
+    fn derive_multi_round_unique_decoding_zk_succeeds() {
+        let spec = SecuritySpec {
+            mode: Mode::ZeroKnowledge,
+            decoding_regime: DecodingRegime::Unique,
+            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
+            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
+            hash_id: hash::BLAKE3,
+        };
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        assert!(!plan.rounds().is_empty(), "expected multi-round plan");
+        for r in plan.rounds() {
+            let mo = r.mask_oracle().expect("ZK round must own a mask oracle");
+            assert!(mo.c_zk().unique_decoding());
+            assert!(r.code_switch().source.unique_decoding());
+            assert!(r.code_switch().out_domain_samples >= 1);
+        }
+        assert!(plan.basecase().commit.unique_decoding());
+    }
+
+    /// Multi-round Capacity (Standard): IRS configs carry the Capacity regime
+    /// and the `c_zk_list_size(t)` fixed-point resolves inside `solve_t_ood`.
+    #[test]
+    fn derive_multi_round_capacity_decoding_succeeds() {
+        let spec = SecuritySpec {
+            mode: Mode::Standard,
+            decoding_regime: DecodingRegime::Capacity,
+            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
+            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
+            hash_id: hash::BLAKE3,
+        };
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        assert!(!plan.rounds().is_empty(), "expected multi-round plan");
+        for r in plan.rounds() {
+            assert!(r.code_switch().out_domain_samples >= 1);
+        }
+    }
+
+    /// ZK + Capacity multi-round: exercises the degree-dependent c_zk list
+    /// size inside the t_ood fixed-point.
+    #[test]
+    fn derive_multi_round_capacity_decoding_zk_succeeds() {
+        let spec = SecuritySpec {
+            mode: Mode::ZeroKnowledge,
+            decoding_regime: DecodingRegime::Capacity,
+            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
+            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
+            hash_id: hash::BLAKE3,
+        };
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        assert!(!plan.rounds().is_empty(), "expected multi-round plan");
+        for r in plan.rounds() {
+            r.mask_oracle().expect("ZK round must own a mask oracle");
+            assert!(r.code_switch().out_domain_samples >= 1);
+        }
     }
 
     /// `analytic_error + pow ≥ target` for every PoW slot in the plan.

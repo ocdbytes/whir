@@ -187,21 +187,22 @@ impl Deref for ZkSpec<'_> {
 
 /// Reed–Solomon decoding regime selection.
 ///
-/// Picks the proximity radius `δ` and slack policy used by the IRS and
-/// downstream sub-protocols. `Johnson` uses the codebase's slack policy
-/// `η = √ρ / 20`; the list-decoding ball can hold `~10/ρ` codewords.
-/// `Unique` operates strictly inside the unique-decoding radius `(1 − ρ)/2`;
-/// the ball holds at most one.
+/// - `Unique`: `δ < (1 − ρ)/2`, list size 1, no conjectures.
+/// - `Johnson`: `δ < 1 − √ρ − η`, canonical `η = √ρ/20`. Proximity-gap error
+///   per the BCSS25 improvement to BCIKS '20.
+/// - `Capacity`: `δ < 1 − ρ − η`, canonical `η = ρ/20`. Conjectured list size
+///   `d/(ρ·η)` and proximity-gap error per STIR Conjecture 5.6.
 ///
 /// WHIR's rate stepping (each round bumps `log_inv_rate` by
 /// `folding_factor − 1`) pushes ρ → 1, shrinking the unique-decoding
 /// radius. At high security targets or deep folding, `Unique` may exceed
 /// the grind cap on per-round PoW and [`super::derive::ProtocolConfig::derive`]
-/// will return `PowUngrindable`. Pick `Johnson` for those cases.
+/// will return `PowUngrindable` — pick `Johnson` or `Capacity` for those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DecodingRegime {
     Unique,
     Johnson,
+    Capacity,
 }
 
 impl Display for DecodingRegime {
@@ -209,6 +210,7 @@ impl Display for DecodingRegime {
         match self {
             Self::Unique => f.write_str("Unique"),
             Self::Johnson => f.write_str("Johnson"),
+            Self::Capacity => f.write_str("Capacity"),
         }
     }
 }
@@ -220,8 +222,9 @@ impl FromStr for DecodingRegime {
         match s {
             "Unique" => Ok(Self::Unique),
             "Johnson" => Ok(Self::Johnson),
+            "Capacity" => Ok(Self::Capacity),
             _ => Err(format!(
-                "invalid decoding regime: {s}, options are: Unique, Johnson"
+                "invalid decoding regime: {s}, options are: Unique, Johnson, Capacity"
             )),
         }
     }
@@ -233,7 +236,11 @@ mod decoding_regime_tests {
 
     #[test]
     fn from_str_round_trips_display() {
-        for r in [DecodingRegime::Unique, DecodingRegime::Johnson] {
+        for r in [
+            DecodingRegime::Unique,
+            DecodingRegime::Johnson,
+            DecodingRegime::Capacity,
+        ] {
             assert_eq!(r.to_string().parse::<DecodingRegime>().unwrap(), r);
         }
     }
@@ -242,7 +249,7 @@ mod decoding_regime_tests {
     fn from_str_rejects_unknown() {
         assert!("johnson".parse::<DecodingRegime>().is_err()); // case-sensitive
         assert!("".parse::<DecodingRegime>().is_err());
-        assert!("Capacity".parse::<DecodingRegime>().is_err());
+        assert!("capacity".parse::<DecodingRegime>().is_err());
     }
 }
 

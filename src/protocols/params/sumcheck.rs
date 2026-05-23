@@ -104,9 +104,9 @@ mod tests {
         irs_commit as irs_solver,
         spec::{ListSize, MaskCodeMessageLen, Mode, OodSampleBudget},
         test_utils::{
-            arb_round_ctx, arb_standard_johnson_spec, arb_zk_spec, assert_close,
-            assert_pow_closes_gap, build_minimal_mask_oracle, deterministic_spec, TestEmbedding,
-            TestField, TestNonIdentityEmbedding, EPS, TEST_TARGET_RANGE,
+            arb_round_ctx, arb_standard_spec, arb_zk_spec, assert_close, assert_pow_closes_gap,
+            build_minimal_mask_oracle, deterministic_spec, TestEmbedding, TestField,
+            TestNonIdentityEmbedding, EPS, TEST_TARGET_RANGE,
         },
     };
 
@@ -220,7 +220,7 @@ mod tests {
     proptest! {
         #[test]
         fn standard_mode_propagates(
-            spec in arb_standard_johnson_spec(TEST_TARGET_RANGE),
+            spec in arb_standard_spec(TEST_TARGET_RANGE),
             ctx in arb_round_ctx(),
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
@@ -232,7 +232,7 @@ mod tests {
         #[test]
         fn num_rounds_matches_folding_factor(
             spec in prop_oneof![
-                arb_standard_johnson_spec(TEST_TARGET_RANGE),
+                arb_standard_spec(TEST_TARGET_RANGE),
                 arb_zk_spec(TEST_TARGET_RANGE),
             ],
             ctx in arb_round_ctx(),
@@ -264,7 +264,7 @@ mod tests {
         #[test]
         fn round_pow_closes_gap_to_target(
             spec in prop_oneof![
-                arb_standard_johnson_spec(TEST_TARGET_RANGE),
+                arb_standard_spec(TEST_TARGET_RANGE),
                 arb_zk_spec(TEST_TARGET_RANGE),
             ],
             ctx in arb_round_ctx(),

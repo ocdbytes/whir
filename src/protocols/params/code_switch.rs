@@ -122,14 +122,14 @@ mod tests {
     use crate::protocols::params::{
         derive::{compute_l_zk, compute_t_ood},
         irs_commit as irs_solver,
-        regime::johnson_list_size,
+        regime::list_size_estimate,
         spec::{
             DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
             PowBudget, RoundContext, SecuritySpec, ZkSpec,
         },
         test_utils::{
-            arb_standard_johnson_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec,
-            assert_close, assert_pow_closes_gap, build_round_io, deterministic_spec, TestEmbedding,
+            arb_standard_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec, assert_close,
+            assert_pow_closes_gap, build_round_io, deterministic_spec, TestEmbedding,
             TestExtensionField, TestField, TestNonIdentityEmbedding, TEST_TARGET_RANGE,
         },
     };
@@ -140,7 +140,7 @@ mod tests {
         utils_zk_spec(TEST_TARGET_RANGE)
     }
 
-    fn arb_standard_johnson_spec() -> impl Strategy<Value = SecuritySpec> {
+    fn arb_standard_spec() -> impl Strategy<Value = SecuritySpec> {
         utils_standard_spec(TEST_TARGET_RANGE)
     }
 
@@ -210,7 +210,7 @@ mod tests {
             FORMULA_LOG_INV_RATE,
             FORMULA_FOLDING_FACTOR,
             FORMULA_NUM_VARS,
-            Some(C_ZK_LIST_SIZE),
+            Some(FORMULA_LOG_INV_RATE),
         );
         let got = f64::from(analytic_error_bits(
             &source,
@@ -280,7 +280,7 @@ mod tests {
     proptest! {
         #[test]
         fn solve_standard_assembles(
-            spec in arb_standard_johnson_spec(),
+            spec in arb_standard_spec(),
             (log_inv_rate, folding_factor, num_vars) in arb_dims(),
         ) {
             let (source, target, t_ood) =
@@ -296,30 +296,12 @@ mod tests {
             spec in arb_zk_spec(),
             (log_inv_rate, folding_factor, num_vars) in arb_dims(),
         ) {
-            // Break the t_ood ↔ c_zk.list_size cycle with a placeholder C_zk.
-            let placeholder_source_ctx = RoundContext {
-                vector_size: 1usize << num_vars,
-                log_inv_rate,
-                folding_factor,
-            };
-            let placeholder_source = irs_solver::solve::<M>(
-                &spec,
-                &placeholder_source_ctx,
-                OodSampleBudget::ZERO,
-            );
-            let zk_spec = ZkSpec::try_new(&spec).expect("arb_zk_spec");
-            let c_zk_placeholder = irs_solver::solve_mask_code::<M>(
-                zk_spec,
-                compute_l_zk(&placeholder_source, 1),
-                placeholder_source.mask_length(),
-                LogInvRate::new(log_inv_rate),
-                2,
-            );
             let (source, target, t_ood) = build_round_io::<M>(
-                &spec, log_inv_rate, folding_factor, num_vars, Some(c_zk_placeholder.list_size()),
+                &spec, log_inv_rate, folding_factor, num_vars, Some(log_inv_rate),
             );
             let r = source.mask_length();
             let l_zk = compute_l_zk(&source, t_ood);
+            let zk_spec = ZkSpec::try_new(&spec).expect("arb_zk_spec");
             let c_zk = irs_solver::solve_mask_code::<M>(
                 zk_spec,
                 l_zk,
@@ -327,16 +309,17 @@ mod tests {
                 LogInvRate::new(log_inv_rate),
                 2,
             );
-            // Use the same rate-only Johnson list as the planner / `build_round_io`.
-            // `target.list_size()` here would read the *effective* rate after
-            // `next_order` rounding, which (post Lemma-9.5 tight masking) differs
-            // from the requested rate and would spuriously shift `t_ood`. The
-            // assertion isolates the c_zk fixed-point, not the rate-drift artifact.
+            // Same rate-only list estimate as the planner — `target.list_size()`
+            // would read the effective rate after `next_order` rounding and
+            // spuriously shift t_ood, masking the c_zk fixed-point under test.
             let target_log_inv_rate = f64::from(log_inv_rate + folding_factor - 1);
-            let target_list_size = johnson_list_size(target_log_inv_rate);
+            let target_log_degree = f64::from(num_vars - folding_factor);
+            let target_list_size = list_size_estimate(
+                spec.decoding_regime, target_log_degree, target_log_inv_rate,
+            );
             let recomputed_t_ood =
                 compute_t_ood(&spec, &source, target_list_size, Some(c_zk.list_size()), t_ood);
-            prop_assert_eq!(t_ood, recomputed_t_ood, "placeholder ⇒ final C_zk fixed-point");
+            prop_assert_eq!(t_ood, recomputed_t_ood, "solve_t_ood ⇒ converged C_zk fixed-point");
             let mask_oracle = MaskOracleInfo {
                 c_zk_list_size: ListSize::new(c_zk.list_size()),
                 l_zk,
@@ -348,7 +331,7 @@ mod tests {
         /// `analytic_error + pow ≥ target` (Lemma 9.9 OOD term).
         #[test]
         fn pow_closes_gap_to_target_standard(
-            spec in arb_standard_johnson_spec(),
+            spec in arb_standard_spec(),
             (log_inv_rate, folding_factor, num_vars) in arb_dims(),
         ) {
             let (source, target, t_ood) =

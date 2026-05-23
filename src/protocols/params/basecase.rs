@@ -96,8 +96,8 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::test_utils::{
-        arb_standard_johnson_spec, arb_zk_spec, assert_close, assert_pow_closes_gap,
-        deterministic_spec, TestField, TEST_TARGET_RANGE,
+        arb_standard_spec, arb_zk_spec, assert_close, assert_pow_closes_gap, deterministic_spec,
+        TestField, TEST_TARGET_RANGE,
     };
 
     /// `vector_size = 16` (2^4) and `log_inv_rate = 2` give a small but
@@ -172,7 +172,7 @@ mod tests {
     proptest! {
         #[test]
         fn solve_standard_assembles(
-            spec in arb_standard_johnson_spec(TEST_TARGET_RANGE),
+            spec in arb_standard_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
             let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
@@ -203,7 +203,7 @@ mod tests {
 
         #[test]
         fn standard_mode_has_no_pow(
-            spec in arb_standard_johnson_spec(TEST_TARGET_RANGE),
+            spec in arb_standard_spec(TEST_TARGET_RANGE),
             (log_size, log_inv_rate) in arb_dims(),
         ) {
             let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();

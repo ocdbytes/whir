@@ -222,7 +222,8 @@ impl<M: Embedding> Config<M> {
 
     /// Compute a list size bound.
     pub fn list_size(&self) -> f64 {
-        self.regime.list_size(self.log_inv_rate())
+        let log_degree = (self.masked_message_length() as f64).log2();
+        self.regime.list_size(log_degree, self.log_inv_rate())
     }
 
     /// Round-by-round soundness of the in-domain queries in bits.

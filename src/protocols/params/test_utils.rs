@@ -17,7 +17,7 @@ use crate::{
             derive::solve_t_ood,
             irs_commit as irs_solver,
             protocol_config::MaskOracleInfo,
-            regime::johnson_list_size,
+            regime::list_size_estimate,
             spec::{
                 DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
                 PowBudget, RoundContext, SecuritySpec, ZkSpec,
@@ -63,13 +63,23 @@ pub fn deterministic_spec(mode: Mode) -> SecuritySpec {
     }
 }
 
+/// Both decoding regimes, equally weighted. Used by `arb_spec` so proptests
+/// sweep all three regimes.
+fn arb_decoding_regime() -> impl Strategy<Value = DecodingRegime> {
+    prop_oneof![
+        Just(DecodingRegime::Johnson),
+        Just(DecodingRegime::Unique),
+        Just(DecodingRegime::Capacity),
+    ]
+}
+
 pub fn arb_spec(
     mode: Mode,
     target_range: RangeInclusive<u32>,
 ) -> impl Strategy<Value = SecuritySpec> {
-    target_range.prop_map(move |target| SecuritySpec {
+    (target_range, arb_decoding_regime()).prop_map(move |(target, decoding_regime)| SecuritySpec {
         mode,
-        decoding_regime: DecodingRegime::Johnson,
+        decoding_regime,
         target_security_bits: target,
         pow_budget: PowBudget::per_slot(FIXTURE_POW_BUDGET_BITS),
         hash_id: hash::BLAKE3,
@@ -80,9 +90,7 @@ pub fn arb_zk_spec(target_range: RangeInclusive<u32>) -> impl Strategy<Value = S
     arb_spec(Mode::ZeroKnowledge, target_range)
 }
 
-pub fn arb_standard_johnson_spec(
-    target_range: RangeInclusive<u32>,
-) -> impl Strategy<Value = SecuritySpec> {
+pub fn arb_standard_spec(target_range: RangeInclusive<u32>) -> impl Strategy<Value = SecuritySpec> {
     arb_spec(Mode::Standard, target_range)
 }
 
@@ -153,7 +161,7 @@ pub fn build_test_c_zk(
 /// Builds a self-consistent `(source, target, t_ood)` triplet matching the
 /// per-round shape that `code_switch::solve` expects.
 ///
-/// `t_ood` is solved against the rate-only `johnson_list_size(target_log_inv_rate)`,
+/// `t_ood` is solved against the rate-only `list_size_estimate(...)`,
 /// mirroring `derive::solve_t_ood`. Using `target.list_size()` here instead
 /// would couple `t_ood` to the target's effective rate (which itself depends
 /// on `t_ood` via the mask), producing a non-monotone oscillation once the
@@ -163,7 +171,7 @@ pub fn build_round_io<M: Embedding + Default>(
     log_inv_rate: u32,
     folding_factor: u32,
     num_vars: u32,
-    c_zk_list_size: Option<f64>,
+    c_zk_log_inv_rate: Option<u32>,
 ) -> (IrsConfig<M>, IrsConfig<Identity<M::Target>>, usize) {
     let source_ctx = RoundContext {
         vector_size: 1usize << num_vars,
@@ -171,9 +179,16 @@ pub fn build_round_io<M: Embedding + Default>(
         folding_factor,
     };
     let target_log_inv_rate = log_inv_rate + folding_factor - 1;
-    let target_list_size = johnson_list_size(f64::from(target_log_inv_rate));
-    let (source, t_ood) = solve_t_ood::<M>(spec, &source_ctx, target_list_size, c_zk_list_size, 0)
-        .expect("solve_t_ood diverged in test fixture");
+    let target_log_degree = f64::from(num_vars - folding_factor);
+    let target_list_size = list_size_estimate(
+        spec.decoding_regime,
+        target_log_degree,
+        f64::from(target_log_inv_rate),
+    );
+    let c_zk_log_inv_rate = c_zk_log_inv_rate.map(f64::from);
+    let (source, t_ood) =
+        solve_t_ood::<M>(spec, &source_ctx, target_list_size, c_zk_log_inv_rate, 0)
+            .expect("solve_t_ood diverged in test fixture");
 
     let target_ctx = RoundContext {
         vector_size: source.message_length(),
