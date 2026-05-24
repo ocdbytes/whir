@@ -1,6 +1,6 @@
 //! Regime-agnostic analytic primitives shared across the params solvers.
 //!
-//! Regime-specific math (Johnson / Unique branches) lives on
+//! Regime-specific math (Unique / Johnson / Capacity branches) lives on
 //! [`super::regime::DecodingRegimeParams`].
 
 /// `ρ = 2^-log_inv_rate`. Centralized so the rate formula lives in one place.

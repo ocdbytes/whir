@@ -115,7 +115,8 @@ impl<M: Embedding> Config<M> {
                 "sampled randomness (s) length must cover all out-of-domain sample requests"
             );
             // t' = target in-domain queries + OOD queries (Construction 9.7 step 4).
-            // Lemma 9.5 perfect-ZK: t' ≤ r' = target.mask_length.
+            // Definition 3.16: a t'-query ZK encoding requires r' ≥ t'; here
+            // r' = target.mask_length.
             assert!(
                 target_config.mask_length() >= target_config.in_domain_samples + out_domain_samples,
                 "target encoder violates t' ≤ r': queries must be covered by target mask"

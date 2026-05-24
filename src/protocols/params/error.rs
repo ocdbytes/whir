@@ -83,33 +83,15 @@ impl Display for ChainTarget {
     }
 }
 
-/// Which fixed-point loop failed to converge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FixedPointLoop {
-    /// `derive::solve_t_ood` — combined `t_ood ↔ source` Kleene iteration.
-    TOod,
-}
-
-impl Display for FixedPointLoop {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TOod => f.write_str("t_ood"),
-        }
-    }
-}
-
 /// Failure modes for [`super::derive::ProtocolConfig::derive`] and the
 /// sub-protocol solvers it calls.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DeriveError {
-    /// A fixed-point loop ran out of iterations. Indicates a pathological
-    /// spec/tuning combo; should not happen under realistic security targets
-    /// on supported fields.
-    #[error("{loop_kind} fixed-point did not converge for round {round_index}")]
-    FixedPointDidNotConverge {
-        round_index: usize,
-        loop_kind: FixedPointLoop,
-    },
+    /// The `t_ood` fixed-point in [`super::derive::solve_t_ood`] ran out of
+    /// iterations. Indicates a pathological spec/tuning combo; should not
+    /// happen under realistic security targets on supported fields.
+    #[error("t_ood fixed-point did not converge for round {round_index}")]
+    FixedPointDidNotConverge { round_index: usize },
 
     /// A PoW grind cannot close the analytic-to-target gap — the spec is too
     /// tight for any single grind to reach `target_security_bits`.

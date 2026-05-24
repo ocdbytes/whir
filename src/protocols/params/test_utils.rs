@@ -14,10 +14,9 @@ use crate::{
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
-            derive::solve_t_ood,
-            irs_commit as irs_solver,
+            derive::{solve_t_ood, OodMode},
+            irs_commit as irs_params,
             protocol_config::MaskOracleInfo,
-            regime::list_size_estimate,
             spec::{
                 DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
                 PowBudget, RoundContext, SecuritySpec, ZkSpec,
@@ -111,7 +110,7 @@ pub fn build_minimal_mask_oracle(spec: &SecuritySpec) -> Option<MaskOracleInfo> 
     let zk_spec = ZkSpec::try_new(spec)?;
     let l_zk = MaskCodeMessageLen::new(2);
     let c_zk: IrsConfig<TestEmbedding> =
-        irs_solver::solve_mask_code(zk_spec, l_zk, 0, LogInvRate::new(1), 2);
+        irs_params::solve_mask_code(zk_spec, l_zk, 0, LogInvRate::new(1), 2);
     Some(MaskOracleInfo {
         c_zk_list_size: ListSize::new(c_zk.list_size()),
         l_zk,
@@ -149,7 +148,7 @@ pub fn build_test_c_zk(
     num_masks: usize,
 ) -> IrsConfig<TestEmbedding> {
     let zk_spec = ZkSpec::try_new(spec).expect("build_test_c_zk requires a ZK spec");
-    irs_solver::solve_mask_code(
+    irs_params::solve_mask_code(
         zk_spec,
         MaskCodeMessageLen::new(l_zk),
         0,
@@ -161,11 +160,11 @@ pub fn build_test_c_zk(
 /// Builds a self-consistent `(source, target, t_ood)` triplet matching the
 /// per-round shape that `code_switch::solve` expects.
 ///
-/// `t_ood` is solved against the rate-only `list_size_estimate(...)` rather
-/// than `target.list_size()`: the latter reads the target's effective rate
-/// (which itself depends on `t_ood` via the mask), producing a non-monotone
-/// oscillation once the mask is tight (Lemma 9.5 part ii) rather than
-/// pow2-padded.
+/// `t_ood` is solved against the rate-only `DecodingRegime::list_size_estimate`
+/// rather than `target.list_size()`: the latter reads the target's effective
+/// rate (which itself depends on `t_ood` via the mask), producing a
+/// non-monotone oscillation once the mask is tight (`mask_length = in_domain
+/// + t_ood` per Construction 9.7 / Theorem 9.6) rather than pow2-padded.
 pub fn build_round_io<M: Embedding + Default>(
     spec: &SecuritySpec,
     log_inv_rate: u32,
@@ -180,21 +179,20 @@ pub fn build_round_io<M: Embedding + Default>(
     };
     let target_log_inv_rate = log_inv_rate + folding_factor - 1;
     let target_log_degree = f64::from(num_vars - folding_factor);
-    let target_list_size = list_size_estimate(
-        spec.decoding_regime,
-        target_log_degree,
-        f64::from(target_log_inv_rate),
-    );
-    let c_zk_log_inv_rate = c_zk_log_inv_rate.map(f64::from);
-    let (source, t_ood) =
-        solve_t_ood::<M>(spec, &source_ctx, target_list_size, c_zk_log_inv_rate, 0)
-            .expect("solve_t_ood diverged in test fixture");
+    let target_list_size = spec
+        .decoding_regime
+        .list_size_estimate(target_log_degree, f64::from(target_log_inv_rate));
+    let ood_mode = c_zk_log_inv_rate.map_or(OodMode::Standard, |rate| OodMode::ZeroKnowledge {
+        c_zk_log_inv_rate: f64::from(rate),
+    });
+    let (source, t_ood) = solve_t_ood::<M>(spec, &source_ctx, target_list_size, ood_mode, 0)
+        .expect("solve_t_ood diverged in test fixture");
 
     let target_ctx = RoundContext {
         vector_size: source.message_length(),
         log_inv_rate: target_log_inv_rate,
         folding_factor,
     };
-    let target = irs_solver::solve(spec, &target_ctx, OodSampleBudget::new(t_ood));
+    let target = irs_params::solve(spec, &target_ctx, OodSampleBudget::new(t_ood));
     (source, target, t_ood)
 }

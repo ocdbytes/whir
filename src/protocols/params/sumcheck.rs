@@ -11,49 +11,37 @@ use crate::{
             error::{grind_to_at, DeriveError, Pow},
             protocol_config::MaskOracleInfo,
             spec::{RoundContext, SecuritySpec},
+            SolveMode,
         },
         sumcheck::{self, Config as SumcheckConfig, SumcheckMaskLen},
     },
 };
 
-/// Standard-mode sumcheck builder. `pow` labels grinding failures
-/// (basecase or per-round).
-pub fn solve_standard<M: Embedding>(
+/// Per-round sumcheck builder. `mode` carries the optional mask oracle (see
+/// [`super::SolveMode`]); `pow` labels grinding failures (basecase or
+/// per-round).
+pub fn solve<M: Embedding>(
     spec: &SecuritySpec,
     ctx: &RoundContext,
     source_irs: &IrsConfig<M>,
+    mode: SolveMode,
     pow: Pow,
 ) -> Result<SumcheckConfig<M::Target>, DeriveError> {
-    let round_pow = grind_to_at(spec, analytic_error_bits(source_irs, None), pow)?;
+    let (mask_oracle, output_mode) = match mode {
+        SolveMode::Standard => (None, sumcheck::SumcheckMode::Standard),
+        SolveMode::ZeroKnowledge { mask_oracle } => (
+            Some(mask_oracle),
+            sumcheck::SumcheckMode::ZeroKnowledge {
+                mask_length: zk_mask_length(),
+            },
+        ),
+    };
+    let round_pow = grind_to_at(spec, analytic_error_bits(source_irs, mask_oracle), pow)?;
     Ok(SumcheckConfig::new(
         ctx.vector_size,
         round_pow,
         num_sumcheck_rounds(ctx),
-        sumcheck::SumcheckMode::Standard,
-    ))
-}
-
-/// ZK sumcheck builder. `mask_oracle` carries C_zk's list size + ℓ_zk; only
-/// those two values are read here. `pow` labels grinding failures.
-pub fn solve_zk<M: Embedding>(
-    spec: &SecuritySpec,
-    ctx: &RoundContext,
-    source_irs: &IrsConfig<M>,
-    mask_oracle: MaskOracleInfo,
-    pow: Pow,
-) -> Result<SumcheckConfig<M::Target>, DeriveError> {
-    let round_pow = grind_to_at(
-        spec,
-        analytic_error_bits(source_irs, Some(mask_oracle)),
-        pow,
-    )?;
-    Ok(SumcheckConfig::new(
-        ctx.vector_size,
-        round_pow,
-        num_sumcheck_rounds(ctx),
-        sumcheck::SumcheckMode::ZeroKnowledge {
-            mask_length: zk_mask_length(),
-        },
+        output_mode,
     ))
 }
 
@@ -101,7 +89,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
-        irs_commit as irs_solver,
+        irs_commit as irs_params,
         spec::{ListSize, MaskCodeMessageLen, Mode, OodSampleBudget},
         test_utils::{
             arb_round_ctx, arb_standard_spec, arb_zk_spec, assert_close, assert_pow_closes_gap,
@@ -116,7 +104,7 @@ mod tests {
     const FIXTURE_L_ZK: usize = 8;
 
     fn build_source_irs(spec: &SecuritySpec, ctx: &RoundContext) -> IrsConfig<TestEmbedding> {
-        irs_solver::solve(spec, ctx, OodSampleBudget::ZERO)
+        irs_params::solve(spec, ctx, OodSampleBudget::ZERO)
     }
 
     /// Smallest pow2 shape that still produces a non-degenerate IRS.
@@ -140,11 +128,11 @@ mod tests {
         let source_irs = build_source_irs(&spec, &ctx);
         let mask_oracle =
             build_minimal_mask_oracle(&spec).expect("ZK spec must produce a mask oracle");
-        let config = solve_zk(
+        let config = solve(
             &spec,
             &ctx,
             &source_irs,
-            mask_oracle,
+            SolveMode::ZeroKnowledge { mask_oracle },
             Pow::RoundSumcheck { index: 0 },
         )
         .unwrap();
@@ -225,7 +213,7 @@ mod tests {
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
             let pow = Pow::RoundSumcheck { index: 0 };
-            let config = solve_standard(&spec, &ctx, &source_irs, pow).unwrap();
+            let config = solve(&spec, &ctx, &source_irs, SolveMode::Standard, pow).unwrap();
             prop_assert!(matches!(config.mode, sumcheck::SumcheckMode::Standard));
         }
 
@@ -239,10 +227,11 @@ mod tests {
         ) {
             let source_irs = build_source_irs(&spec, &ctx);
             let pow = Pow::RoundSumcheck { index: 0 };
-            let config = build_minimal_mask_oracle(&spec).map_or_else(
-                || solve_standard(&spec, &ctx, &source_irs, pow).unwrap(),
-                |info| solve_zk(&spec, &ctx, &source_irs, info, pow).unwrap(),
-            );
+            let mode = build_minimal_mask_oracle(&spec)
+                .map_or(SolveMode::Standard, |mask_oracle| {
+                    SolveMode::ZeroKnowledge { mask_oracle }
+                });
+            let config = solve(&spec, &ctx, &source_irs, mode, pow).unwrap();
             prop_assert_eq!(config.num_rounds, ctx.folding_factor as usize);
         }
 
@@ -273,10 +262,10 @@ mod tests {
             let mask_oracle = build_minimal_mask_oracle(&spec);
             let error = analytic_error_bits(&source_irs, mask_oracle);
             let pow = Pow::RoundSumcheck { index: 0 };
-            let config = mask_oracle.map_or_else(
-                || solve_standard(&spec, &ctx, &source_irs, pow).unwrap(),
-                |info| solve_zk(&spec, &ctx, &source_irs, info, pow).unwrap(),
-            );
+            let mode = mask_oracle.map_or(SolveMode::Standard, |mask_oracle| {
+                SolveMode::ZeroKnowledge { mask_oracle }
+            });
+            let config = solve(&spec, &ctx, &source_irs, mode, pow).unwrap();
             assert_pow_closes_gap(&spec, error, &config.round_pow);
         }
     }
@@ -287,16 +276,16 @@ mod tests {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let ctx = fixture_ctx();
         let source_irs: IrsConfig<TestNonIdentityEmbedding> =
-            irs_solver::solve(&spec, &ctx, OodSampleBudget::ZERO);
+            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO);
         let info = MaskOracleInfo {
             c_zk_list_size: ListSize::new(FIXTURE_C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new(FIXTURE_L_ZK),
         };
-        let config = solve_zk(
+        let config = solve(
             &spec,
             &ctx,
             &source_irs,
-            info,
+            SolveMode::ZeroKnowledge { mask_oracle: info },
             Pow::RoundSumcheck { index: 0 },
         )
         .unwrap();

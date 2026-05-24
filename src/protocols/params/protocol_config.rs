@@ -25,10 +25,10 @@ use crate::{
         mask_proximity::Config as MaskProximityConfig,
         params::{
             bounds::usize_to_f64,
-            code_switch as code_switch_solver,
+            code_switch as code_switch_params,
             error::{ChainSource, ChainTarget, DeriveError, Pow},
             spec::{ListSize, MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
-            sumcheck as sumcheck_solver,
+            sumcheck as sumcheck_params,
         },
         proof_of_work::Config as PowConfig,
         sumcheck::Config as SumcheckConfig,
@@ -214,9 +214,7 @@ impl<M: Embedding> ProtocolConfig<M> {
 }
 
 /// Test-only mutators. Grouped here so the production `impl` block above
-/// reads as the public API surface and these escape hatches aren't easily
-/// mistaken for it. Each one supports a specific negative test in
-/// `derive::tests`; there is no equivalent on the public API.
+/// reads as the public API surface; no equivalent on the public API.
 #[cfg(test)]
 impl<M: Embedding> ProtocolConfig<M> {
     /// Inject an over-budget basecase PoW slot so `validate_pow_budget` can
@@ -337,8 +335,8 @@ impl<M: Embedding> RoundConfig<M> {
         let target = &self.code_switch.target;
         let mask_info = self.mask_oracle_info();
 
-        let sumcheck_term = f64::from(sumcheck_solver::analytic_error_bits(source, mask_info));
-        let code_switch_term = f64::from(code_switch_solver::analytic_error_bits(
+        let sumcheck_term = f64::from(sumcheck_params::analytic_error_bits(source, mask_info));
+        let code_switch_term = f64::from(code_switch_params::analytic_error_bits(
             source,
             target,
             self.code_switch.out_domain_samples,

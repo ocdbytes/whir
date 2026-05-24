@@ -1,8 +1,13 @@
 //! IRS-commit parameter selection.
 //!
-//! ZK mask is sized per Lemma 9.5 (paper p.53) at the tight bound
-//! `in-domain + OOD` queries. Codeword NTT-smoothness is enforced inside
-//! [`IrsConfig::new`] on `codeword_length`, not by inflating the mask.
+//! ZK mask is sized at the tight bound `in-domain + OOD` queries. Construction
+//! 9.7 / Theorem 9.6 (paper p.54-55) reveals `in_domain + t_ood` source
+//! positions per round (in-domain queries + OOD linear combinations via
+//! ze_ood), so the source encoding must be `(in_domain + t_ood)`-query ZK
+//! (Definition 3.16, p.29). For the Reed–Solomon code that means
+//! `mask_length = in_domain + t_ood` (Proposition 3.19, p.30). Codeword
+//! NTT-smoothness is enforced inside [`IrsConfig::new`] on `codeword_length`,
+//! not by inflating the mask.
 
 use crate::{
     algebra::embedding::Embedding,
@@ -30,11 +35,14 @@ pub fn solve<M: Embedding + Default>(
     let mode = match spec.mode {
         Mode::Standard => IrsMode::Standard,
         Mode::ZeroKnowledge => {
-            // Lemma 9.5 (part ii): r-query perfect-ZK encoding requires
-            // `r ≥ in-domain + OOD`. Use the tight bound; do not pow2-pad here.
+            // Construction 9.7 / Theorem 9.6: the verifier reveals
+            // `in_domain + t_ood` source positions (in-domain queries +
+            // ze_ood linear combinations), so the source encoding must be
+            // (in_domain + t_ood)-query ZK (Definition 3.16). Use the tight
+            // RS bound `mask_length = t` from Proposition 3.19; do not
+            // pow2-pad here.
             let mask_length = num_in_domain_queries(spec.decoding_regime, security_target, rate)
-                .checked_add(out_domain_samples.get())
-                .expect("usize overflow");
+                .saturating_add(out_domain_samples.get());
             IrsMode::ZeroKnowledge { mask_length }
         }
     };
@@ -164,9 +172,10 @@ mod tests {
     }
 
     proptest! {
-        /// Lemma 9.5 (part ii): mask covers all revealed evaluations.
+        /// Construction 9.7 / Theorem 9.6: mask covers all revealed source
+        /// positions (in-domain queries + OOD linear combinations).
         #[test]
-        fn zk_mask_covers_lemma_9_5(
+        fn zk_mask_covers_in_domain_plus_ood(
             spec in arb_zk_spec_default(),
             ctx in arb_round_ctx(),
             out_domain in 0usize..16,

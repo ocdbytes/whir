@@ -10,9 +10,9 @@ use crate::{
         irs_commit::Config as IrsConfig,
         params::{
             error::{grind_to_at, DeriveError, Pow},
-            irs_commit as irs_solver,
+            irs_commit as irs_params,
             spec::{Mode as SpecMode, OodSampleBudget, RoundContext, SecuritySpec},
-            sumcheck as sumcheck_solver,
+            sumcheck as sumcheck_params,
         },
         proof_of_work::Config as PowConfig,
         sumcheck::{self, Config as SumcheckConfig},
@@ -33,11 +33,11 @@ pub fn solve<F: Field>(
         log_inv_rate,
         folding_factor: 0,
     };
-    let commit = irs_solver::solve(spec, &ctx, OodSampleBudget::ZERO);
+    let commit = irs_params::solve(spec, &ctx, OodSampleBudget::ZERO);
 
     let sumcheck_pow = grind_to_at(
         spec,
-        sumcheck_solver::analytic_error_bits(&commit, None),
+        sumcheck_params::analytic_error_bits(&commit, None),
         Pow::BasecaseSumcheck,
     )?;
     let sumcheck = SumcheckConfig::new(
@@ -79,7 +79,7 @@ impl<F: Field> BasecaseConfig<F> {
     /// The γ-slot only contributes in ZK mode; Standard collapses to the
     /// sumcheck term.
     pub fn analytic_bits(&self) -> Bits {
-        let sumcheck_term = f64::from(sumcheck_solver::analytic_error_bits(&self.commit, None));
+        let sumcheck_term = f64::from(sumcheck_params::analytic_error_bits(&self.commit, None));
         let min_bits = match self.mode {
             basecase::BasecaseMode::Standard => sumcheck_term,
             basecase::BasecaseMode::ZeroKnowledge => {
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn analytic_error_formula() {
         use crate::protocols::params::{
-            irs_commit as irs_solver,
+            irs_commit as irs_params,
             spec::{Mode, OodSampleBudget, RoundContext},
         };
 
@@ -126,7 +126,7 @@ mod tests {
             folding_factor: 0,
         };
         let commit: IrsConfig<Identity<TestField>> =
-            irs_solver::solve(&spec, &ctx, OodSampleBudget::ZERO);
+            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO);
 
         let got = f64::from(analytic_error_bits(&commit));
         let field_bits = TestField::field_size_bits();
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn analytic_error_uses_eps_mca_when_limiting() {
         use crate::protocols::params::{
-            irs_commit as irs_solver,
+            irs_commit as irs_params,
             spec::{Mode, OodSampleBudget, RoundContext},
         };
 
@@ -154,7 +154,7 @@ mod tests {
             folding_factor: 0,
         };
         let commit: IrsConfig<Identity<TestField>> =
-            irs_solver::solve(&spec, &ctx, OodSampleBudget::ZERO);
+            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO);
 
         let field_bits = TestField::field_size_bits();
         let log_list = commit.list_size().log2();

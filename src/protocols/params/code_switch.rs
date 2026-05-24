@@ -17,56 +17,52 @@ use crate::{
             error::{grind_to_at, DeriveError, Pow},
             protocol_config::MaskOracleInfo,
             spec::SecuritySpec,
+            SolveMode,
         },
     },
 };
 
-/// Standard-mode code-switch builder. PoW closes the Lemma 9.9 OOD gap to
+/// Per-round code-switch builder. PoW closes the Lemma 9.9 OOD gap to
 /// `spec.target_security_bits`; `t_ood ≥ 1` is required by Construction 9.7.
-pub fn solve_standard<M: Embedding>(
+/// In ZK mode, `ℓ_zk ≥ r + t_ood` (Theorem 9.6 witness sizing) is asserted
+/// against the mask oracle carried by [`super::SolveMode::ZeroKnowledge`].
+pub fn solve<M: Embedding>(
     spec: &SecuritySpec,
     source: IrsConfig<M>,
     target: IrsConfig<Identity<M::Target>>,
     t_ood: usize,
+    mode: SolveMode,
     round_index: usize,
 ) -> Result<CodeSwitchConfig<M>, DeriveError> {
-    let analytic = analytic_error_bits(&source, &target, t_ood, None);
+    let (mask_oracle, output_mode) = match mode {
+        SolveMode::Standard => (None, code_switch::CodeSwitchMode::Standard),
+        SolveMode::ZeroKnowledge { mask_oracle } => {
+            let l_zk = mask_oracle.l_zk.get();
+            assert!(
+                l_zk >= source.mask_length().saturating_add(t_ood),
+                "ℓ_zk ({l_zk}) < r + t_ood ({} + {}) — violates Theorem 9.6 witness sizing",
+                source.mask_length(),
+                t_ood,
+            );
+            (
+                Some(mask_oracle),
+                code_switch::CodeSwitchMode::ZeroKnowledge {
+                    message_mask_length: NonZeroUsize::new(l_zk).expect("ℓ_zk > 0"),
+                },
+            )
+        }
+    };
+
+    let analytic = analytic_error_bits(&source, &target, t_ood, mask_oracle);
     let pow = grind_to_at(spec, analytic, Pow::RoundCodeSwitch { index: round_index })?;
+
     Ok(CodeSwitchConfig::new(
         source,
         target,
         t_ood,
-        code_switch::CodeSwitchMode::Standard,
+        output_mode,
         pow,
     ))
-}
-
-/// ZK code-switch builder. `mask_oracle.l_zk` must have been used to size C_zk
-/// (planner's job). PoW closes the Lemma 9.9 OOD gap; `t_ood ≥ 1` and
-/// `ℓ_zk ≥ r + t_ood` (Theorem 9.6) are asserted here.
-pub fn solve_zk<M: Embedding>(
-    spec: &SecuritySpec,
-    source: IrsConfig<M>,
-    target: IrsConfig<Identity<M::Target>>,
-    t_ood: usize,
-    mask_oracle: MaskOracleInfo,
-    round_index: usize,
-) -> Result<CodeSwitchConfig<M>, DeriveError> {
-    let l_zk = mask_oracle.l_zk.get();
-    assert!(
-        l_zk >= source.mask_length() + t_ood,
-        "ℓ_zk ({l_zk}) < r + t_ood ({} + {}) — violates Theorem 9.6 witness sizing",
-        source.mask_length(),
-        t_ood,
-    );
-    let mode = code_switch::CodeSwitchMode::ZeroKnowledge {
-        message_mask_length: NonZeroUsize::new(l_zk).expect("ℓ_zk > 0"),
-    };
-
-    let analytic = analytic_error_bits(&source, &target, t_ood, Some(mask_oracle));
-    let pow = grind_to_at(spec, analytic, Pow::RoundCodeSwitch { index: round_index })?;
-
-    Ok(CodeSwitchConfig::new(source, target, t_ood, mode, pow))
 }
 
 /// Per-round code-switch soundness in bits: `min` over Lemma 9.9's three RBR
@@ -88,12 +84,12 @@ pub fn analytic_error_bits<M: Embedding>(
     // just `t_ood`), so degree must use the realized `ℓ_zk`, not `r + t_ood`.
     let degree = mask_oracle.map_or_else(
         || source.message_length(),
-        |info| source.message_length() + info.l_zk.get(),
+        |info| source.message_length().saturating_add(info.l_zk.get()),
     );
     let t_ood_f = usize_to_f64(t_ood);
 
     // OOD term — Lemma 9.9, term 1.
-    let log_degree_minus_1 = usize_to_f64(degree - 1).log2();
+    let log_degree_minus_1 = usize_to_f64(degree.saturating_sub(1)).log2();
     let log_l_choose_2 = (combined_list * (combined_list - 1.0) / 2.0).log2();
     let ood_term = t_ood_f * (field_bits - log_degree_minus_1) - log_l_choose_2;
 
@@ -102,7 +98,8 @@ pub fn analytic_error_bits<M: Embedding>(
 
     // Combination term — Lemma 9.9, term 3 (γ-RLC, bounds doc §5.1).
     let log_count =
-        usize_to_f64(t_ood + source.in_domain_samples * source.interleaving_depth).log2();
+        usize_to_f64(t_ood.saturating_add(source.in_domain_samples * source.interleaving_depth))
+            .log2();
     let combination_term = field_bits - log_count - combined_list.log2();
 
     Bits::new(ood_term.min(in_domain_term).min(combination_term).max(0.0))
@@ -120,9 +117,8 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
-        derive::{compute_l_zk, solve_t_ood},
-        irs_commit as irs_solver,
-        regime::list_size_estimate,
+        derive::{compute_l_zk, solve_t_ood, OodMode},
+        irs_commit as irs_params,
         spec::{
             DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
             PowBudget, RoundContext, SecuritySpec, ZkSpec,
@@ -285,7 +281,7 @@ mod tests {
         ) {
             let (source, target, t_ood) =
                 build_round_io::<M>(&spec, log_inv_rate, folding_factor, num_vars, None);
-            let config = solve_standard(&spec, source, target, t_ood, 0).unwrap();
+            let config = solve(&spec, source, target, t_ood, SolveMode::Standard, 0).unwrap();
             prop_assert!(matches!(config.mode, code_switch::CodeSwitchMode::Standard));
             prop_assert!(config.out_domain_samples >= 1);
         }
@@ -302,7 +298,7 @@ mod tests {
             let r = source.mask_length();
             let l_zk = compute_l_zk(&source, t_ood);
             let zk_spec = ZkSpec::try_new(&spec).expect("arb_zk_spec");
-            let c_zk = irs_solver::solve_mask_code::<M>(
+            let c_zk = irs_params::solve_mask_code::<M>(
                 zk_spec,
                 l_zk,
                 r,
@@ -313,7 +309,15 @@ mod tests {
                 c_zk_list_size: ListSize::new(c_zk.list_size()),
                 l_zk,
             };
-            let config = solve_zk(&spec, source, target, t_ood, mask_oracle, 0).unwrap();
+            let config = solve(
+                &spec,
+                source,
+                target,
+                t_ood,
+                SolveMode::ZeroKnowledge { mask_oracle },
+                0,
+            )
+            .unwrap();
             prop_assert_eq!(config.message_mask_length(), (r + t_ood).next_power_of_two());
         }
 
@@ -326,7 +330,7 @@ mod tests {
             let (source, target, t_ood) =
                 build_round_io::<M>(&spec, log_inv_rate, folding_factor, num_vars, None);
             let error = analytic_error_bits(&source, &target, t_ood, None);
-            let config = solve_standard(&spec, source, target, t_ood, 0).unwrap();
+            let config = solve(&spec, source, target, t_ood, SolveMode::Standard, 0).unwrap();
             assert_pow_closes_gap(&spec, error, &config.pow);
         }
     }
@@ -351,9 +355,10 @@ mod tests {
         (source_ctx, target_ctx)
     }
 
-    /// `solve_zk` asserts `ℓ_zk ≥ source.mask_length() + t_ood` (Theorem 9.6
-    /// witness sizing). Build a self-consistent `(source, target, t_ood)`
-    /// and pass a deliberately-too-small `l_zk = 1` to trip the precondition.
+    /// `solve` asserts `ℓ_zk ≥ source.mask_length() + t_ood` (Theorem 9.6
+    /// witness sizing) under [`SolveMode::ZeroKnowledge`]. Build a
+    /// self-consistent `(source, target, t_ood)` and pass a too-small
+    /// `l_zk = 1` to trip the precondition.
     #[test]
     #[should_panic(expected = "violates Theorem 9.6")]
     fn solve_zk_rejects_l_zk_below_r_plus_t_ood() {
@@ -368,14 +373,21 @@ mod tests {
             Some(FORMULA_LOG_INV_RATE),
         );
         // `source.mask_length() + t_ood ≥ 1 + 1 > TOO_SMALL_L_ZK` in ZK,
-        // so the assert in solve_zk fires.
+        // so the assert in `solve` fires.
         assert!(source.mask_length() + t_ood > TOO_SMALL_L_ZK);
 
         let mask_oracle = MaskOracleInfo {
             c_zk_list_size: ListSize::new(SMOKE_C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new(TOO_SMALL_L_ZK),
         };
-        let _ = solve_zk(&spec, source, target, t_ood, mask_oracle, 0);
+        let _ = solve(
+            &spec,
+            source,
+            target,
+            t_ood,
+            SolveMode::ZeroKnowledge { mask_oracle },
+            0,
+        );
     }
 
     /// Smoke test: `M::Source ≠ M::Target`, Standard mode.
@@ -385,22 +397,25 @@ mod tests {
         let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
         let target_log_degree =
             f64::from((source_ctx.vector_size / (1 << source_ctx.folding_factor)).trailing_zeros());
-        let target_list_size = list_size_estimate(
-            spec.decoding_regime,
-            target_log_degree,
-            f64::from(target_ctx.log_inv_rate),
-        );
-        let (source, t_ood) =
-            solve_t_ood::<TestNonIdentityEmbedding>(&spec, &source_ctx, target_list_size, None, 0)
-                .unwrap();
+        let target_list_size = spec
+            .decoding_regime
+            .list_size_estimate(target_log_degree, f64::from(target_ctx.log_inv_rate));
+        let (source, t_ood) = solve_t_ood::<TestNonIdentityEmbedding>(
+            &spec,
+            &source_ctx,
+            target_list_size,
+            OodMode::Standard,
+            0,
+        )
+        .unwrap();
         // Standard target: codeword_length is t_ood-independent (mask = 0).
-        let target = irs_solver::solve::<Identity<TestExtensionField>>(
+        let target = irs_params::solve::<Identity<TestExtensionField>>(
             &spec,
             &target_ctx,
             OodSampleBudget::ZERO,
         );
 
-        let config = solve_standard(&spec, source, target, t_ood, 0).unwrap();
+        let config = solve(&spec, source, target, t_ood, SolveMode::Standard, 0).unwrap();
         assert!(matches!(config.mode, code_switch::CodeSwitchMode::Standard));
     }
 
@@ -415,20 +430,20 @@ mod tests {
         let (source_ctx, target_ctx) = non_identity_smoke_ctxs();
         let target_log_degree =
             f64::from((source_ctx.vector_size / (1 << source_ctx.folding_factor)).trailing_zeros());
-        let target_list_size = list_size_estimate(
-            spec.decoding_regime,
-            target_log_degree,
-            f64::from(target_ctx.log_inv_rate),
-        );
+        let target_list_size = spec
+            .decoding_regime
+            .list_size_estimate(target_log_degree, f64::from(target_ctx.log_inv_rate));
         let (source, t_ood) = solve_t_ood::<TestNonIdentityEmbedding>(
             &spec,
             &source_ctx,
             target_list_size,
-            Some(f64::from(source_ctx.log_inv_rate)),
+            OodMode::ZeroKnowledge {
+                c_zk_log_inv_rate: f64::from(source_ctx.log_inv_rate),
+            },
             0,
         )
         .unwrap();
-        let target = irs_solver::solve::<Identity<TestExtensionField>>(
+        let target = irs_params::solve::<Identity<TestExtensionField>>(
             &spec,
             &target_ctx,
             OodSampleBudget::new(t_ood),
@@ -438,7 +453,15 @@ mod tests {
             c_zk_list_size: ListSize::new(SMOKE_C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new((source.mask_length() + t_ood).next_power_of_two()),
         };
-        let config = solve_zk(&spec, source, target, t_ood, mask_oracle, 0).unwrap();
+        let config = solve(
+            &spec,
+            source,
+            target,
+            t_ood,
+            SolveMode::ZeroKnowledge { mask_oracle },
+            0,
+        )
+        .unwrap();
         assert!(matches!(
             config.mode,
             code_switch::CodeSwitchMode::ZeroKnowledge { .. }

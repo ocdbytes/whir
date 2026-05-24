@@ -149,17 +149,20 @@ impl DecodingRegimeParams {
     }
 }
 
-/// `|Λ|` at the given degree + rate under `regime`. Used before an IRS config
-/// exists.
-///
-/// Matches `IrsConfig::list_size()` when the IRS is built under the same
-/// regime, with the same `masked_message_length`, and `ntt::next_order`
-/// doesn't pad the codeword (pow2 `vector_size`, `interleaving_depth = 1`,
-/// integer `log_inv_rate`, 2-adic field — the conditions `solve_mask_code`
-/// enforces for C_zk).
-pub fn list_size_estimate(regime: DecodingRegime, log_degree: f64, log_inv_rate: f64) -> f64 {
-    DecodingRegimeParams::from_policy(regime, rate(log_inv_rate))
-        .list_size(log_degree, log_inv_rate)
+impl DecodingRegime {
+    /// `|Λ|` at canonical slack, before an IRS config exists. Use the
+    /// `DecodingRegimeParams::list_size` method when a non-canonical slack
+    /// has already been materialized.
+    ///
+    /// Matches `IrsConfig::list_size()` when the IRS is built under the same
+    /// regime, with the same `masked_message_length`, and `ntt::next_order`
+    /// doesn't pad the codeword (pow2 `vector_size`, `interleaving_depth = 1`,
+    /// integer `log_inv_rate`, 2-adic field — the conditions `solve_mask_code`
+    /// enforces for C_zk).
+    pub fn list_size_estimate(self, log_degree: f64, log_inv_rate: f64) -> f64 {
+        DecodingRegimeParams::from_policy(self, rate(log_inv_rate))
+            .list_size(log_degree, log_inv_rate)
+    }
 }
 
 #[cfg(test)]
@@ -209,11 +212,11 @@ mod tests {
     }
 
     /// `η = √ρ / 20` substituted into `|Λ| = 1/(2η√ρ)` simplifies to `10/ρ`.
-    /// So `list_size_estimate(Johnson, _, b) = 10 · 2^b`.
+    /// So `DecodingRegime::Johnson.list_size_estimate(_, b) = 10 · 2^b`.
     #[test]
     fn johnson_list_size_closed_form() {
         for b in [1.0, 2.0, 3.0, 5.0] {
-            let got = list_size_estimate(DecodingRegime::Johnson, /* log_degree */ 4.0, b);
+            let got = DecodingRegime::Johnson.list_size_estimate(/* log_degree */ 4.0, b);
             let expected = 10.0 * 2_f64.powf(b);
             assert!(
                 (got - expected).abs() / expected < TIGHT_EPS,
@@ -226,7 +229,7 @@ mod tests {
     #[test]
     fn capacity_list_size_closed_form() {
         for (log_d, b) in [(4.0, 1.0), (6.0, 2.0), (8.0, 3.0)] {
-            let got = list_size_estimate(DecodingRegime::Capacity, log_d, b);
+            let got = DecodingRegime::Capacity.list_size_estimate(log_d, b);
             let expected = 20.0 * 2_f64.powf(log_d) * 2_f64.powf(2.0 * b);
             assert!(
                 (got - expected).abs() / expected < TIGHT_EPS,
@@ -235,7 +238,7 @@ mod tests {
         }
     }
 
-    /// `list_size_estimate(Johnson, _, b)` must match `Config::list_size` once
+    /// `DecodingRegime::Johnson.list_size_estimate(_, b)` must match `Config::list_size` once
     /// a config is built at the same rate. Keeps the rate-only helper in sync
     /// with `irs_commit::Config::new`'s canonical-slack materialization.
     #[test]
@@ -262,7 +265,7 @@ mod tests {
             IrsMode::Standard,
         );
         let log_degree = (config.masked_message_length() as f64).log2();
-        let got = list_size_estimate(DecodingRegime::Johnson, log_degree, f64::from(LOG_INV_RATE));
+        let got = DecodingRegime::Johnson.list_size_estimate(log_degree, f64::from(LOG_INV_RATE));
         let expected = config.list_size();
         assert!(
             (got - expected).abs() / expected < TIGHT_EPS,

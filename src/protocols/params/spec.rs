@@ -264,8 +264,7 @@ pub enum LogInvRateTag {}
 pub type OodSampleBudget = Tagged<usize, OodSampleBudgetTag>;
 
 impl Tagged<usize, OodSampleBudgetTag> {
-    /// Sentinel for "no OOD samples". Used by sub-protocols that don't
-    /// require an OOD challenge round (e.g. Standard mode, basecase).
+    /// Sentinel for "no OOD samples".
     pub const ZERO: Self = Self::new(0);
 }
 

@@ -42,7 +42,7 @@ pub fn analytic_error_bits<F: Field>(c_zk: &IrsConfig<Identity<F>>, num_masks: u
     if deg <= 1 || num_masks == 0 {
         return Bits::new(field_bits.max(0.0));
     }
-    let log_combined = usize_to_f64(num_masks * (deg - 1)).log2();
+    let log_combined = usize_to_f64(num_masks * deg.saturating_sub(1)).log2();
     Bits::new((field_bits - log_combined).max(0.0))
 }
 

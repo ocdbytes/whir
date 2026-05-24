@@ -23,7 +23,7 @@ pub(crate) mod sumcheck;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
-pub use error::{ChainSource, ChainTarget, DeriveError, FixedPointLoop, Pow};
+pub use error::{ChainSource, ChainTarget, DeriveError, Pow};
 pub use protocol_config::{
     MaskOracleConfig, MaskOracleInfo, ProtocolConfig, RoundConfig, RoundMode,
 };
@@ -31,3 +31,19 @@ pub use spec::{
     DecodingRegime, FoldingFactor, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
     PowBudget, RoundContext, SecuritySpec, TuningSpec, ZkSpec,
 };
+
+/// Solver-input mode for the per-round sumcheck and code-switch builders.
+///
+/// Both sub-protocols branch on the same Standard vs. ZK distinction with the
+/// same `MaskOracleInfo` payload, so a shared vocabulary keeps call sites
+/// uniform.
+///
+/// Distinct from [`Mode`] (the spec-level policy enum, which carries no
+/// payload) and from sub-protocol *output* modes
+/// (`sumcheck::SumcheckMode`, `code_switch::CodeSwitchMode`) whose payloads
+/// describe the configured round rather than its solver input.
+#[derive(Clone, Copy)]
+pub enum SolveMode {
+    Standard,
+    ZeroKnowledge { mask_oracle: MaskOracleInfo },
+}
