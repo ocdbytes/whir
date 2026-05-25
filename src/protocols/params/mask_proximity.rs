@@ -18,7 +18,6 @@ use crate::{
 };
 
 /// `c_zk.num_vectors` must equal `2 * num_masks` (originals + fresh).
-/// PoW closes the Lemma 7.4 γ-combination gap to `spec.target_security_bits`.
 pub fn solve<F: Field>(
     spec: &SecuritySpec,
     c_zk: IrsConfig<Identity<F>>,
@@ -73,13 +72,6 @@ mod tests {
         },
     };
 
-    /// γ-combination (Lemma 7.4): `log|F| − log(num_masks · (deg − 1))`,
-    /// `deg = c_zk.masked_message_length()`. With `num_masks = 0` or `deg ≤ 1`
-    /// the bound saturates to `field_bits`.
-    /// Pow2 `l_zk = 8` gives exact `log2(deg − 1) = log2(7) ≈ 2.81`.
-    /// `num_masks = 3` is the smallest count > 1 (so `num_masks · (deg − 1) > 1`
-    /// and the formula doesn't saturate). `log_inv_rate = 1` is the minimum
-    /// rate the C_zk solver accepts.
     const FIXTURE_L_ZK: usize = 8;
     const FIXTURE_NUM_MASKS: usize = 3;
     const FIXTURE_LOG_INV_RATE: u32 = 1;
@@ -99,7 +91,6 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// Degenerate inputs (`num_masks == 0` or `deg ≤ 1`) saturate to `field_bits`.
     #[test]
     fn analytic_error_saturates_when_no_masks() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
@@ -124,7 +115,6 @@ mod tests {
             prop_assert_eq!(config.c_zk_commit.interleaving_depth, 1);
         }
 
-        /// `analytic_error + pow ≥ target` (Lemma 7.4 γ-combination).
         #[test]
         fn pow_closes_gap_to_target(
             spec in arb_zk_spec(TEST_TARGET_RANGE),
@@ -139,9 +129,6 @@ mod tests {
         }
     }
 
-    /// `mask_proximity::solve` requires `c_zk.num_vectors == 2 · num_masks`.
-    /// Builds C_zk for `num_masks = 2` (so `num_vectors = 4`), then calls
-    /// `solve` with `num_masks = 3` to trip the assertion.
     #[test]
     #[should_panic(expected = "c_zk.num_vectors must be 2 * num_masks")]
     fn solve_rejects_mismatched_num_vectors() {
@@ -153,8 +140,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "interleaving_depth = 1")]
     fn solve_rejects_non_unit_interleaving() {
-        // All values except `NON_UNIT_INTERLEAVING_DEPTH` are chosen to satisfy
-        // `Config::new`'s divisibility/pow2 constraints.
         const SECURITY_TARGET_BITS: f64 = 80.0;
         const NUM_VECTORS: usize = 2;
         const VECTOR_SIZE: usize = 8;

@@ -32,24 +32,12 @@ pub type TestExtensionField = Field64_2;
 /// `Source = Field64, Target = Field64_2`.
 pub type TestNonIdentityEmbedding = Basefield<TestExtensionField>;
 
-/// `target_security_bits` range used by every solver-level proptest.
-/// Upper bound keeps `target − analytic_error ≤ 60`, matching the cap in
-/// `proof_of_work::threshold`. Lower bound keeps the analytic floor away from 0.
 pub const TEST_TARGET_RANGE: RangeInclusive<u32> = 30..=50;
 
-/// Default `target_security_bits` for `deterministic_spec` fixtures.
-/// 80 leaves enough analytic headroom on `Field64` (~64-bit) that every
-/// sub-protocol solver has a closable gap to target.
 pub const FIXTURE_TARGET_BITS: u32 = 80;
 
-/// Tolerance for `(got - expected).abs() < EPS` checks on formula-reconstruction
-/// tests. `1e-9` is well above the `f64` rounding noise on log/sum expressions
-/// used in the analytic-error formulas.
 pub const EPS: f64 = 1e-9;
 
-/// Matches `proof_of_work::MAX_DIFFICULTY` so per-slot budget checks in
-/// `grind_to_at` never bite. Tests exercising budget enforcement build their
-/// own specs.
 pub const FIXTURE_POW_BUDGET_BITS: u32 = 60;
 
 pub fn deterministic_spec(mode: Mode) -> SecuritySpec {
@@ -62,8 +50,6 @@ pub fn deterministic_spec(mode: Mode) -> SecuritySpec {
     }
 }
 
-/// Both decoding regimes, equally weighted. Used by `arb_spec` so proptests
-/// sweep all three regimes.
 fn arb_decoding_regime() -> impl Strategy<Value = DecodingRegime> {
     prop_oneof![
         Just(DecodingRegime::Johnson),
@@ -93,8 +79,6 @@ pub fn arb_standard_spec(target_range: RangeInclusive<u32>) -> impl Strategy<Val
     arb_spec(Mode::Standard, target_range)
 }
 
-/// `log_size ∈ 4..=8` (vector_size 16..256) leaves room for ≥ 2·folding_factor
-/// post-folding while capping proptest time.
 pub fn arb_round_ctx() -> impl Strategy<Value = RoundContext> {
     (4u32..=8, 1u32..=4, 1u32..=3).prop_map(|(log_size, log_inv_rate, folding_factor)| {
         RoundContext {
@@ -117,9 +101,7 @@ pub fn build_minimal_mask_oracle(spec: &SecuritySpec) -> Option<MaskOracleInfo> 
     })
 }
 
-/// Shared check used by every sub-protocol's `pow_closes_gap_to_target*` test:
-/// `analytic_error_bits + pow.difficulty() ≥ target_security_bits` (the `1e-3`
-/// tolerance absorbs `proof_of_work::threshold`'s ceil quantization).
+/// `analytic_error_bits + pow.difficulty() ≥ target_security_bits`.
 pub fn assert_pow_closes_gap(spec: &SecuritySpec, analytic: Bits, pow: &PowConfig) {
     let error = f64::from(analytic);
     let pow_bits = f64::from(pow.difficulty());
@@ -130,8 +112,7 @@ pub fn assert_pow_closes_gap(spec: &SecuritySpec, analytic: Bits, pow: &PowConfi
     );
 }
 
-/// `|got − expected| < EPS` with a uniform error message. Shared by every
-/// `analytic_error_*_formula` test.
+/// `|got − expected| < EPS`.
 pub fn assert_close(got: f64, expected: f64) {
     assert!(
         (got - expected).abs() < EPS,
@@ -139,8 +120,7 @@ pub fn assert_close(got: f64, expected: f64) {
     );
 }
 
-/// C_zk fixture used by every `mask_proximity` test: source mask length 0,
-/// `num_vectors = 2 · num_masks` (Construction 7.2 originals + fresh pairs).
+/// C_zk fixture for `mask_proximity` tests.
 pub fn build_test_c_zk(
     spec: &SecuritySpec,
     l_zk: usize,
@@ -159,12 +139,6 @@ pub fn build_test_c_zk(
 
 /// Builds a self-consistent `(source, target, t_ood)` triplet matching the
 /// per-round shape that `code_switch::solve` expects.
-///
-/// `t_ood` is solved against the rate-only `DecodingRegime::list_size_estimate`
-/// rather than `target.list_size()`: the latter reads the target's effective
-/// rate (which itself depends on `t_ood` via the mask), producing a
-/// non-monotone oscillation once the mask is tight (`mask_length = in_domain
-/// + t_ood` per Construction 9.7 / Theorem 9.6) rather than pow2-padded.
 pub fn build_round_io<M: Embedding + Default>(
     spec: &SecuritySpec,
     log_inv_rate: u32,

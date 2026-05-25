@@ -1,5 +1,5 @@
 //! Sumcheck parameter selection. ZK mode adds a degree-2 mask per round
-//! (Lemma 6.4, p.38). PoW closes the gap between target and analytic error.
+//! (Lemma 6.4, p.38).
 
 use crate::{
     algebra::{embedding::Embedding, fields::FieldWithSize},
@@ -17,9 +17,7 @@ use crate::{
     },
 };
 
-/// Per-round sumcheck builder. `mode` carries the optional mask oracle (see
-/// [`super::SolveMode`]); `pow` labels grinding failures (basecase or
-/// per-round).
+/// Per-round sumcheck builder.
 pub fn solve<M: Embedding>(
     spec: &SecuritySpec,
     ctx: &RoundContext,
@@ -67,7 +65,7 @@ pub fn analytic_error_bits<M: Embedding>(
 }
 
 /// Number of degree-2 round-polynomial masks sumcheck contributes to C_zk
-/// per round (Lemma 6.4): one per sumcheck round.
+/// per round (Lemma 6.4).
 pub const fn masks_required(ctx: &RoundContext) -> usize {
     num_sumcheck_rounds(ctx)
 }
@@ -98,8 +96,6 @@ mod tests {
         },
     };
 
-    /// Mask-oracle fixture used by the formula tests + the ZK smoke test.
-    /// Both values are pow2 so `log2` is exact (no f64 drift in expected-vs-got).
     const FIXTURE_C_ZK_LIST_SIZE: f64 = 4.0;
     const FIXTURE_L_ZK: usize = 8;
 
@@ -107,7 +103,6 @@ mod tests {
         irs_params::solve(spec, ctx, OodSampleBudget::ZERO)
     }
 
-    /// Smallest pow2 shape that still produces a non-degenerate IRS.
     const FIXTURE_LOG_VECTOR_SIZE: u32 = 4;
     const FIXTURE_LOG_INV_RATE: u32 = 1;
     const FIXTURE_FOLDING_FACTOR: u32 = 2;
@@ -120,7 +115,6 @@ mod tests {
         }
     }
 
-    /// Lemma 6.4: ZK round polynomial has 3 coefficients.
     #[test]
     fn zk_mode_has_three_mask_coefficients() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
@@ -144,7 +138,6 @@ mod tests {
         }
     }
 
-    /// Standard branch: `min(prox_gaps, log|F| − log|Λ(C)| − 1).max(0)`.
     #[test]
     fn analytic_error_standard_formula() {
         let spec = deterministic_spec(Mode::Standard);
@@ -161,7 +154,6 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// ZK branch (Lemma 6.5): `min(prox_gaps, log|F| − log|Λ(C)| − log|Λ(C_zk)| − log ℓ_zk).max(0)`.
     #[test]
     fn analytic_error_zk_formula() {
         let log_c_zk_list = FIXTURE_C_ZK_LIST_SIZE.log2();
@@ -187,10 +179,8 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// Oracle large enough to drive `poly_id` strongly negative → clamped to 0.
     #[test]
     fn analytic_error_clamps_to_zero() {
-        // `log2(c_zk_list_size) + log2(l_zk) > field_bits` on `Field64`.
         const OVERSIZED_LOG_C_ZK_LIST: i32 = 60;
         const OVERSIZED_LOG_L_ZK: u32 = 30;
 
@@ -235,8 +225,6 @@ mod tests {
             prop_assert_eq!(config.num_rounds, ctx.folding_factor as usize);
         }
 
-        /// ZK subtracts two non-negative log terms beyond Standard, so the ZK
-        /// error term cannot exceed the Standard one for any source IRS.
         #[test]
         fn zk_error_le_standard_error(
             spec in arb_zk_spec(TEST_TARGET_RANGE),
@@ -249,7 +237,6 @@ mod tests {
             prop_assert!(zk <= standard + EPS, "zk {} > standard {}", zk, standard);
         }
 
-        /// `analytic_error + pow ≥ target`.
         #[test]
         fn round_pow_closes_gap_to_target(
             spec in prop_oneof![
@@ -270,7 +257,6 @@ mod tests {
         }
     }
 
-    /// Smoke test: `M::Source ≠ M::Target`, ZK mode.
     #[test]
     fn solve_works_with_basefield_embedding_zk() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);

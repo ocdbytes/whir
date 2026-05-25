@@ -1,13 +1,7 @@
 //! IRS-commit parameter selection.
 //!
-//! ZK mask is sized at the tight bound `in-domain + OOD` queries. Construction
-//! 9.7 / Theorem 9.6 (paper p.54-55) reveals `in_domain + t_ood` source
-//! positions per round (in-domain queries + OOD linear combinations via
-//! ze_ood), so the source encoding must be `(in_domain + t_ood)`-query ZK
-//! (Definition 3.16, p.29). For the Reed–Solomon code that means
-//! `mask_length = in_domain + t_ood` (Proposition 3.19, p.30). Codeword
-//! NTT-smoothness is enforced inside [`IrsConfig::new`] on `codeword_length`,
-//! not by inflating the mask.
+//! ZK mask sizing follows Construction 9.7 / Theorem 9.6:
+//! `mask_length = in_domain + t_ood` (Proposition 3.19).
 
 use crate::{
     algebra::embedding::Embedding,
@@ -35,12 +29,6 @@ pub fn solve<M: Embedding + Default>(
     let mode = match spec.mode {
         Mode::Standard => IrsMode::Standard,
         Mode::ZeroKnowledge => {
-            // Construction 9.7 / Theorem 9.6: the verifier reveals
-            // `in_domain + t_ood` source positions (in-domain queries +
-            // ze_ood linear combinations), so the source encoding must be
-            // (in_domain + t_ood)-query ZK (Definition 3.16). Use the tight
-            // RS bound `mask_length = t` from Proposition 3.19; do not
-            // pow2-pad here.
             let mask_length = num_in_domain_queries(spec.decoding_regime, security_target, rate)
                 .saturating_add(out_domain_samples.get());
             IrsMode::ZeroKnowledge { mask_length }
@@ -51,7 +39,7 @@ pub fn solve<M: Embedding + Default>(
         security_target,
         spec.decoding_regime,
         spec.hash_id,
-        1, // one vector committed per round
+        1,
         ctx.vector_size,
         interleaving_depth,
         rate,
@@ -157,10 +145,6 @@ mod tests {
         );
     }
 
-    /// `irs_commit::solve` doesn't grind PoW, so this range can sit higher than
-    /// the shared `TEST_TARGET_RANGE` (which is capped at 50 to keep the PoW
-    /// gap below the 60-bit threshold). 80..=128 covers production-realistic
-    /// target sizes.
     const IRS_TARGET_RANGE: std::ops::RangeInclusive<u32> = 80..=128;
 
     fn arb_zk_spec_default() -> impl Strategy<Value = SecuritySpec> {
@@ -172,8 +156,6 @@ mod tests {
     }
 
     proptest! {
-        /// Construction 9.7 / Theorem 9.6: mask covers all revealed source
-        /// positions (in-domain queries + OOD linear combinations).
         #[test]
         fn zk_mask_covers_in_domain_plus_ood(
             spec in arb_zk_spec_default(),
@@ -199,17 +181,11 @@ mod tests {
         }
     }
 
-    /// Smoke-test fixture: 64-element vector folded by 2 at rate 1/2 — small
-    /// but produces a non-degenerate IRS for the non-identity embedding.
     const SMOKE_VECTOR_SIZE: usize = 64;
     const SMOKE_LOG_INV_RATE: u32 = 1;
     const SMOKE_FOLDING_FACTOR: u32 = 2;
-    /// Arbitrary > 0 so the ZK mask sizing exercises the OOD path.
     const SMOKE_OOD_BUDGET: usize = 2;
 
-    /// Smoke test: `M::Source ≠ M::Target`, ZK path. Mask sizing depends only
-    /// on the target field (via `field_size_bits`), but the generic embedding
-    /// still flows through the Config and must compile + execute.
     #[test]
     fn solve_works_with_basefield_embedding_zk() {
         let spec = deterministic_spec(Mode::ZeroKnowledge);

@@ -13,24 +13,13 @@ use crate::{bits::Bits, engines::EngineId};
 
 /// Per-slot proof-of-work policy.
 ///
-/// The same `bits` value plays two roles, deliberately coupled:
-/// - **Planning credit**: [`SecuritySpec::protocol_security_target_bits`]
-///   subtracts `bits` from `target_security_bits` so solvers know the
-///   analytic floor they must reach.
-/// - **Validation cap**: [`super::protocol_config::ProtocolConfig::validate_pow_budget`]
-///   rejects any per-slot PoW that exceeds `bits`.
-///
-/// `Forbidden` is *not* `PerSlot { bits: 0 }`: the latter is unrepresentable
-/// (the variant takes a [`NonZeroU32`]). Use [`PowBudget::per_slot`] when
-/// converting from an arbitrary `u32` — it collapses `0` to `Forbidden`.
+/// `bits` plays two roles:
+/// - **Planning credit**: subtracted from `target_security_bits` so solvers
+///   know the analytic floor they must reach.
+/// - **Validation cap**: rejects any per-slot PoW that exceeds `bits`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PowBudget {
-    /// Per-slot grinding forbidden. Solvers still plan against the full
-    /// `target_security_bits`; any nonzero per-slot PoW the planner emits
-    /// is rejected by validation.
     Forbidden,
-    /// Per-slot grinding allowed up to `bits`. Planning relaxes the
-    /// analytic target by `bits`; validation caps every slot at `bits`.
     PerSlot { bits: NonZeroU32 },
 }
 
@@ -52,7 +41,7 @@ impl PowBudget {
     }
 }
 
-/// Phantom-typed newtype — `Tagged<T, A>` and `Tagged<T, B>` are distinct types.
+/// Phantom-typed newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Tagged<T, Tag>(T, PhantomData<Tag>);
 
@@ -69,14 +58,8 @@ impl<T: Copy, Tag> Tagged<T, Tag> {
 #[derive(Debug, Clone)]
 pub struct SecuritySpec {
     pub mode: Mode,
-    /// Reed–Solomon decoding regime — selects the proximity radius `δ` and
-    /// slack policy. See [`DecodingRegime`].
     pub decoding_regime: DecodingRegime,
     pub target_security_bits: u32,
-    /// Per-slot PoW policy — both the planning credit subtracted from
-    /// `target_security_bits` and the per-slot cap enforced by
-    /// [`super::protocol_config::ProtocolConfig::validate_pow_budget`].
-    /// See [`PowBudget`] for the dual role.
     pub pow_budget: PowBudget,
     pub hash_id: EngineId,
 }
@@ -150,29 +133,14 @@ pub enum Mode {
 }
 
 /// A `SecuritySpec` borrow proven to be in [`Mode::ZeroKnowledge`].
-///
-/// Constructed only via [`ZkSpec::try_new`], which performs the mode check
-/// once at the boundary. ZK-only solvers accept `ZkSpec` to make
-/// "ZK mode required" a compile-time precondition instead of a runtime assert.
-///
-/// `Deref<Target = SecuritySpec>` is implemented so fields and inherent
-/// methods are reachable directly (`zk_spec.target_security_bits`). For sites
-/// that need to pass `&SecuritySpec` explicitly, use [`Self::as_inner`].
 #[derive(Debug, Clone, Copy)]
 pub struct ZkSpec<'a>(&'a SecuritySpec);
 
 impl<'a> ZkSpec<'a> {
-    /// Returns `Some` iff `spec.mode == Mode::ZeroKnowledge`.
     pub fn try_new(spec: &'a SecuritySpec) -> Option<Self> {
         matches!(spec.mode, Mode::ZeroKnowledge).then_some(Self(spec))
     }
 
-    /// Explicit unwrap — `&SecuritySpec` with the wrapper's lifetime.
-    ///
-    /// Prefer field access through `Deref` for reads; reach for `as_inner`
-    /// when you specifically need to hand `&SecuritySpec` to a function whose
-    /// signature is not in deref-coercion position (e.g. trait method
-    /// dispatch).
     pub const fn as_inner(self) -> &'a SecuritySpec {
         self.0
     }
@@ -274,9 +242,7 @@ pub type MaskCodeMessageLen = Tagged<usize, MaskCodeMessageLenTag>;
 /// `rate = 2^-log_inv_rate`.
 pub type LogInvRate = Tagged<u32, LogInvRateTag>;
 
-/// Reed–Solomon list-decoding ball size `|Λ(C, δ)|`. Wraps `OrderedFloat<f64>`
-/// so it can be stored alongside the `Tagged` integer newtypes without losing
-/// `Eq`/`Hash`.
+/// Reed–Solomon list-decoding ball size `|Λ(C, δ)|`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ListSize(OrderedFloat<f64>);
 
@@ -295,8 +261,6 @@ mod tests {
     use super::*;
     use crate::hash;
 
-    /// Fixture target. 100 is chosen so the expected `target − pow` values in
-    /// the tests below are round numbers (80, 40, 0) for readability.
     const TARGET_BITS: u32 = 100;
 
     fn spec(pow_budget: PowBudget) -> SecuritySpec {
@@ -319,9 +283,6 @@ mod tests {
 
     #[test]
     fn per_slot_zero_collapses_to_forbidden() {
-        // `per_slot(0)` is the only documented way to ask for "no grinding"
-        // from a `u32`; it must produce the `Forbidden` variant, not a
-        // `PerSlot { bits: 0 }` (which is unrepresentable).
         assert_eq!(PowBudget::per_slot(0), PowBudget::Forbidden);
     }
 
@@ -333,7 +294,6 @@ mod tests {
 
     #[test]
     fn pow_credit_shifts_analytic_floor() {
-        // Two below-target PoW budgets: `target − pow` shifts down 1:1.
         assert_eq!(
             spec(PowBudget::per_slot(20)).protocol_security_target_bits(),
             Bits::new(80.0),
@@ -346,7 +306,6 @@ mod tests {
 
     #[test]
     fn pow_exceeding_target_saturates_to_zero() {
-        // `pow > target` saturates rather than going negative.
         let pow_over_target = TARGET_BITS + 100;
         assert_eq!(
             spec(PowBudget::per_slot(pow_over_target)).protocol_security_target_bits(),

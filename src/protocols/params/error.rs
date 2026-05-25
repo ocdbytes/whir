@@ -1,10 +1,5 @@
 //! Errors raised by [`super::derive::ProtocolConfig::derive`] and the
 //! sub-protocol solvers.
-//!
-//! Two layers: [`super::super::proof_of_work::PowError`] for grinding-cap
-//! failures, [`DeriveError`] for everything `derive()` can surface. The latter
-//! wraps the former via [`DeriveError::PowUngrindable::source`] so callers can
-//! walk the `std::error::Error::source()` chain.
 
 use std::fmt::{self, Display, Formatter};
 
@@ -18,11 +13,7 @@ use crate::{
     },
 };
 
-/// Identifies a single PoW grind in the derived protocol — basecase
-/// sub-protocol or a per-round sub-protocol at a specific round index. Used
-/// to label grinding-cap and budget failures.
-///
-/// Flat by design: each variant is one valid (where, sub-protocol) pair.
+/// Identifies a single PoW grind in the derived protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pow {
     /// Basecase γ-RLC grind (Lemma 7.4) — ZK mode only.
@@ -88,8 +79,7 @@ impl Display for ChainTarget {
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DeriveError {
     /// The `t_ood` fixed-point in [`super::derive::solve_t_ood`] ran out of
-    /// iterations. Indicates a pathological spec/tuning combo; should not
-    /// happen under realistic security targets on supported fields.
+    /// iterations.
     #[error("t_ood fixed-point did not converge for round {round_index}")]
     FixedPointDidNotConverge { round_index: usize },
 
@@ -125,8 +115,7 @@ pub enum DeriveError {
 }
 
 /// Lift `Result<T, PowError>` into `Result<T, DeriveError>` by attaching a
-/// [`Pow`] label. Lets call sites stay single-line — no manual
-/// `.map_err(|e| DeriveError::PowUngrindable { pow, source: e })` boilerplate.
+/// [`Pow`] label.
 pub(crate) trait PowResultExt<T> {
     fn at(self, pow: Pow) -> Result<T, DeriveError>;
 }
@@ -138,9 +127,7 @@ impl<T> PowResultExt<T> for Result<T, PowError> {
 }
 
 /// Grind `analytic → spec.target_security_bits`, then check the result against
-/// `spec.pow_budget` — both failures attributed to `pow_kind` at the same site.
-/// `ProtocolConfig::validate_pow_budget` remains as a defense-in-depth check
-/// for hand-mutated plans.
+/// `spec.pow_budget`.
 pub(crate) fn grind_to_at(
     spec: &SecuritySpec,
     analytic: Bits,

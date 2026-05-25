@@ -1,14 +1,4 @@
 //! Output of [`super::derive`]: the assembled per-round and basecase configs.
-//!
-//! Each ZK round owns its mask oracle: a per-round C_zk codeword (sized for
-//! `2·(k+1)` columns — `k` sumcheck masks + 1 code-switch `(r ‖ s)` mask, all
-//! doubled by Construction 7.2's originals + fresh pairs) plus a per-round
-//! mask-proximity check. Standard rounds carry no mask oracle.
-//!
-//! The post-construction structures (`ProtocolConfig`, `RoundConfig`,
-//! `MaskOracleConfig`) expose only read accessors externally — invariants
-//! validated by [`ProtocolConfig::validate`] survive past the call site
-//! because there is no public mutation surface.
 
 use ark_ff::Field;
 
@@ -75,32 +65,23 @@ impl<M: Embedding> ProtocolConfig<M> {
     }
 
     /// `true` if every PoW slot's difficulty fits within `security.pow_budget`.
-    /// Boolean form of [`Self::validate_pow_budget`].
     pub fn check_pow_bits(&self) -> bool {
         self.validate_pow_budget().is_ok()
     }
 
-    /// Returns `true` if every post-construction invariant holds: PoW
-    /// budget, mask-oracle coherence, and cross-round shape chaining.
+    /// Returns `true` if every post-construction invariant holds.
     pub fn check_all_invariants(&self) -> bool {
         self.validate().is_ok()
     }
 
-    /// Run every post-construction invariant check. Auto-invoked by
-    /// `derive()`; callers only need this after manual inspection (and only
-    /// then through the `pub(crate)` test shim, since fields are private).
-    ///
-    /// Mask-oracle coherence is *not* a separate check: the per-round
-    /// `mask_oracle` lives inside `RoundMode::ZeroKnowledge`, so its
-    /// presence ↔ ZK-ness equivalence is enforced by the type system.
+    /// Run every post-construction invariant check.
     pub fn validate(&self) -> Result<(), DeriveError> {
         self.validate_pow_budget()?;
         self.validate_round_chaining()?;
         Ok(())
     }
 
-    /// PoW slot difficulty ≤ `security.pow_budget` for every slot. Auto-invoked
-    /// by `derive()` via [`Self::validate`].
+    /// PoW slot difficulty ≤ `security.pow_budget` for every slot.
     pub fn validate_pow_budget(&self) -> Result<(), DeriveError> {
         let max = Bits::new(f64::from(self.security.pow_budget.bits()));
         let check = |pow: Pow, cfg: &PowConfig| -> Result<(), DeriveError> {
@@ -180,16 +161,12 @@ impl<M: Embedding> ProtocolConfig<M> {
 
     /// HVZK privacy error in bits, summed across ZK rounds:
     /// `−log Σ_r (t_ood_r² + t_ood_r) / (2|F|)` (bounds doc, §5.3 + §5.7).
-    /// Standard-mode plans return `target_security_bits` as a sentinel —
-    /// HVZK isn't claimed when there are no ZK rounds.
     pub fn privacy_error_bits(&self) -> Bits {
         let field_bits = <M::Target as FieldWithSize>::field_size_bits();
         let mut total_error = 0.0_f64;
         for r in &self.rounds {
             if let RoundMode::ZeroKnowledge { t_ood, .. } = &r.mode {
                 let t = usize_to_f64(t_ood.get());
-                // ζ_ze ≤ (t_ood² + t_ood) / (2|F|). Compute in log space to
-                // stay numerically stable for large field_bits.
                 let log_err = f64::midpoint(t * t, t).log2() - field_bits;
                 total_error += 2_f64.powf(log_err);
             }
@@ -202,8 +179,7 @@ impl<M: Embedding> ProtocolConfig<M> {
 }
 
 impl<M: Embedding> ProtocolConfig<M> {
-    /// Analytic soundness bits (excluding PoW): minimum over basecase and
-    /// every round.
+    /// Analytic soundness bits (excluding PoW).
     pub fn analytic_bits(&self) -> Bits {
         let mut min_bits = f64::from(self.basecase.analytic_bits());
         for round in &self.rounds {
@@ -213,26 +189,16 @@ impl<M: Embedding> ProtocolConfig<M> {
     }
 }
 
-/// Test-only mutators. Grouped here so the production `impl` block above
-/// reads as the public API surface; no equivalent on the public API.
 #[cfg(test)]
 impl<M: Embedding> ProtocolConfig<M> {
-    /// Inject an over-budget basecase PoW slot so `validate_pow_budget` can
-    /// be exercised on a corrupted plan.
     pub(crate) const fn override_basecase_pow_for_test(&mut self, pow: PowConfig) {
         self.basecase.pow = pow;
     }
 
-    /// Drop the tail of `rounds` so the basecase's chained `vector_size` no
-    /// longer matches the (new) last round — trips the basecase branch of
-    /// `validate_round_chaining`.
     pub(crate) fn truncate_rounds_for_test(&mut self, len: usize) {
         self.rounds.truncate(len);
     }
 
-    /// Overwrite a round's code-switch target `vector_size` so the next
-    /// round's source no longer chains — trips the adjacent `windows(2)`
-    /// branch of `validate_round_chaining`, which truncation cannot reach.
     pub(crate) fn corrupt_round_target_vector_size_for_test(
         &mut self,
         round_idx: usize,
@@ -247,10 +213,6 @@ pub struct RoundConfig<M: Embedding> {
     round_index: usize,
     sumcheck: SumcheckConfig<M::Target>,
     code_switch: CodeSwitchConfig<M>,
-    /// Standard vs. ZK — and in ZK mode, owns the round's full mask oracle
-    /// directly. No separate `mask_oracle` field on `RoundConfig`: the
-    /// variant tag is the single source of truth for both ZK-ness and the
-    /// oracle's presence/contents.
     mode: RoundMode<M>,
 }
 
@@ -285,8 +247,7 @@ impl<M: Embedding> RoundConfig<M> {
         &self.mode
     }
 
-    /// Convenience: borrow the round's mask oracle if this is a ZK round.
-    /// Equivalent to pattern-matching on `mode()`.
+    /// Borrow the round's mask oracle if this is a ZK round.
     pub fn mask_oracle(&self) -> Option<&MaskOracleConfig<M::Target>> {
         match &self.mode {
             RoundMode::Standard => None,
@@ -294,8 +255,7 @@ impl<M: Embedding> RoundConfig<M> {
         }
     }
 
-    /// Slim mask-oracle view derived from `mask_oracle()`. Produced on
-    /// demand — there is no stored copy.
+    /// Slim mask-oracle view derived from `mask_oracle()`.
     pub fn mask_oracle_info(&self) -> Option<MaskOracleInfo> {
         self.mask_oracle().map(MaskOracleConfig::info)
     }
@@ -303,18 +263,14 @@ impl<M: Embedding> RoundConfig<M> {
 
 /// Standard vs. ZK round.
 ///
-/// The ZK payload is boxed so the enum stays small: `MaskOracleConfig` is
-/// ~330 B while the `Standard` variant is 0 B, and proofs hold O(rounds)
-/// `RoundMode`s. Accessors expose `&MaskOracleConfig` so call sites are
-/// unaffected by the indirection.
+/// The ZK payload is boxed so the enum stays small.
 #[derive(Clone, Debug)]
 pub enum RoundMode<M: Embedding> {
     Standard,
     ZeroKnowledge {
         /// Lemma 9.9 OOD-sample budget (bounds doc §5.2).
         t_ood: OodSampleBudget,
-        /// Per-round mask oracle: C_zk codeword (sized for `2·(k+1)`
-        /// columns) + ℓ_zk + mask-proximity check for `k+1` masks.
+        /// Per-round mask oracle.
         mask_oracle: Box<MaskOracleConfig<M::Target>>,
     },
 }
@@ -327,9 +283,7 @@ impl<M: Embedding> RoundMode<M> {
 
 impl<M: Embedding> RoundConfig<M> {
     /// Round-level analytic floor: the smallest of `sumcheck`, `code_switch`,
-    /// and (when present) the per-round mask-oracle proximity check. Folding
-    /// the mask-oracle term in here keeps `ProtocolConfig::analytic_bits`
-    /// a pure `min` over rounds + basecase.
+    /// and (when present) the per-round mask-oracle proximity check.
     pub fn analytic_bits(&self) -> Bits {
         let source = &self.code_switch.source;
         let target = &self.code_switch.target;
@@ -355,14 +309,11 @@ impl<M: Embedding> RoundConfig<M> {
     }
 }
 
-/// One round's mask oracle: a C_zk codeword + ℓ_zk + mask-proximity check
-/// covering `k + 1` masks (sumcheck + code-switch) for this round.
+/// One round's mask oracle: a C_zk codeword + ℓ_zk + mask-proximity check.
 #[derive(Clone, Debug)]
 pub struct MaskOracleConfig<F: Field> {
-    /// `num_vectors = 2 · (k + 1)` (Construction 7.2: originals + fresh).
     c_zk: IrsConfig<Identity<F>>,
-    /// `next_pow2(r + t_ood)` for this round: Theorem 9.6 witness layout
-    /// (`0^{ℓ_zk − r}` padding) + Lemma 9.3 `(ℓ_zk − r, 0)`-privacy precondition.
+    /// `next_pow2(r + t_ood)` (Theorem 9.6 + Lemma 9.3).
     l_zk: MaskCodeMessageLen,
     mask_proximity: MaskProximityConfig<F>,
 }
@@ -401,11 +352,6 @@ impl<F: Field> MaskOracleConfig<F> {
 }
 
 /// Slim mask-oracle view (C_zk's list size + ℓ_zk).
-///
-/// Reached only through `RoundMode::ZeroKnowledge`'s field, which is itself
-/// accessible only via `RoundConfig::mode() -> &RoundMode`. The public
-/// surface therefore stays read-only even though the variant fields are
-/// nominally `pub`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MaskOracleInfo {
     pub c_zk_list_size: ListSize,

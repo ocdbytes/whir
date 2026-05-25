@@ -1,5 +1,4 @@
 //! Code-switching IOR (Construction 9.7, p.55) builder + Lemma 9.9 OOD bound.
-//! The `t_ood` / `ℓ_zk` fixed-points live in the planner.
 
 use std::num::NonZeroUsize;
 
@@ -22,10 +21,7 @@ use crate::{
     },
 };
 
-/// Per-round code-switch builder. PoW closes the Lemma 9.9 OOD gap to
-/// `spec.target_security_bits`; `t_ood ≥ 1` is required by Construction 9.7.
-/// In ZK mode, `ℓ_zk ≥ r + t_ood` (Theorem 9.6 witness sizing) is asserted
-/// against the mask oracle carried by [`super::SolveMode::ZeroKnowledge`].
+/// Per-round code-switch builder.
 pub fn solve<M: Embedding>(
     spec: &SecuritySpec,
     source: IrsConfig<M>,
@@ -66,8 +62,7 @@ pub fn solve<M: Embedding>(
 }
 
 /// Per-round code-switch soundness in bits: `min` over Lemma 9.9's three RBR
-/// error slots (OOD, in-domain, combination). `t_ood ≥ 1` per
-/// [`code_switch::Config::new`].
+/// error slots (OOD, in-domain, combination).
 pub fn analytic_error_bits<M: Embedding>(
     source: &IrsConfig<M>,
     target: &IrsConfig<Identity<M::Target>>,
@@ -80,8 +75,7 @@ pub fn analytic_error_bits<M: Embedding>(
     let combined_list =
         target.list_size() * mask_oracle.map_or(1.0, |info| info.c_zk_list_size.get());
     // OOD polynomial is over witness `[f; r_C; s]` of length `ℓ + ℓ_zk` (ZK) or
-    // `ℓ` (Standard). The `s`-tail is sampled at full length `ℓ_zk − r` (not
-    // just `t_ood`), so degree must use the realized `ℓ_zk`, not `r + t_ood`.
+    // `ℓ` (Standard).
     let degree = mask_oracle.map_or_else(
         || source.message_length(),
         |info| source.message_length().saturating_add(info.l_zk.get()),
@@ -142,8 +136,6 @@ mod tests {
 
     const NUM_VARS_HEADROOM: u32 = 4;
 
-    /// `(log_inv_rate, folding_factor, num_vars)`. `num_vars ≥ 2 · folding_factor`
-    /// keeps target IRS valid.
     fn arb_dims() -> impl Strategy<Value = (u32, u32, u32)> {
         (1u32..=3, 1u32..=2).prop_flat_map(|(log_inv_rate, folding_factor)| {
             let min_num_vars = 2 * folding_factor;
@@ -159,8 +151,6 @@ mod tests {
     const FORMULA_FOLDING_FACTOR: u32 = 2;
     const FORMULA_NUM_VARS: u32 = 6;
 
-    /// Standard `min(ood, in_domain, comb)` from Lemma 9.9's three RBR error
-    /// slots; `L = target.list_size()`.
     #[test]
     fn analytic_error_standard_formula() {
         let spec: SecuritySpec = deterministic_spec(Mode::Standard);
@@ -187,14 +177,10 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// ZK bound: combined list `L = target × c_zk`, masked degree `ℓ + ℓ_zk`,
-    /// combination term also subtracts `log|Λ(C_zk)|`.
     #[test]
     fn analytic_error_zk_formula() {
-        // Both mask-oracle values are pow2 so `log2` is exact (avoids
-        // floating-point drift in the expected-vs-got comparison).
-        const C_ZK_LIST_SIZE: f64 = 4.0; // log2 = 2
-        const L_ZK_USIZE: usize = 8; // log2 = 3
+        const C_ZK_LIST_SIZE: f64 = 4.0;
+        const L_ZK_USIZE: usize = 8;
 
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);
         let mask_oracle = MaskOracleInfo {
@@ -230,9 +216,6 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// Low security target (16 bits) pins `source.rbr_queries()` below the
-    /// natural OOD and combination floors on `Field64`, forcing the `min` to
-    /// the arm
     #[test]
     fn analytic_error_uses_in_domain_when_limiting() {
         const LIMITING_TARGET_BITS: u32 = 16;
@@ -286,7 +269,6 @@ mod tests {
             prop_assert!(config.out_domain_samples >= 1);
         }
 
-        /// ZK: `ℓ_zk = next_power_of_two(r + t_ood)`.
         #[test]
         fn solve_zk_mask_equals_padded_r_plus_t_ood(
             spec in arb_zk_spec(),
@@ -321,7 +303,6 @@ mod tests {
             prop_assert_eq!(config.message_mask_length(), (r + t_ood).next_power_of_two());
         }
 
-        /// `analytic_error + pow ≥ target` (Lemma 9.9 OOD term).
         #[test]
         fn pow_closes_gap_to_target_standard(
             spec in arb_standard_spec(),
@@ -335,8 +316,6 @@ mod tests {
         }
     }
 
-    /// Shared shape for the `M::Source ≠ M::Target` smoke tests. `target_ctx`
-    /// uses the same per-round chaining the planner does.
     fn non_identity_smoke_ctxs() -> (RoundContext, RoundContext) {
         const SOURCE_VECTOR_SIZE: usize = 64;
         const SOURCE_LOG_INV_RATE: u32 = 1;
@@ -355,10 +334,6 @@ mod tests {
         (source_ctx, target_ctx)
     }
 
-    /// `solve` asserts `ℓ_zk ≥ source.mask_length() + t_ood` (Theorem 9.6
-    /// witness sizing) under [`SolveMode::ZeroKnowledge`]. Build a
-    /// self-consistent `(source, target, t_ood)` and pass a too-small
-    /// `l_zk = 1` to trip the precondition.
     #[test]
     #[should_panic(expected = "violates Theorem 9.6")]
     fn solve_zk_rejects_l_zk_below_r_plus_t_ood() {
@@ -372,8 +347,6 @@ mod tests {
             FORMULA_NUM_VARS,
             Some(FORMULA_LOG_INV_RATE),
         );
-        // `source.mask_length() + t_ood ≥ 1 + 1 > TOO_SMALL_L_ZK` in ZK,
-        // so the assert in `solve` fires.
         assert!(source.mask_length() + t_ood > TOO_SMALL_L_ZK);
 
         let mask_oracle = MaskOracleInfo {
@@ -390,7 +363,6 @@ mod tests {
         );
     }
 
-    /// Smoke test: `M::Source ≠ M::Target`, Standard mode.
     #[test]
     fn solve_works_with_basefield_embedding_standard() {
         let spec: SecuritySpec = deterministic_spec(Mode::Standard);
@@ -408,7 +380,6 @@ mod tests {
             0,
         )
         .unwrap();
-        // Standard target: codeword_length is t_ood-independent (mask = 0).
         let target = irs_params::solve::<Identity<TestExtensionField>>(
             &spec,
             &target_ctx,
@@ -419,11 +390,8 @@ mod tests {
         assert!(matches!(config.mode, code_switch::CodeSwitchMode::Standard));
     }
 
-    /// Placeholder mask-oracle list size for the smoke test — pow2 so `log2`
-    /// is exact.
     const SMOKE_C_ZK_LIST_SIZE: f64 = 4.0;
 
-    /// Smoke test: `M::Source ≠ M::Target`, ZK mode.
     #[test]
     fn solve_works_with_basefield_embedding_zk() {
         let spec: SecuritySpec = deterministic_spec(Mode::ZeroKnowledge);

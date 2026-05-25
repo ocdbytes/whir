@@ -1,8 +1,4 @@
 //! Derives a [`ProtocolConfig`] from a spec + tuning.
-//!
-//! All cross-protocol coordination lives here: per-round `t_ood ↔ r` and
-//! `ℓ_zk ↔ c_zk` fixed-points, plus the per-round mask oracle (C_zk +
-//! mask-proximity sized for `k + 1` masks).
 
 use crate::{
     algebra::{
@@ -27,18 +23,10 @@ use crate::{
     },
 };
 
-/// Paranoia guard on `solve_t_ood` — convergence proof on the function itself.
 const T_OOD_MAX_ITER: usize = 32;
 
 /// Mode flag for the OOD security bound in [`solve_t_ood`] /
 /// [`ood_security_bits_at`].
-///
-/// In `Standard`, the bound uses `L = target.list_size` and
-/// `d = source.message_length()`.
-///
-/// In `ZeroKnowledge`, the carried `c_zk_log_inv_rate` lets the bound include
-/// the combined list size `target.list_size · c_zk.list_size` and the masked
-/// degree `source.message_length() + ℓ_zk` (Lemma 9.9 witness layout).
 #[derive(Clone, Copy)]
 pub(super) enum OodMode {
     Standard,
@@ -46,12 +34,8 @@ pub(super) enum OodMode {
 }
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
-    /// In ZK each round owns its mask oracle; the `ℓ_zk ↔ c_zk ↔ t_ood`
-    /// fixed-point runs independently per round.
-    ///
     /// Fails with [`DeriveError`] when the spec/tuning combination is
-    /// infeasible: a PoW slot exceeds the grind cap, a fixed point diverges,
-    /// or any slot exceeds `spec.pow_budget` (post-derivation validation).
+    /// infeasible.
     pub fn derive(spec: SecuritySpec, tuning: TuningSpec) -> Result<Self, DeriveError> {
         let RoundLayout {
             shapes,
@@ -80,10 +64,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     }
 }
 
-/// Mode-dispatch input for [`build_round_config`]. The ZK variant borrows the
-/// spec via `ZkSpec` and carries the planner-level `c_zk_log_inv_rate`; the
-/// rest of the round's behavior (target OOD budget, sub-protocol `SolveMode`,
-/// output `RoundMode` payload) is derived from this single discriminator.
+/// Mode-dispatch input for [`build_round_config`].
 #[derive(Clone, Copy)]
 enum RoundBuildMode<'a> {
     Standard,
@@ -94,7 +75,6 @@ enum RoundBuildMode<'a> {
 }
 
 impl RoundBuildMode<'_> {
-    /// Project to the OOD-search mode consumed by [`solve_round_source`].
     fn to_ood_mode(self) -> OodMode {
         match self {
             Self::Standard => OodMode::Standard,
@@ -107,9 +87,6 @@ impl RoundBuildMode<'_> {
     }
 }
 
-/// `target_folding_factor` is the next round's source folding — uniform
-/// `tuning.folding_factor` — so `target_r → source_{r+1}` has matching
-/// interleaving.
 #[derive(Debug, Clone, Copy)]
 struct RoundShape {
     round_index: usize,
@@ -176,10 +153,6 @@ fn target_context<M: Embedding>(shape: &RoundShape, source: &IrsConfig<M>) -> Ro
     }
 }
 
-/// Per-round `(source, t_ood)` for either mode. The target dimensions
-/// (`log_inv_rate` after the round's rate step, post-fold `log_degree`) feed
-/// the regime's canonical-slack list-size estimate, which `solve_t_ood` uses
-/// inside its OOD bound. Shared by Standard and ZK builders.
 fn solve_round_source<M: Embedding + Default>(
     spec: &SecuritySpec,
     shape: &RoundShape,
@@ -191,8 +164,6 @@ fn solve_round_source<M: Embedding + Default>(
             .source_log_inv_rate
             .saturating_add(shape.source_folding_factor.saturating_sub(1)),
     );
-    // Target encodes one polynomial of length `source.message_length()` =
-    // `source_vector_size / 2^source_folding_factor`.
     let target_log_degree = f64::from(
         shape
             .source_vector_size
@@ -212,9 +183,7 @@ fn solve_round_source<M: Embedding + Default>(
 }
 
 /// ZK-only: assemble the per-round mask oracle (C_zk codeword + mask-proximity
-/// check). `ℓ_zk = next_pow2(r + t_ood)` from Theorem 9.6's witness layout +
-/// Lemma 9.3's `r ≥ t` privacy precondition; C_zk holds `2 · num_masks`
-/// columns (Construction 7.2: originals + fresh).
+/// check).
 fn build_mask_oracle<M: Embedding>(
     zk_spec: ZkSpec<'_>,
     source: &IrsConfig<M>,
@@ -239,8 +208,7 @@ fn build_mask_oracle<M: Embedding>(
     debug_assert!(
         (c_zk.list_size() - c_zk_list_size_estimate).abs()
             < 1e-9 * c_zk_list_size_estimate.max(1.0),
-        "c_zk.list_size() {} drifted from planner estimate {} — \
-         see `DecodingRegime::list_size_estimate` for the invariant",
+        "c_zk.list_size() {} drifted from planner estimate {}",
         c_zk.list_size(),
         c_zk_list_size_estimate,
     );
@@ -248,10 +216,6 @@ fn build_mask_oracle<M: Embedding>(
     Ok(MaskOracleConfig::new(c_zk, l_zk, mask_proximity))
 }
 
-/// Per-round builder. Under [`RoundBuildMode::ZeroKnowledge`], C_zk holds
-/// `2 · (k + 1)` columns: `k` sumcheck masks (Lemma 6.4) + one `(r ‖ s)`
-/// code-switch mask (Construction 9.7). `t_ood` solves Lemma 9.9 term 1 in
-/// both modes.
 fn build_round_config<M: Embedding + Default>(
     spec: &SecuritySpec,
     shape: &RoundShape,
@@ -260,7 +224,6 @@ fn build_round_config<M: Embedding + Default>(
     let ctx = round_context(shape);
     let (source, t_ood) = solve_round_source::<M>(spec, shape, mode.to_ood_mode())?;
 
-    // Single mode-dispatch site; ZK additionally builds the mask oracle.
     let (target_budget, solve_mode, round_mode) = match mode {
         RoundBuildMode::Standard => (
             OodSampleBudget::ZERO,
@@ -314,8 +277,7 @@ fn build_round_config<M: Embedding + Default>(
     ))
 }
 
-/// `ℓ_zk = next_pow2(r + t_ood)`: Theorem 9.6 witness layout `0^{ℓ_zk − r}`
-/// combined with Lemma 9.3's `r ≥ t` privacy precondition.
+/// `ℓ_zk = next_pow2(r + t_ood)` (Theorem 9.6 + Lemma 9.3).
 pub(super) const fn compute_l_zk<M: Embedding>(
     source: &IrsConfig<M>,
     t_ood: usize,
@@ -328,22 +290,12 @@ pub(super) const fn compute_l_zk<M: Embedding>(
     )
 }
 
-/// Per-round `(source, t_ood)` from a linear search over `t_ood`.
+/// Per-round `(source, t_ood)`.
 ///
-/// Under `Unique`, OOD contributes no soundness (`|Λ| = 1` ⇒ `(L choose 2) = 0`)
-/// and the short-circuit pins `t_ood = 1` — the Construction 9.7 protocol-layer
-/// minimum, since [`crate::protocols::code_switch::Config::new`] asserts
-/// `out_domain_samples ≥ 1`. Letting the loop run would mis-evaluate the
-/// `log(L·(L−1)/2) ≈ 2·log L − 1` approximation, which is `+∞` off the true
-/// value when `L = 1`.
-///
-/// Under `Johnson`/`Capacity`, searches `t_ood = 1..=T_OOD_MAX_ITER` for the
-/// smallest value where [`ood_security_bits_at`] meets
-/// `protocol_security_target_bits`. The bound is monotone-increasing in `t` for
-/// `|F| ≫ log d` (always the case here), so the first match is the minimum.
-/// Source is rebuilt per iteration because `source.mask_length()` depends on
-/// `t_ood` in ZK (`mask_length = in_domain + t_ood` per Construction 9.7 /
-/// Theorem 9.6); the rebuild is cheap (struct fields only).
+/// Under `Unique`, `t_ood = 1` is pinned (the `log(L·(L−1)/2)` term degenerates
+/// when `L = 1`, and Construction 9.7 requires `out_domain_samples ≥ 1`).
+/// Otherwise linear search over `t_ood = 1..=T_OOD_MAX_ITER` for the smallest
+/// value where [`ood_security_bits_at`] meets `protocol_security_target_bits`.
 pub(super) fn solve_t_ood<M: Embedding + Default>(
     spec: &SecuritySpec,
     src_ctx: &RoundContext,
@@ -372,13 +324,6 @@ pub(super) fn solve_t_ood<M: Embedding + Default>(
 
 /// OOD security bits at candidate `t_ood`, per STIR Lemma 4.5:
 /// `bits = t · (|F| − log d) − log(L · (L − 1) / 2) ≈ t·(|F| − log d) − 2·log L + 1`.
-///
-/// In [`OodMode::Standard`], `L = target.list_size` and `d = source.message_length()`.
-/// In [`OodMode::ZeroKnowledge`], `L = target.list_size · c_zk.list_size` and
-/// `d = source.message_length() + ℓ_zk` (Lemma 9.9 witness layout).
-///
-/// The approximation `log(L·(L−1)/2) ≈ 2·log L − 1` is exact-ish for `L ≥ 2`;
-/// the `L = 1` case is handled by [`solve_t_ood`]'s `Unique` short-circuit.
 fn ood_security_bits_at<M: Embedding>(
     spec: &SecuritySpec,
     source: &IrsConfig<M>,
@@ -423,9 +368,6 @@ mod tests {
         },
     };
 
-    /// Varied tuning space for proptests. Exercises both `FoldingFactor`
-    /// variants. Bounds keep PoW under the 60-bit cap and the IRS solver
-    /// inside Field64's reachable range.
     fn arb_tuning() -> impl Strategy<Value = TuningSpec> {
         let folding = prop_oneof![
             (1usize..=3).prop_map(FoldingFactor::Constant),
@@ -442,22 +384,12 @@ mod tests {
         })
     }
 
-    /// `tuning_with` uses `FoldingFactor::Constant(FIXTURE_FOLDING_FACTOR)` so
-    /// each round folds by 2. With `target_folding == source_folding == 2`,
-    /// `round_layout` keeps a round only while `num_vars ≥ 4`.
     const FIXTURE_FOLDING_FACTOR: usize = 2;
     const FIXTURE_LOG_INV_RATE: u32 = 1;
 
-    /// `log_vector_size` chosen to be below `2 · FIXTURE_FOLDING_FACTOR`, so
-    /// `round_layout` exits before adding any round → basecase-only plan.
     const LOG_VECTOR_SIZE_NO_ROUNDS: u32 = 3;
-    /// Large enough to produce multiple rounds under
-    /// `FIXTURE_FOLDING_FACTOR`-uniform folding; used by every multi-round test.
     const LOG_VECTOR_SIZE_MULTI_ROUND: u32 = 8;
 
-    /// Folding pair used by tests that need round-to-round folding variation
-    /// (rate stepping, target→source chaining). The two values must differ
-    /// from each other so the variation across rounds is observable.
     const VARIED_INITIAL_FOLDING: usize = 3;
     const VARIED_STEADY_FOLDING: usize = 2;
 
@@ -469,10 +401,6 @@ mod tests {
         }
     }
 
-    /// Planner-level tests build full `ProtocolConfig`s, so we use a lower target
-    /// than `test_utils::FIXTURE_TARGET_BITS` (= 80). Keeps PoW below the 60-bit
-    /// cap when every sub-protocol grinds individually. 40 leaves
-    /// `target − analytic_error ≤ 60` on `Field64`.
     const PLAN_FIXTURE_TARGET_BITS: u32 = 40;
 
     fn test_spec(mode: Mode) -> SecuritySpec {
@@ -480,21 +408,14 @@ mod tests {
             mode,
             decoding_regime: DecodingRegime::Johnson,
             target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            // Allow up to the grind cap; derive() auto-validates the budget
-            // and would reject configs that need any PoW under `Forbidden`.
             pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
             hash_id: hash::BLAKE3,
         }
     }
 
-    /// `> 1` so the first round's rate is distinct from the boundary.
     const RATE_STEPPING_STARTING_LOG_INV_RATE: u32 = 2;
-    /// Pairwise `windows(2)` chaining check needs ≥ 2 rounds.
     const MIN_ROUNDS_FOR_CHAINING_TEST: usize = 2;
 
-    /// Each round's source rate steps up by `source_folding - 1`. The basecase
-    /// inherits the rate after the final round. Uses varied folding so the
-    /// per-round step is non-uniform (initial step = 2, steady step = 1).
     #[test]
     fn round_layout_rate_steps_up_by_folding_minus_one() {
         let tuning = TuningSpec {
@@ -515,9 +436,6 @@ mod tests {
         assert_eq!(layout.basecase_log_inv_rate, expected_log_inv_rate);
     }
 
-    /// Cross-round chaining: round `i`'s target folding factor must match
-    /// round `i+1`'s source folding factor (the doc-comment on `RoundShape`
-    /// codifies this). Varied folding makes the check non-vacuous.
     #[test]
     fn round_layout_chains_target_to_next_source_folding() {
         let tuning = TuningSpec {
@@ -541,8 +459,6 @@ mod tests {
         }
     }
 
-    /// Basecase consumes whatever `num_vars` the round loop left behind:
-    /// `basecase_vector_size = 2^(initial_num_vars - sum(source_folding_factor))`.
     #[test]
     fn round_layout_basecase_size_consumes_remaining_num_vars() {
         let tuning = tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND);
@@ -553,9 +469,6 @@ mod tests {
         assert_eq!(layout.basecase_vector_size, 1usize << remaining);
     }
 
-    /// Loop exits when `num_vars < source_folding + target_folding`. Below the
-    /// `2 · FIXTURE_FOLDING_FACTOR` threshold, no round is admitted and the
-    /// basecase carries the whole vector at the starting rate.
     #[test]
     fn round_layout_stops_when_no_room_for_source_plus_target() {
         let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
@@ -575,8 +488,6 @@ mod tests {
         assert_eq!(plan.basecase().commit.vector_size, vector_size);
     }
 
-    /// ZK with zero WHIR rounds = ZK basecase only. Per-round mask oracles are
-    /// absent (there are no rounds); the basecase γ-slot PoW carries soundness.
     #[test]
     fn derive_zk_with_no_rounds_uses_zk_basecase_only() {
         let spec = test_spec(Mode::ZeroKnowledge);
@@ -592,9 +503,6 @@ mod tests {
         ));
     }
 
-    /// Johnson + ZK: each round runs a non-trivial OOD challenge to amplify
-    /// the list-decoding soundness gap (Lemma 9.9). `solve_t_ood`'s linear
-    /// search lands at the smallest `t_ood` clearing the security target.
     #[test]
     fn t_ood_nonzero_in_johnson_zk() {
         let spec = SecuritySpec {
@@ -614,10 +522,6 @@ mod tests {
         }
     }
 
-    /// Unique + ZK: OOD contributes no soundness (`|Λ| = 1`), but
-    /// `protocols::code_switch::Config::new` requires `out_domain_samples ≥ 1`
-    /// to run Construction 9.7 Steps 2-3. `solve_t_ood` pins `t_ood = 1`
-    /// exactly — sharper than the Johnson-side `≥ 1` invariant.
     #[test]
     fn t_ood_pinned_to_one_in_unique_zk() {
         let spec = SecuritySpec {
@@ -637,13 +541,6 @@ mod tests {
         }
     }
 
-    /// Under Unique decoding, the C_zk mask oracle still carries the full
-    /// `2 · (k + 1)` columns — `k` sumcheck masks (Lemma 6.4) plus the
-    /// `(r ‖ s)` code-switch mask (Construction 9.7). With `t_ood = 1`, the
-    /// `s`-tail has length `ℓ_zk − r ≥ 1` and supports the
-    /// Vandermonde-surjectivity ZK argument (bounds doc §5.3 / Bound 3).
-    /// Pins the shape so an accidental "drop code-switch mask under Unique"
-    /// optimization can't slip in unnoticed.
     #[test]
     fn c_zk_keeps_code_switch_mask_under_unique() {
         let spec = SecuritySpec {
@@ -658,7 +555,7 @@ mod tests {
         for r in plan.rounds() {
             let mask_oracle = r.mask_oracle().expect("ZK round has a mask oracle");
             let k = r.code_switch().source.interleaving_depth.trailing_zeros() as usize;
-            let expected_num_masks = k + 1; // k sumcheck + 1 code-switch
+            let expected_num_masks = k + 1;
             assert_eq!(mask_oracle.c_zk().num_vectors, 2 * expected_num_masks);
         }
     }
@@ -724,15 +621,10 @@ mod tests {
             crate::protocols::basecase::BasecaseMode::ZeroKnowledge
         ));
         assert_eq!(plan.basecase().commit.interleaving_depth, 1);
-        // Sumcheck folds basecase to size 1.
         assert_eq!(plan.basecase().sumcheck.final_size(), 1);
     }
 
-    /// Matches `proof_of_work::threshold`'s 60-bit cap.
     const LOOSE_POW_BUDGET_BITS: u32 = 60;
-    /// Sits between a moderate budget (30) and the grind cap (60) — used by
-    /// `check_pow_bits_detects_over_budget_slot` to inject a slot that fits
-    /// the cap but exceeds the test's `pow_budget`.
     const OVER_BUDGET_INJECTED_BITS: f64 = 50.0;
 
     /// Bounds doc §5.3 + §5.7: HVZK privacy error in bits matches the closed
@@ -759,8 +651,6 @@ mod tests {
         assert_close(got, expected_bits);
     }
 
-    /// Standard-mode plans have no HVZK claim — `privacy_error_bits` returns
-    /// the spec's `target_security_bits` as a sentinel.
     #[test]
     fn privacy_error_bits_standard_returns_target_sentinel() {
         let spec = test_spec(Mode::Standard);
@@ -775,7 +665,6 @@ mod tests {
         );
     }
 
-    /// Derived plans must satisfy their own `pow_budget`.
     #[test]
     fn check_pow_bits_passes_on_derived_plan() {
         let plan = ProtocolConfig::<TestEmbedding>::derive(
@@ -786,12 +675,6 @@ mod tests {
         assert!(plan.check_pow_bits());
     }
 
-    /// Hand-injected over-budget PoW slot fails `check_pow_bits()`.
-    ///
-    /// Derive with a moderately tight budget (passes auto-validation because
-    /// the natural slot pow stays well below it), then mutate the basecase
-    /// pow to a value above that budget but still within the grind cap, and
-    /// verify the boolean check trips.
     #[test]
     fn check_pow_bits_detects_over_budget_slot() {
         use crate::{bits::Bits, protocols::proof_of_work::Config as PowConfig};
@@ -811,10 +694,6 @@ mod tests {
         assert!(!plan.check_pow_bits());
     }
 
-    /// `validate_round_chaining` trips when round `i`'s target `vector_size`
-    /// no longer matches round `i+1`'s source. Covers the adjacent-rounds
-    /// `windows(2)` branch — distinct from the basecase branch, which is
-    /// covered by `validate_round_chaining_detects_basecase_mismatch`.
     #[test]
     fn validate_round_chaining_detects_adjacent_round_mismatch() {
         let spec = test_spec(Mode::ZeroKnowledge);
@@ -827,9 +706,6 @@ mod tests {
         assert!(n >= 2, "need ≥ 2 rounds to break a mid-chain link");
         assert!(plan.check_all_invariants(), "fresh plan must validate");
 
-        // Round 0's natural target.vector_size is some power of 2; bumping
-        // it to a value the next round's source can't match (the source
-        // still carries the originally-derived size) breaks the chain.
         let bad_size = plan.rounds()[0].code_switch().target.vector_size + 1;
         plan.corrupt_round_target_vector_size_for_test(0, bad_size);
 
@@ -850,9 +726,6 @@ mod tests {
         assert!(!plan.check_all_invariants());
     }
 
-    /// `validate_round_chaining` trips when the basecase no longer chains
-    /// to the (new) last round after the tail is dropped. Multi-round plan
-    /// is required so dropping the last leaves at least one round behind.
     #[test]
     fn validate_round_chaining_detects_basecase_mismatch() {
         let spec = test_spec(Mode::ZeroKnowledge);
@@ -882,9 +755,6 @@ mod tests {
         assert!(!plan.check_all_invariants());
     }
 
-    /// `derive()` reports `PowUngrindable` when the spec demands a per-slot
-    /// difficulty above the grind cap. `target_security_bits = 200` against
-    /// `analytic ≈ 64` on `Field64` gives `required ≈ 136` ≫ 60.
     #[test]
     fn derive_reports_pow_ungrindable() {
         const UNREACHABLE_TARGET_BITS: u32 = 200;
@@ -903,9 +773,6 @@ mod tests {
         );
     }
 
-    /// `derive()` reports `PowBudgetExceeded` when a slot's required PoW
-    /// fits the grind cap but exceeds `spec.pow_budget`. `target = 40`
-    /// with `pow_budget = PerSlot { bits: 5 }` forces this on `Field64`.
     #[test]
     fn derive_reports_pow_budget_exceeded() {
         const TIGHT_MAX_POW: u32 = 5;
@@ -924,9 +791,6 @@ mod tests {
         );
     }
 
-    /// Unique decoding threads through to the basecase IRS in Standard mode.
-    /// Uses a basecase-only tuning so the regime is unambiguous (no rate
-    /// stepping across rounds).
     #[test]
     fn derive_threads_unique_decoding_standard() {
         let spec = SecuritySpec {
@@ -942,7 +806,6 @@ mod tests {
         assert!(plan.basecase().commit.unique_decoding());
     }
 
-    /// Same threading check under ZK mode (basecase-only fixture).
     #[test]
     fn derive_threads_unique_decoding_zk() {
         let spec = SecuritySpec {
@@ -958,9 +821,6 @@ mod tests {
         assert!(plan.basecase().commit.unique_decoding());
     }
 
-    /// Multi-round derivation under Unique: every round's IRS carries the
-    /// Unique regime and every code-switch slot satisfies the Construction
-    /// 9.7 `t_ood ≥ 1` floor.
     #[test]
     fn derive_multi_round_unique_decoding_succeeds() {
         let spec = SecuritySpec {
@@ -977,13 +837,11 @@ mod tests {
             let cs = r.code_switch();
             assert!(cs.source.unique_decoding());
             assert!(cs.target.unique_decoding());
-            assert!(cs.out_domain_samples >= 1, "Construction 9.7 floor");
+            assert!(cs.out_domain_samples >= 1);
         }
         assert!(plan.basecase().commit.unique_decoding());
     }
 
-    /// ZK + Unique multi-round: per-round mask oracle still assembled, C_zk
-    /// built under Unique, code-switch carries `t_ood ≥ 1` per floor.
     #[test]
     fn derive_multi_round_unique_decoding_zk_succeeds() {
         let spec = SecuritySpec {
@@ -1005,8 +863,6 @@ mod tests {
         assert!(plan.basecase().commit.unique_decoding());
     }
 
-    /// Multi-round Capacity (Standard): IRS configs carry the Capacity regime
-    /// and the `c_zk_list_size(t)` fixed-point resolves inside `solve_t_ood`.
     #[test]
     fn derive_multi_round_capacity_decoding_succeeds() {
         let spec = SecuritySpec {
@@ -1024,8 +880,6 @@ mod tests {
         }
     }
 
-    /// ZK + Capacity multi-round: exercises the degree-dependent c_zk list
-    /// size inside the t_ood fixed-point.
     #[test]
     fn derive_multi_round_capacity_decoding_zk_succeeds() {
         let spec = SecuritySpec {
@@ -1044,7 +898,6 @@ mod tests {
         }
     }
 
-    /// `analytic_error + pow ≥ target` for every PoW slot in the plan.
     fn assert_plan_meets_target_per_slot<M: Embedding>(
         spec: &SecuritySpec,
         plan: &ProtocolConfig<M>,
@@ -1081,7 +934,6 @@ mod tests {
             sumcheck_params::analytic_error_bits(&plan.basecase().commit, None),
             &plan.basecase().sumcheck.round_pow,
         );
-        // γ-slot is ZK-only.
         if matches!(
             plan.basecase().mode,
             crate::protocols::basecase::BasecaseMode::ZeroKnowledge
@@ -1095,8 +947,6 @@ mod tests {
     }
 
     proptest! {
-        /// End-to-end soundness (Standard): every PoW slot in the derived plan
-        /// closes the gap `analytic + pow ≥ target` against the spec target.
         #[test]
         fn derived_plan_meets_target_per_slot_standard(tuning in arb_tuning()) {
             let spec = test_spec(Mode::Standard);
@@ -1104,8 +954,6 @@ mod tests {
             assert_plan_meets_target_per_slot(&spec, &plan);
         }
 
-        /// End-to-end soundness (ZK): same as above, plus the per-round
-        /// mask-proximity slot and the basecase γ-slot.
         #[test]
         fn derived_plan_meets_target_per_slot_zk(tuning in arb_tuning()) {
             let log_threshold =
@@ -1116,8 +964,6 @@ mod tests {
             assert_plan_meets_target_per_slot(&spec, &plan);
         }
 
-        /// Standard mode: derive succeeds for any tuning shape, no per-round
-        /// mask oracle, and basecase covers the post-fold tail.
         #[test]
         fn derive_standard_succeeds_over_tunings(tuning in arb_tuning()) {
             let spec = test_spec(Mode::Standard);
@@ -1133,8 +979,6 @@ mod tests {
             prop_assert_eq!(plan.basecase().commit.interleaving_depth, 1);
         }
 
-        /// ZK mode: each round has its own mask oracle sized for `k + 1`
-        /// masks; basecase is ZK-flagged when shapes are non-empty.
         #[test]
         fn derive_zk_succeeds_over_tunings(tuning in arb_tuning()) {
             let log_threshold =
@@ -1155,7 +999,6 @@ mod tests {
                 let num_masks = k + 1;
                 prop_assert_eq!(mask_oracle.c_zk().num_vectors, 2 * num_masks);
                 prop_assert_eq!(mask_oracle.mask_proximity().num_masks, num_masks);
-                // Theorem 9.6 / Lemma 9.3: ℓ_zk ≥ r + t_ood for this round.
                 let source_mask = cs.source.mask_length();
                 prop_assert!(mask_oracle.l_zk().get() >= source_mask + t_ood.get());
             }
@@ -1165,8 +1008,6 @@ mod tests {
             ));
         }
 
-        /// `analytic_bits` is finite and non-negative for any tuning the
-        /// planner accepts in Standard mode.
         #[test]
         fn analytic_bits_finite_and_non_negative_standard(tuning in arb_tuning()) {
             let spec = test_spec(Mode::Standard);

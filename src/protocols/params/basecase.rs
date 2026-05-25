@@ -19,8 +19,6 @@ use crate::{
     },
 };
 
-/// PoW closes the Theorem 7.1 γ-slot gap to `spec.target_security_bits`; no
-/// γ challenge in Standard mode ⇒ `Config::none()`.
 pub fn solve<F: Field>(
     spec: &SecuritySpec,
     vector_size: usize,
@@ -65,7 +63,6 @@ pub fn solve<F: Field>(
 }
 
 /// γ-combination soundness (Lemma 7.4 combination-randomness slot, paper p.45).
-/// At `n = 0` the `C_zk` factors vanish; `ε_mca(C, δ)` does not.
 pub fn analytic_error_bits<F: Field>(commit: &IrsConfig<Identity<F>>) -> Bits {
     let field_bits = F::field_size_bits();
     let log_list = commit.list_size().log2();
@@ -76,8 +73,6 @@ pub fn analytic_error_bits<F: Field>(commit: &IrsConfig<Identity<F>>) -> Bits {
 
 impl<F: Field> BasecaseConfig<F> {
     /// Analytic soundness bits (excluding PoW): `min(sumcheck round error, γ-slot error)`.
-    /// The γ-slot only contributes in ZK mode; Standard collapses to the
-    /// sumcheck term.
     pub fn analytic_bits(&self) -> Bits {
         let sumcheck_term = f64::from(sumcheck_params::analytic_error_bits(&self.commit, None));
         let min_bits = match self.mode {
@@ -100,9 +95,6 @@ mod tests {
         TestField, TEST_TARGET_RANGE,
     };
 
-    /// `vector_size = 16` (2^4) and `log_inv_rate = 2` give a small but
-    /// non-degenerate basecase IRS. `folding_factor = 0` is the basecase
-    /// invariant (no folding, message_length = vector_size).
     const FIXTURE_VECTOR_SIZE: usize = 16;
     const FIXTURE_LOG_INV_RATE: u32 = 2;
 
@@ -110,8 +102,6 @@ mod tests {
         (1u32..=4, 1u32..=3)
     }
 
-    /// Builds the commit directly via the IRS solver to bypass `solve`'s PoW
-    /// grind (which would assert against the cap for default test targets).
     #[test]
     fn analytic_error_formula() {
         use crate::protocols::params::{
@@ -138,8 +128,6 @@ mod tests {
         assert_close(got, expected);
     }
 
-    /// At `log_inv_rate = 1` on `Field64`, `ε_mca` is below the poly-identity
-    /// term — pins the `min` to the prox-gaps arm rather than `poly_id`.
     #[test]
     fn analytic_error_uses_eps_mca_when_limiting() {
         use crate::protocols::params::{
