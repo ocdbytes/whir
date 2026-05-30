@@ -27,7 +27,7 @@ pub fn solve<M: Embedding>(
 ) -> Result<SumcheckConfig<M::Target>, DeriveError> {
     let (mask_oracle, output_mode) = match mode {
         SolveMode::Standard => (None, sumcheck::SumcheckMode::Standard),
-        SolveMode::ZeroKnowledge { mask_oracle } => (
+        SolveMode::ZeroKnowledge(mask_oracle) => (
             Some(mask_oracle),
             sumcheck::SumcheckMode::ZeroKnowledge {
                 mask_length: zk_mask_length(),
@@ -126,7 +126,7 @@ mod tests {
             &spec,
             &ctx,
             &source_irs,
-            SolveMode::ZeroKnowledge { mask_oracle },
+            SolveMode::ZeroKnowledge(mask_oracle),
             Pow::RoundSumcheck { index: 0 },
         )
         .unwrap();
@@ -218,9 +218,7 @@ mod tests {
             let source_irs = build_source_irs(&spec, &ctx);
             let pow = Pow::RoundSumcheck { index: 0 };
             let mode = build_minimal_mask_oracle(&spec)
-                .map_or(SolveMode::Standard, |mask_oracle| {
-                    SolveMode::ZeroKnowledge { mask_oracle }
-                });
+                .map_or(SolveMode::Standard, SolveMode::ZeroKnowledge);
             let config = solve(&spec, &ctx, &source_irs, mode, pow).unwrap();
             prop_assert_eq!(config.num_rounds, ctx.folding_factor as usize);
         }
@@ -249,9 +247,7 @@ mod tests {
             let mask_oracle = build_minimal_mask_oracle(&spec);
             let error = analytic_error_bits(&source_irs, mask_oracle);
             let pow = Pow::RoundSumcheck { index: 0 };
-            let mode = mask_oracle.map_or(SolveMode::Standard, |mask_oracle| {
-                SolveMode::ZeroKnowledge { mask_oracle }
-            });
+            let mode = mask_oracle.map_or(SolveMode::Standard, SolveMode::ZeroKnowledge);
             let config = solve(&spec, &ctx, &source_irs, mode, pow).unwrap();
             assert_pow_closes_gap(&spec, error, &config.round_pow);
         }
@@ -271,7 +267,7 @@ mod tests {
             &spec,
             &ctx,
             &source_irs,
-            SolveMode::ZeroKnowledge { mask_oracle: info },
+            SolveMode::ZeroKnowledge(info),
             Pow::RoundSumcheck { index: 0 },
         )
         .unwrap();

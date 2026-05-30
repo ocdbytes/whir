@@ -4,7 +4,8 @@ use crate::{
     algebra::embedding::Embedding,
     protocols::params::{
         basecase as basecase_params,
-        build_round::{build_round_config, RoundBuildMode},
+        branch::{Branch, RoundBuildMode, RoundBuildPayload},
+        build_round::build_round_config,
         error::DeriveError,
         layout::{round_layout, RoundLayout},
         protocol_config::{ProtocolConfig, RoundConfig},
@@ -22,12 +23,12 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             basecase_log_inv_rate,
         } = round_layout(&tuning);
 
-        let mode = match spec.mode {
-            Mode::Standard => RoundBuildMode::Standard,
-            Mode::ZeroKnowledge => RoundBuildMode::ZeroKnowledge {
+        let mode: RoundBuildMode<'_> = match spec.mode {
+            Mode::Standard => Branch::Standard,
+            Mode::ZeroKnowledge => Branch::ZeroKnowledge(RoundBuildPayload {
                 zk_spec: ZkSpec::try_new(&spec).expect("matched Mode::ZeroKnowledge above"),
                 c_zk_log_inv_rate: LogInvRate::new(tuning.starting_log_inv_rate),
-            },
+            }),
         };
 
         let rounds: Vec<RoundConfig<M>> = shapes

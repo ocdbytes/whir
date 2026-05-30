@@ -6,6 +6,7 @@
 
 pub(crate) mod basecase;
 pub(crate) mod bounds;
+pub(crate) mod branch;
 pub(crate) mod build_round;
 pub(crate) mod code_switch;
 pub mod derive;
@@ -21,6 +22,7 @@ pub(crate) mod sumcheck;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
+pub use branch::{Branch, SolveMode};
 pub use error::{ChainSource, ChainTarget, DeriveError, Pow};
 pub use protocol_config::{
     MaskOracleConfig, MaskOracleInfo, ProtocolConfig, RoundConfig, RoundMode,
@@ -29,10 +31,3 @@ pub use spec::{
     DecodingRegime, FoldingFactor, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
     PowBudget, RoundContext, SecuritySpec, TuningSpec, ZkSpec,
 };
-
-/// Solver-input mode for the per-round sumcheck and code-switch builders.
-#[derive(Clone, Copy)]
-pub enum SolveMode {
-    Standard,
-    ZeroKnowledge { mask_oracle: MaskOracleInfo },
-}

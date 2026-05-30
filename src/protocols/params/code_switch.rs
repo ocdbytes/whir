@@ -32,7 +32,7 @@ pub fn solve<M: Embedding>(
 ) -> Result<CodeSwitchConfig<M>, DeriveError> {
     let (mask_oracle, output_mode) = match mode {
         SolveMode::Standard => (None, code_switch::CodeSwitchMode::Standard),
-        SolveMode::ZeroKnowledge { mask_oracle } => {
+        SolveMode::ZeroKnowledge(mask_oracle) => {
             let l_zk = mask_oracle.l_zk.get();
             assert!(
                 l_zk >= source.mask_length().saturating_add(t_ood),
@@ -111,7 +111,8 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
-        build_round::{compute_l_zk, solve_t_ood, OodMode},
+        branch::OodMode,
+        build_round::{compute_l_zk, solve_t_ood},
         irs_commit as irs_params,
         spec::{
             DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
@@ -296,7 +297,7 @@ mod tests {
                 source,
                 target,
                 t_ood,
-                SolveMode::ZeroKnowledge { mask_oracle },
+                SolveMode::ZeroKnowledge(mask_oracle),
                 0,
             )
             .unwrap();
@@ -358,7 +359,7 @@ mod tests {
             source,
             target,
             t_ood,
-            SolveMode::ZeroKnowledge { mask_oracle },
+            SolveMode::ZeroKnowledge(mask_oracle),
             0,
         );
     }
@@ -405,9 +406,7 @@ mod tests {
             &spec,
             &source_ctx,
             target_list_size,
-            OodMode::ZeroKnowledge {
-                c_zk_log_inv_rate: f64::from(source_ctx.log_inv_rate),
-            },
+            OodMode::ZeroKnowledge(f64::from(source_ctx.log_inv_rate)),
             0,
         )
         .unwrap();
@@ -426,7 +425,7 @@ mod tests {
             source,
             target,
             t_ood,
-            SolveMode::ZeroKnowledge { mask_oracle },
+            SolveMode::ZeroKnowledge(mask_oracle),
             0,
         )
         .unwrap();

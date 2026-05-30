@@ -213,7 +213,9 @@ pub struct RoundConfig<M: Embedding> {
     round_index: usize,
     sumcheck: SumcheckConfig<M::Target>,
     code_switch: CodeSwitchConfig<M>,
-    mode: RoundMode<M>,
+    mode: RoundMode,
+    /// `Some` iff `mode.is_zk()`. Sized for this round's `k + 1` masks.
+    mask_oracle: Option<MaskOracleConfig<M::Target>>,
 }
 
 impl<M: Embedding> RoundConfig<M> {
@@ -221,13 +223,15 @@ impl<M: Embedding> RoundConfig<M> {
         round_index: usize,
         sumcheck: SumcheckConfig<M::Target>,
         code_switch: CodeSwitchConfig<M>,
-        mode: RoundMode<M>,
+        mode: RoundMode,
+        mask_oracle: Option<MaskOracleConfig<M::Target>>,
     ) -> Self {
         Self {
             round_index,
             sumcheck,
             code_switch,
             mode,
+            mask_oracle,
         }
     }
 
@@ -243,16 +247,13 @@ impl<M: Embedding> RoundConfig<M> {
         &self.code_switch
     }
 
-    pub const fn mode(&self) -> &RoundMode<M> {
+    pub const fn mode(&self) -> &RoundMode {
         &self.mode
     }
 
     /// Borrow the round's mask oracle if this is a ZK round.
-    pub fn mask_oracle(&self) -> Option<&MaskOracleConfig<M::Target>> {
-        match &self.mode {
-            RoundMode::Standard => None,
-            RoundMode::ZeroKnowledge { mask_oracle, .. } => Some(mask_oracle.as_ref()),
-        }
+    pub const fn mask_oracle(&self) -> Option<&MaskOracleConfig<M::Target>> {
+        self.mask_oracle.as_ref()
     }
 
     /// Slim mask-oracle view derived from `mask_oracle()`.
@@ -263,19 +264,18 @@ impl<M: Embedding> RoundConfig<M> {
 
 /// Standard vs. ZK round.
 ///
-/// The ZK payload is boxed so the enum stays small.
-#[derive(Clone, Debug)]
-pub enum RoundMode<M: Embedding> {
+/// Non-generic — the per-round `MaskOracleConfig<F>` lives on
+/// [`RoundConfig`] as a sibling field.
+#[derive(Clone, Copy, Debug)]
+pub enum RoundMode {
     Standard,
     ZeroKnowledge {
         /// Lemma 9.9 OOD-sample budget (bounds doc §5.2).
         t_ood: OodSampleBudget,
-        /// Per-round mask oracle.
-        mask_oracle: Box<MaskOracleConfig<M::Target>>,
     },
 }
 
-impl<M: Embedding> RoundMode<M> {
+impl RoundMode {
     pub const fn is_zk(&self) -> bool {
         matches!(self, Self::ZeroKnowledge { .. })
     }

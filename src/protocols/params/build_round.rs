@@ -13,6 +13,7 @@ use crate::{
         irs_commit::Config as IrsConfig,
         params::{
             bounds::usize_to_f64,
+            branch::{Branch, OodMode, RoundBuildMode, RoundBuildPayload},
             code_switch as code_switch_params,
             error::{DeriveError, Pow},
             irs_commit as irs_params,
@@ -30,55 +31,26 @@ use crate::{
 
 const T_OOD_MAX_ITER: usize = 32;
 
-/// Mode flag for the OOD security bound in [`solve_t_ood`] /
-/// [`ood_security_bits_at`].
-#[derive(Clone, Copy)]
-pub(super) enum OodMode {
-    Standard,
-    ZeroKnowledge { c_zk_log_inv_rate: f64 },
-}
-
-/// Mode-dispatch input for [`build_round_config`].
-#[derive(Clone, Copy)]
-pub(super) enum RoundBuildMode<'a> {
-    Standard,
-    ZeroKnowledge {
-        zk_spec: ZkSpec<'a>,
-        c_zk_log_inv_rate: LogInvRate,
-    },
-}
-
-impl RoundBuildMode<'_> {
-    fn to_ood_mode(self) -> OodMode {
-        match self {
-            Self::Standard => OodMode::Standard,
-            Self::ZeroKnowledge {
-                c_zk_log_inv_rate, ..
-            } => OodMode::ZeroKnowledge {
-                c_zk_log_inv_rate: f64::from(c_zk_log_inv_rate.get()),
-            },
-        }
-    }
-}
-
 pub(super) fn build_round_config<M: Embedding + Default>(
     spec: &SecuritySpec,
     shape: &RoundShape,
     mode: RoundBuildMode<'_>,
 ) -> Result<RoundConfig<M>, DeriveError> {
     let ctx = round_context(shape);
-    let (source, t_ood) = solve_round_source::<M>(spec, shape, mode.to_ood_mode())?;
+    let ood_mode = mode.map(|p| f64::from(p.c_zk_log_inv_rate.get()));
+    let (source, t_ood) = solve_round_source::<M>(spec, shape, ood_mode)?;
 
-    let (target_budget, solve_mode, round_mode) = match mode {
-        RoundBuildMode::Standard => (
+    let (target_budget, solve_mode, round_mode, mask_oracle) = match mode {
+        Branch::Standard => (
             OodSampleBudget::ZERO,
             SolveMode::Standard,
             RoundMode::Standard,
+            None,
         ),
-        RoundBuildMode::ZeroKnowledge {
+        Branch::ZeroKnowledge(RoundBuildPayload {
             zk_spec,
             c_zk_log_inv_rate,
-        } => {
+        }) => {
             let num_masks =
                 sumcheck_params::masks_required(&ctx) + code_switch_params::masks_required();
             let mask_oracle = build_mask_oracle::<M>(
@@ -89,14 +61,16 @@ pub(super) fn build_round_config<M: Embedding + Default>(
                 c_zk_log_inv_rate,
                 shape.round_index,
             )?;
-            let solve_mode = SolveMode::ZeroKnowledge {
-                mask_oracle: mask_oracle.info(),
-            };
+            let solve_mode = SolveMode::ZeroKnowledge(mask_oracle.info());
             let round_mode = RoundMode::ZeroKnowledge {
                 t_ood: OodSampleBudget::new(t_ood),
-                mask_oracle: Box::new(mask_oracle),
             };
-            (OodSampleBudget::new(t_ood), solve_mode, round_mode)
+            (
+                OodSampleBudget::new(t_ood),
+                solve_mode,
+                round_mode,
+                Some(mask_oracle),
+            )
         }
     };
 
@@ -119,6 +93,7 @@ pub(super) fn build_round_config<M: Embedding + Default>(
         sumcheck,
         code_switch,
         round_mode,
+        mask_oracle,
     ))
 }
 
@@ -241,11 +216,11 @@ fn ood_security_bits_at<M: Embedding>(
     field_bits: f64,
 ) -> f64 {
     let (log_degree, log_combined_list) = match ood_mode {
-        OodMode::Standard => (
+        Branch::Standard => (
             usize_to_f64(source.message_length()).log2(),
             target_list_size.log2(),
         ),
-        OodMode::ZeroKnowledge { c_zk_log_inv_rate } => {
+        Branch::ZeroKnowledge(c_zk_log_inv_rate) => {
             let l_zk = source
                 .mask_length()
                 .saturating_add(t_ood)

@@ -14,7 +14,8 @@ use crate::{
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
-            build_round::{solve_t_ood, OodMode},
+            branch::OodMode,
+            build_round::solve_t_ood,
             irs_commit as irs_params,
             protocol_config::MaskOracleInfo,
             spec::{
@@ -156,8 +157,8 @@ pub fn build_round_io<M: Embedding + Default>(
     let target_list_size = spec
         .decoding_regime
         .list_size_estimate(target_log_degree, f64::from(target_log_inv_rate));
-    let ood_mode = c_zk_log_inv_rate.map_or(OodMode::Standard, |rate| OodMode::ZeroKnowledge {
-        c_zk_log_inv_rate: f64::from(rate),
+    let ood_mode = c_zk_log_inv_rate.map_or(OodMode::Standard, |rate| {
+        OodMode::ZeroKnowledge(f64::from(rate))
     });
     let (source, t_ood) = solve_t_ood::<M>(spec, &source_ctx, target_list_size, ood_mode, 0)
         .expect("solve_t_ood diverged in test fixture");
