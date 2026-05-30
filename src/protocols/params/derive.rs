@@ -381,6 +381,53 @@ mod tests {
     }
 
     #[test]
+    fn validate_security_target_met_passes_on_fresh_plan() {
+        let spec = test_spec(Mode::ZeroKnowledge);
+        let plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        plan.validate_security_target_met()
+            .expect("fresh plan must satisfy per-slot target check");
+    }
+
+    #[test]
+    fn validate_security_target_met_catches_recorded_analytic_drift() {
+        use crate::bits::Bits;
+        let spec = test_spec(Mode::ZeroKnowledge);
+        let mut plan = ProtocolConfig::<TestEmbedding>::derive(
+            spec,
+            tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
+        )
+        .unwrap();
+        assert!(!plan.rounds().is_empty(), "need a round to corrupt");
+        let recorded = plan
+            .rounds()
+            .first()
+            .and_then(|r| r.sumcheck().recorded_analytic)
+            .expect("params solver records sumcheck analytic");
+        // Bump the recorded value far from the recompute → triggers drift.
+        plan.corrupt_round_sumcheck_recorded_analytic_for_test(
+            0,
+            Bits::new(f64::from(recorded) + 10.0),
+        );
+        let err = plan
+            .validate_security_target_met()
+            .expect_err("recorded vs recompute mismatch must trip drift check");
+        assert!(
+            matches!(
+                err,
+                DeriveError::AnalyticDrift {
+                    pow: crate::protocols::params::error::Pow::RoundSumcheck { index: 0 },
+                    ..
+                }
+            ),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
     fn derive_reports_pow_ungrindable() {
         const UNREACHABLE_TARGET_BITS: u32 = 200;
         let spec = SecuritySpec {

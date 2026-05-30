@@ -30,7 +30,7 @@ pub fn solve<F: Field>(
         analytic,
         Pow::RoundMaskProximity { index: round_index },
     )?;
-    Ok(MaskProximityConfig::new(c_zk, num_masks, pow))
+    Ok(MaskProximityConfig::new(c_zk, num_masks, pow).with_recorded_analytic(analytic))
 }
 
 /// γ-combination soundness (Lemma 7.4):

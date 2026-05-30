@@ -41,6 +41,9 @@ pub struct Config<F: Field> {
     pub sumcheck: sumcheck::Config<F>,
     pub mode: BasecaseMode,
     pub pow: proof_of_work::Config,
+    /// γ-combination analytic floor recorded by `params::basecase::solve`
+    /// (ZK only). `None` for Standard mode or ad-hoc construction.
+    pub recorded_analytic: Option<crate::bits::Bits>,
 }
 
 impl<F: Field> Config<F> {
@@ -64,7 +67,13 @@ impl<F: Field> Config<F> {
             sumcheck,
             mode,
             pow,
+            recorded_analytic: None,
         }
+    }
+
+    pub const fn with_recorded_analytic(mut self, analytic: crate::bits::Bits) -> Self {
+        self.recorded_analytic = Some(analytic);
+        self
     }
 
     pub const fn size(&self) -> usize {
@@ -296,6 +305,7 @@ mod tests {
                     size.next_power_of_two().trailing_zeros() as usize,
                     sumcheck::SumcheckMode::Standard,
                 ),
+                recorded_analytic: None,
                 mode: if is_zk {
                     BasecaseMode::ZeroKnowledge
                 } else {

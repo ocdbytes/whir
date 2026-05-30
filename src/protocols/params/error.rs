@@ -112,6 +112,31 @@ pub enum DeriveError {
         expected: usize,
         found: usize,
     },
+
+    /// A PoW slot's `analytic + pow.difficulty()` is below `target_security_bits`.
+    /// `grind_to_at` guarantees this at construction; this error fires only if
+    /// the analytic-error formulas applied at validate-time disagree with what
+    /// the per-protocol `solve` functions consumed (e.g., a planner regression
+    /// drifts away from the actual configured IRS rate). Catches the case where
+    /// the rate-schedule plumbing under-reports a per-slot rate.
+    #[error("{pow} soundness gap: analytic {analytic} + pow {pow_bits} < target {target}")]
+    SecurityTargetNotMet {
+        pow: Pow,
+        analytic: Bits,
+        pow_bits: Bits,
+        target: Bits,
+    },
+
+    /// The analytic floor recorded at solve time disagrees with a fresh
+    /// recompute from the same config's state. Indicates that the inputs to
+    /// the `analytic_error_bits` formula drifted between solve and validate
+    /// (e.g., an IRS field was overwritten after construction).
+    #[error("{pow} analytic drift: recorded {recorded} vs recompute {recompute}")]
+    AnalyticDrift {
+        pow: Pow,
+        recorded: Bits,
+        recompute: Bits,
+    },
 }
 
 /// Lift `Result<T, PowError>` into `Result<T, DeriveError>` by attaching a

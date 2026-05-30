@@ -14,9 +14,11 @@ use crate::{
         irs_commit::Config as IrsConfig,
         mask_proximity::Config as MaskProximityConfig,
         params::{
+            basecase as basecase_params,
             bounds::usize_to_f64,
             code_switch as code_switch_params,
             error::{ChainSource, ChainTarget, DeriveError, Pow},
+            mask_proximity as mask_proximity_params,
             spec::{ListSize, MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
             sumcheck as sumcheck_params,
         },
@@ -78,6 +80,102 @@ impl<M: Embedding> ProtocolConfig<M> {
     pub fn validate(&self) -> Result<(), DeriveError> {
         self.validate_pow_budget()?;
         self.validate_round_chaining()?;
+        self.validate_security_target_met()?;
+        Ok(())
+    }
+
+    /// For each PoW slot: verify (a) the analytic-bits floor recorded at
+    /// solve time still matches a fresh recompute from the config's current
+    /// state, and (b) `recorded_analytic + pow.difficulty() ≥ target_security_bits`.
+    ///
+    /// `grind_to_at` guarantees (b) at solve time. If (a) holds, (b) holds
+    /// trivially. If (a) drifts, (b) may fail — most often because a planner
+    /// regression overwrote an IRS field after the solver consumed it.
+    ///
+    /// `EPS` matches the `assert_pow_closes_gap` slack used by the per-slot
+    /// proptest helper, so validation stays consistent with test-time
+    /// assertions.
+    pub fn validate_security_target_met(&self) -> Result<(), DeriveError> {
+        const EPS: f64 = 1e-3;
+        let target = Bits::new(f64::from(self.security.target_security_bits));
+        let check = |pow_kind: Pow,
+                     recorded: Option<Bits>,
+                     recompute: Bits,
+                     pow_cfg: &PowConfig|
+         -> Result<(), DeriveError> {
+            if let Some(recorded) = recorded {
+                if (f64::from(recorded) - f64::from(recompute)).abs() > EPS {
+                    return Err(DeriveError::AnalyticDrift {
+                        pow: pow_kind,
+                        recorded,
+                        recompute,
+                    });
+                }
+            }
+            let analytic = recorded.unwrap_or(recompute);
+            let pow_bits = pow_cfg.difficulty();
+            let sum = f64::from(analytic) + f64::from(pow_bits);
+            if sum + EPS < f64::from(target) {
+                return Err(DeriveError::SecurityTargetNotMet {
+                    pow: pow_kind,
+                    analytic,
+                    pow_bits,
+                    target,
+                });
+            }
+            Ok(())
+        };
+        for r in &self.rounds {
+            let mask_info = r.mask_oracle_info();
+            check(
+                Pow::RoundSumcheck {
+                    index: r.round_index,
+                },
+                r.sumcheck.recorded_analytic,
+                sumcheck_params::analytic_error_bits(&r.code_switch.source, mask_info),
+                &r.sumcheck.round_pow,
+            )?;
+            check(
+                Pow::RoundCodeSwitch {
+                    index: r.round_index,
+                },
+                r.code_switch.recorded_analytic,
+                code_switch_params::analytic_error_bits(
+                    &r.code_switch.source,
+                    &r.code_switch.target,
+                    r.code_switch.out_domain_samples,
+                    mask_info,
+                ),
+                &r.code_switch.pow,
+            )?;
+            if let Some(mo) = r.mask_oracle() {
+                check(
+                    Pow::RoundMaskProximity {
+                        index: r.round_index,
+                    },
+                    mo.mask_proximity.recorded_analytic,
+                    mask_proximity_params::analytic_error_bits(
+                        &mo.mask_proximity.c_zk_commit,
+                        mo.mask_proximity.num_masks,
+                    ),
+                    &mo.mask_proximity.pow,
+                )?;
+            }
+        }
+        check(
+            Pow::BasecaseSumcheck,
+            self.basecase.sumcheck.recorded_analytic,
+            sumcheck_params::analytic_error_bits(&self.basecase.commit, None),
+            &self.basecase.sumcheck.round_pow,
+        )?;
+        if self.basecase.is_zk() {
+            check(
+                Pow::BasecaseGammaCombination,
+                self.basecase.recorded_analytic,
+                basecase_params::analytic_error_bits(&self.basecase.commit),
+                &self.basecase.pow,
+            )?;
+        }
         Ok(())
     }
 
@@ -205,6 +303,14 @@ impl<M: Embedding> ProtocolConfig<M> {
         new_size: usize,
     ) {
         self.rounds[round_idx].code_switch.target.vector_size = new_size;
+    }
+
+    pub(crate) fn corrupt_round_sumcheck_recorded_analytic_for_test(
+        &mut self,
+        round_idx: usize,
+        new_value: Bits,
+    ) {
+        self.rounds[round_idx].sumcheck.recorded_analytic = Some(new_value);
     }
 }
 

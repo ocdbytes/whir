@@ -33,33 +33,37 @@ pub fn solve<F: Field>(
     };
     let commit = irs_params::solve(spec, &ctx, OodSampleBudget::ZERO);
 
-    let sumcheck_pow = grind_to_at(
-        spec,
-        sumcheck_params::analytic_error_bits(&commit, None),
-        Pow::BasecaseSumcheck,
-    )?;
+    let sumcheck_analytic = sumcheck_params::analytic_error_bits(&commit, None);
+    let sumcheck_pow = grind_to_at(spec, sumcheck_analytic, Pow::BasecaseSumcheck)?;
     let sumcheck = SumcheckConfig::new(
         vector_size,
         sumcheck_pow,
         vector_size.next_power_of_two().trailing_zeros() as usize,
         sumcheck::SumcheckMode::Standard,
-    );
+    )
+    .with_recorded_analytic(sumcheck_analytic);
 
     let mode = match spec.mode {
         SpecMode::Standard => basecase::BasecaseMode::Standard,
         SpecMode::ZeroKnowledge => basecase::BasecaseMode::ZeroKnowledge,
     };
 
-    let pow = match mode {
-        basecase::BasecaseMode::Standard => PowConfig::none(),
-        basecase::BasecaseMode::ZeroKnowledge => grind_to_at(
-            spec,
-            analytic_error_bits(&commit),
-            Pow::BasecaseGammaCombination,
-        )?,
+    let (pow, gamma_analytic) = match mode {
+        basecase::BasecaseMode::Standard => (PowConfig::none(), None),
+        basecase::BasecaseMode::ZeroKnowledge => {
+            let a = analytic_error_bits(&commit);
+            (
+                grind_to_at(spec, a, Pow::BasecaseGammaCombination)?,
+                Some(a),
+            )
+        }
     };
 
-    Ok(BasecaseConfig::new(commit, sumcheck, mode, pow))
+    let mut cfg = BasecaseConfig::new(commit, sumcheck, mode, pow);
+    if let Some(a) = gamma_analytic {
+        cfg = cfg.with_recorded_analytic(a);
+    }
+    Ok(cfg)
 }
 
 /// γ-combination soundness (Lemma 7.4 combination-randomness slot, paper p.45).

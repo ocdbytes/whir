@@ -34,13 +34,15 @@ pub fn solve<M: Embedding>(
             },
         ),
     };
-    let round_pow = grind_to_at(spec, analytic_error_bits(source_irs, mask_oracle), pow)?;
+    let analytic = analytic_error_bits(source_irs, mask_oracle);
+    let round_pow = grind_to_at(spec, analytic, pow)?;
     Ok(SumcheckConfig::new(
         ctx.vector_size,
         round_pow,
         num_sumcheck_rounds(ctx),
         output_mode,
-    ))
+    )
+    .with_recorded_analytic(analytic))
 }
 
 /// Per-sumcheck-round soundness in bits: `min(ε_mca, poly_identity_term)`.

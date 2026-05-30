@@ -69,6 +69,9 @@ pub struct Config<F: Field> {
     pub c_zk_commit: IrsConfig<Identity<F>>,
     pub num_masks: usize,
     pub pow: proof_of_work::Config,
+    /// γ-combination analytic floor recorded by `params::mask_proximity::solve`.
+    /// `None` for ad-hoc construction.
+    pub recorded_analytic: Option<crate::bits::Bits>,
 }
 
 /// Prover output from the commit phase.
@@ -100,7 +103,13 @@ impl<F: Field> Config<F> {
             c_zk_commit,
             num_masks,
             pow,
+            recorded_analytic: None,
         }
+    }
+
+    pub const fn with_recorded_analytic(mut self, analytic: crate::bits::Bits) -> Self {
+        self.recorded_analytic = Some(analytic);
+        self
     }
 
     /// Commit all masks and their mask-of-masks in a single shared tree.

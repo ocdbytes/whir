@@ -47,6 +47,10 @@ pub struct Config<M: Embedding> {
     pub mode: CodeSwitchMode,
     pub out_domain_samples: usize,
     pub pow: proof_of_work::Config,
+    /// Analytic-error floor recorded by `params::code_switch::solve`. `None`
+    /// for configs built via ad-hoc paths. Drift checks compare against a
+    /// recompute.
+    pub recorded_analytic: Option<crate::bits::Bits>,
 }
 
 /// Prover output from the code-switch.
@@ -135,7 +139,13 @@ impl<M: Embedding> Config<M> {
             mode,
             out_domain_samples,
             pow,
+            recorded_analytic: None,
         }
+    }
+
+    pub const fn with_recorded_analytic(mut self, analytic: crate::bits::Bits) -> Self {
+        self.recorded_analytic = Some(analytic);
+        self
     }
 
     /// Mask oracle length `ℓ_zk`. Returns 0 in Standard mode.

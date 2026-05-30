@@ -71,6 +71,10 @@ where
     pub round_pow: proof_of_work::Config,
     pub num_rounds: usize,
     pub mode: SumcheckMode,
+    /// Analytic-error floor recorded by the params solver that produced this
+    /// config. `None` when the config wasn't built via `params::sumcheck::solve`
+    /// (legacy/test paths). Drift checks compare this against a recompute.
+    pub recorded_analytic: Option<crate::bits::Bits>,
 }
 
 impl<F: Field> Config<F> {
@@ -95,7 +99,13 @@ impl<F: Field> Config<F> {
             round_pow,
             num_rounds,
             mode,
+            recorded_analytic: None,
         }
+    }
+
+    pub const fn with_recorded_analytic(mut self, analytic: crate::bits::Bits) -> Self {
+        self.recorded_analytic = Some(analytic);
+        self
     }
 
     const fn mask_length(&self) -> usize {

@@ -52,13 +52,10 @@ pub fn solve<M: Embedding>(
     let analytic = analytic_error_bits(&source, &target, t_ood, mask_oracle);
     let pow = grind_to_at(spec, analytic, Pow::RoundCodeSwitch { index: round_index })?;
 
-    Ok(CodeSwitchConfig::new(
-        source,
-        target,
-        t_ood,
-        output_mode,
-        pow,
-    ))
+    Ok(
+        CodeSwitchConfig::new(source, target, t_ood, output_mode, pow)
+            .with_recorded_analytic(analytic),
+    )
 }
 
 /// Per-round code-switch soundness in bits: `min` over Lemma 9.9's three RBR
