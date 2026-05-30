@@ -9,7 +9,10 @@ use crate::{
     algebra::embedding::Embedding,
     protocols::{
         irs_commit::Config as IrsConfig,
-        params::spec::{RoundContext, TuningSpec},
+        params::{
+            error::DeriveError,
+            spec::{RoundContext, TuningSpec},
+        },
     },
 };
 
@@ -22,15 +25,23 @@ pub(super) struct RoundShape {
     pub(super) target_folding_factor: u32,
 }
 
+#[derive(Debug)]
 pub(super) struct RoundLayout {
     pub(super) shapes: Vec<RoundShape>,
     pub(super) basecase_vector_size: usize,
     pub(super) basecase_log_inv_rate: u32,
 }
 
-pub(super) fn round_layout(tuning: &TuningSpec) -> RoundLayout {
-    assert!(tuning.vector_size.is_power_of_two());
-    assert!(tuning.folding_factor.min() >= 1);
+pub(super) fn round_layout(tuning: &TuningSpec) -> Result<RoundLayout, DeriveError> {
+    if !tuning.vector_size.is_power_of_two() {
+        return Err(DeriveError::TuningVectorSizeNotPowerOfTwo {
+            vector_size: tuning.vector_size,
+        });
+    }
+    let min_folding = tuning.folding_factor.min();
+    if min_folding < 1 {
+        return Err(DeriveError::TuningFoldingFactorBelowOne { min: min_folding });
+    }
 
     let mut num_vars = tuning.vector_size.trailing_zeros() as usize;
     let mut log_inv_rate = tuning.starting_log_inv_rate;
@@ -54,11 +65,11 @@ pub(super) fn round_layout(tuning: &TuningSpec) -> RoundLayout {
         log_inv_rate = log_inv_rate.saturating_add((source_folding as u32).saturating_sub(1));
     }
 
-    RoundLayout {
+    Ok(RoundLayout {
         shapes,
         basecase_vector_size: 1usize << num_vars,
         basecase_log_inv_rate: log_inv_rate,
-    }
+    })
 }
 
 pub(super) const fn round_context(shape: &RoundShape) -> RoundContext {
@@ -117,7 +128,7 @@ mod tests {
                 rest: VARIED_STEADY_FOLDING,
             },
         };
-        let layout = round_layout(&tuning);
+        let layout = round_layout(&tuning).unwrap();
 
         let mut expected_log_inv_rate = RATE_STEPPING_STARTING_LOG_INV_RATE;
         for shape in &layout.shapes {
@@ -137,7 +148,7 @@ mod tests {
                 rest: VARIED_STEADY_FOLDING,
             },
         };
-        let layout = round_layout(&tuning);
+        let layout = round_layout(&tuning).unwrap();
         assert!(
             layout.shapes.len() >= MIN_ROUNDS_FOR_CHAINING_TEST,
             "need ≥ {MIN_ROUNDS_FOR_CHAINING_TEST} rounds to test chaining",
@@ -153,7 +164,7 @@ mod tests {
     #[test]
     fn round_layout_basecase_size_consumes_remaining_num_vars() {
         let tuning = tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND);
-        let layout = round_layout(&tuning);
+        let layout = round_layout(&tuning).unwrap();
         let consumed: u32 = layout.shapes.iter().map(|s| s.source_folding_factor).sum();
         let initial_num_vars = tuning.vector_size.trailing_zeros();
         let remaining = initial_num_vars - consumed;
@@ -164,9 +175,40 @@ mod tests {
     fn round_layout_stops_when_no_room_for_source_plus_target() {
         let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
         let tuning = tuning_with(vector_size);
-        let layout = round_layout(&tuning);
+        let layout = round_layout(&tuning).unwrap();
         assert!(layout.shapes.is_empty());
         assert_eq!(layout.basecase_vector_size, vector_size);
         assert_eq!(layout.basecase_log_inv_rate, FIXTURE_LOG_INV_RATE);
+    }
+
+    #[test]
+    fn round_layout_rejects_non_pow2_vector_size() {
+        let tuning = TuningSpec {
+            vector_size: 12,
+            starting_log_inv_rate: FIXTURE_LOG_INV_RATE,
+            folding_factor: FoldingFactor::Constant(FIXTURE_FOLDING_FACTOR),
+        };
+        let err = round_layout(&tuning).expect_err("non-pow2 vector_size must fail");
+        assert!(
+            matches!(
+                err,
+                DeriveError::TuningVectorSizeNotPowerOfTwo { vector_size: 12 }
+            ),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
+    fn round_layout_rejects_zero_folding_factor() {
+        let tuning = TuningSpec {
+            vector_size: 1 << LOG_VECTOR_SIZE_MULTI_ROUND,
+            starting_log_inv_rate: FIXTURE_LOG_INV_RATE,
+            folding_factor: FoldingFactor::Constant(0),
+        };
+        let err = round_layout(&tuning).expect_err("folding_factor = 0 must fail");
+        assert!(
+            matches!(err, DeriveError::TuningFoldingFactorBelowOne { min: 0 }),
+            "got {err:?}",
+        );
     }
 }

@@ -137,6 +137,14 @@ pub enum DeriveError {
         recorded: Bits,
         recompute: Bits,
     },
+
+    /// `tuning.vector_size` must be a power of 2.
+    #[error("tuning.vector_size ({vector_size}) must be a power of 2")]
+    TuningVectorSizeNotPowerOfTwo { vector_size: usize },
+
+    /// `tuning.folding_factor` must yield at least 1 at every round.
+    #[error("tuning.folding_factor min ({min}) must be ≥ 1")]
+    TuningFoldingFactorBelowOne { min: usize },
 }
 
 /// Lift `Result<T, PowError>` into `Result<T, DeriveError>` by attaching a

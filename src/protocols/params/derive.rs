@@ -21,7 +21,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             shapes,
             basecase_vector_size,
             basecase_log_inv_rate,
-        } = round_layout(&tuning);
+        } = round_layout(&tuning)?;
 
         let mode: RoundBuildMode<'_> = match spec.mode {
             Mode::Standard => Branch::Standard,
