@@ -111,7 +111,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::params::{
-        derive::{compute_l_zk, solve_t_ood, OodMode},
+        build_round::{compute_l_zk, solve_t_ood, OodMode},
         irs_commit as irs_params,
         spec::{
             DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,

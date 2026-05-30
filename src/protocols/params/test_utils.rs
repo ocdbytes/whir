@@ -14,7 +14,7 @@ use crate::{
     protocols::{
         irs_commit::Config as IrsConfig,
         params::{
-            derive::{solve_t_ood, OodMode},
+            build_round::{solve_t_ood, OodMode},
             irs_commit as irs_params,
             protocol_config::MaskOracleInfo,
             spec::{

@@ -78,7 +78,7 @@ impl Display for ChainTarget {
 /// sub-protocol solvers it calls.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DeriveError {
-    /// The `t_ood` fixed-point in [`super::derive::solve_t_ood`] ran out of
+    /// The `t_ood` fixed-point in [`super::build_round::solve_t_ood`] ran out of
     /// iterations.
     #[error("t_ood fixed-point did not converge for round {round_index}")]
     FixedPointDidNotConverge { round_index: usize },

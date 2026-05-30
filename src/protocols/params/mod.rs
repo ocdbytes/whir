@@ -6,10 +6,12 @@
 
 pub(crate) mod basecase;
 pub(crate) mod bounds;
+pub(crate) mod build_round;
 pub(crate) mod code_switch;
 pub mod derive;
 pub mod error;
 pub(crate) mod irs_commit;
+pub(crate) mod layout;
 pub(crate) mod mask_proximity;
 pub mod protocol_config;
 pub(crate) mod regime;
