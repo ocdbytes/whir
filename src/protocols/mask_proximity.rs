@@ -85,6 +85,12 @@ pub struct Witness<F: Field> {
 pub type Commitment = IrsCommitment;
 
 impl<F: Field> Config<F> {
+    /// Required `c_zk.num_vectors` for `num_masks` originals: one fresh
+    /// mask-of-mask per original (Construction 7.2 originals + fresh pairs).
+    pub const fn num_vectors_for(num_masks: usize) -> usize {
+        2 * num_masks
+    }
+
     pub fn new(
         c_zk_commit: IrsConfig<Identity<F>>,
         num_masks: usize,
@@ -92,7 +98,7 @@ impl<F: Field> Config<F> {
     ) -> Self {
         assert_eq!(
             c_zk_commit.num_vectors,
-            2 * num_masks,
+            Self::num_vectors_for(num_masks),
             "c_zk.num_vectors must be 2 * num_masks"
         );
         assert_eq!(
@@ -332,7 +338,7 @@ mod tests {
                 .prop_flat_map(|(num_masks, vector_size, mask_length)| {
                     let c_zk = IrsConfig::<Identity<F>>::arbitrary(
                         Identity::new(),
-                        2 * num_masks,
+                        Self::num_vectors_for(num_masks),
                         vector_size,
                         mask_length,
                         1,

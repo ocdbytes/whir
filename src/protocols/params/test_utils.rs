@@ -13,6 +13,7 @@ use crate::{
     hash,
     protocols::{
         irs_commit::Config as IrsConfig,
+        mask_proximity::Config as MaskProximityConfig,
         params::{
             branch::OodMode,
             build_round::solve_t_ood,
@@ -134,7 +135,7 @@ pub fn build_test_c_zk(
         MaskCodeMessageLen::new(l_zk),
         0,
         LogInvRate::new(log_inv_rate),
-        2 * num_masks,
+        MaskProximityConfig::<TestField>::num_vectors_for(num_masks),
     )
 }
 

@@ -1,4 +1,4 @@
-use core::{
+use std::{
     fmt::{self, Display, Formatter},
     marker::PhantomData,
     num::NonZeroU32,

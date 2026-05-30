@@ -149,7 +149,7 @@ pub enum DeriveError {
 
 /// Lift `Result<T, PowError>` into `Result<T, DeriveError>` by attaching a
 /// [`Pow`] label.
-pub(crate) trait PowResultExt<T> {
+pub trait PowResultExt<T> {
     fn at(self, pow: Pow) -> Result<T, DeriveError>;
 }
 
@@ -161,7 +161,7 @@ impl<T> PowResultExt<T> for Result<T, PowError> {
 
 /// Grind `analytic → spec.target_security_bits`, then check the result against
 /// `spec.pow_budget`.
-pub(crate) fn grind_to_at(
+pub fn grind_to_at(
     spec: &SecuritySpec,
     analytic: Bits,
     pow_kind: Pow,

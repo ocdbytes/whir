@@ -11,9 +11,10 @@ use crate::{
     },
     protocols::{
         irs_commit::Config as IrsConfig,
+        mask_proximity::Config as MaskProximityConfig,
         params::{
             bounds::usize_to_f64,
-            branch::{Branch, OodMode, RoundBuildMode, RoundBuildPayload},
+            branch::{Branch, OodMode, RoundBuildMode, RoundBuildPayload, SolveMode},
             code_switch as code_switch_params,
             error::{DeriveError, Pow},
             irs_commit as irs_params,
@@ -24,7 +25,7 @@ use crate::{
                 DecodingRegime, LogInvRate, MaskCodeMessageLen, OodSampleBudget, RoundContext,
                 SecuritySpec, ZkSpec,
             },
-            sumcheck as sumcheck_params, SolveMode,
+            sumcheck as sumcheck_params,
         },
     },
 };
@@ -143,7 +144,7 @@ fn build_mask_oracle<M: Embedding>(
         l_zk,
         source.mask_length(),
         c_zk_log_inv_rate,
-        2 * num_masks,
+        MaskProximityConfig::<M::Target>::num_vectors_for(num_masks),
     );
     let c_zk_list_size_estimate = spec.decoding_regime.list_size_estimate(
         (l_zk.get() as f64).log2(),

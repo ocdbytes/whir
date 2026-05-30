@@ -49,16 +49,22 @@ mod tests {
     use proptest::prelude::*;
 
     use crate::{
-        algebra::{embedding::Embedding, fields::FieldWithSize},
+        algebra::{
+            embedding::Embedding,
+            fields::{Field64, FieldWithSize},
+        },
         hash,
-        protocols::params::{
-            basecase as basecase_params, code_switch as code_switch_params,
-            error::DeriveError,
-            mask_proximity as mask_proximity_params,
-            protocol_config::{ProtocolConfig, RoundMode},
-            spec::{DecodingRegime, FoldingFactor, Mode, PowBudget, SecuritySpec, TuningSpec},
-            sumcheck as sumcheck_params,
-            test_utils::{assert_close, assert_pow_closes_gap, TestEmbedding},
+        protocols::{
+            basecase::BasecaseMode,
+            params::{
+                basecase as basecase_params, code_switch as code_switch_params,
+                error::{ChainSource, ChainTarget, DeriveError, Pow},
+                mask_proximity as mask_proximity_params,
+                protocol_config::{ProtocolConfig, RoundMode},
+                spec::{DecodingRegime, FoldingFactor, Mode, PowBudget, SecuritySpec, TuningSpec},
+                sumcheck as sumcheck_params,
+                test_utils::{assert_close, assert_pow_closes_gap, TestEmbedding},
+            },
         },
     };
 
@@ -124,7 +130,7 @@ mod tests {
         assert!(plan.rounds().is_empty());
         assert!(matches!(
             plan.basecase().mode,
-            crate::protocols::basecase::BasecaseMode::ZeroKnowledge
+            BasecaseMode::ZeroKnowledge
         ));
     }
 
@@ -243,7 +249,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             plan.basecase().mode,
-            crate::protocols::basecase::BasecaseMode::ZeroKnowledge
+            BasecaseMode::ZeroKnowledge
         ));
         assert_eq!(plan.basecase().commit.interleaving_depth, 1);
         assert_eq!(plan.basecase().sumcheck.final_size(), 1);
@@ -262,7 +268,7 @@ mod tests {
             tuning_with(1 << LOG_VECTOR_SIZE_MULTI_ROUND),
         )
         .unwrap();
-        let field_bits = <crate::algebra::fields::Field64 as FieldWithSize>::field_size_bits();
+        let field_bits = <Field64 as FieldWithSize>::field_size_bits();
         let mut expected_total = 0.0_f64;
         for r in plan.rounds() {
             let RoundMode::ZeroKnowledge { t_ood, .. } = r.mode() else {
@@ -341,8 +347,8 @@ mod tests {
             matches!(
                 err,
                 DeriveError::RoundChainBroken {
-                    from: crate::protocols::params::error::ChainSource::Round(0),
-                    to: crate::protocols::params::error::ChainTarget::NextRound(1),
+                    from: ChainSource::Round(0),
+                    to: ChainTarget::NextRound(1),
                     ..
                 }
             ),
@@ -371,7 +377,7 @@ mod tests {
             matches!(
                 err,
                 DeriveError::RoundChainBroken {
-                    to: crate::protocols::params::error::ChainTarget::Basecase,
+                    to: ChainTarget::Basecase,
                     ..
                 }
             ),
@@ -419,7 +425,7 @@ mod tests {
             matches!(
                 err,
                 DeriveError::AnalyticDrift {
-                    pow: crate::protocols::params::error::Pow::RoundSumcheck { index: 0 },
+                    pow: Pow::RoundSumcheck { index: 0 },
                     ..
                 }
             ),
@@ -608,7 +614,7 @@ mod tests {
         );
         if matches!(
             plan.basecase().mode,
-            crate::protocols::basecase::BasecaseMode::ZeroKnowledge
+            BasecaseMode::ZeroKnowledge
         ) {
             assert_pow_closes_gap(
                 spec,
@@ -646,7 +652,7 @@ mod tests {
             }
             prop_assert!(matches!(
                 plan.basecase().mode,
-                crate::protocols::basecase::BasecaseMode::Standard
+                BasecaseMode::Standard
             ));
             prop_assert_eq!(plan.basecase().commit.interleaving_depth, 1);
         }
@@ -676,7 +682,7 @@ mod tests {
             }
             prop_assert!(matches!(
                 plan.basecase().mode,
-                crate::protocols::basecase::BasecaseMode::ZeroKnowledge
+                BasecaseMode::ZeroKnowledge
             ));
         }
 

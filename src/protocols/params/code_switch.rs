@@ -13,10 +13,10 @@ use crate::{
         irs_commit::Config as IrsConfig,
         params::{
             bounds::usize_to_f64,
+            branch::SolveMode,
             error::{grind_to_at, DeriveError, Pow},
             protocol_config::MaskOracleInfo,
             spec::SecuritySpec,
-            SolveMode,
         },
     },
 };
@@ -107,18 +107,22 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::protocols::params::{
-        branch::OodMode,
-        build_round::{compute_l_zk, solve_t_ood},
-        irs_commit as irs_params,
-        spec::{
-            DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
-            PowBudget, RoundContext, SecuritySpec, ZkSpec,
-        },
-        test_utils::{
-            arb_standard_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec, assert_close,
-            assert_pow_closes_gap, build_round_io, deterministic_spec, TestEmbedding,
-            TestExtensionField, TestField, TestNonIdentityEmbedding, TEST_TARGET_RANGE,
+    use crate::{
+        hash,
+        protocols::params::{
+            branch::OodMode,
+            build_round::{compute_l_zk, solve_t_ood},
+            irs_commit as irs_params,
+            spec::{
+                DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
+                PowBudget, RoundContext, SecuritySpec, ZkSpec,
+            },
+            test_utils::{
+                arb_standard_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec,
+                assert_close, assert_pow_closes_gap, build_round_io, deterministic_spec,
+                TestEmbedding, TestExtensionField, TestField, TestNonIdentityEmbedding,
+                TEST_TARGET_RANGE,
+            },
         },
     };
 
@@ -226,7 +230,7 @@ mod tests {
             decoding_regime: DecodingRegime::Johnson,
             target_security_bits: LIMITING_TARGET_BITS,
             pow_budget: PowBudget::Forbidden,
-            hash_id: crate::hash::BLAKE3,
+            hash_id: hash::BLAKE3,
         };
         let (source, target, t_ood) = build_round_io::<M>(
             &spec,

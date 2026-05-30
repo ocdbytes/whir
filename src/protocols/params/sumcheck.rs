@@ -8,10 +8,10 @@ use crate::{
         irs_commit::Config as IrsConfig,
         params::{
             bounds::usize_to_f64,
+            branch::SolveMode,
             error::{grind_to_at, DeriveError, Pow},
             protocol_config::MaskOracleInfo,
             spec::{RoundContext, SecuritySpec},
-            SolveMode,
         },
         sumcheck::{self, Config as SumcheckConfig, SumcheckMaskLen},
     },
