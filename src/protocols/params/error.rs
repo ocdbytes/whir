@@ -8,7 +8,8 @@ use thiserror::Error;
 use crate::{
     bits::Bits,
     protocols::{
-        params::spec::SecuritySpec,
+        irs_commit::CodewordLengthError,
+        params::{layout::LayoutError, spec::SecuritySpec},
         proof_of_work::{Config as PowConfig, PowError},
     },
 };
@@ -79,13 +80,19 @@ impl Display for ChainTarget {
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DeriveError {
     /// The `t_ood` fixed-point in [`super::build_round::solve_t_ood`] ran out of
-    /// iterations.
-    #[error("t_ood fixed-point did not converge for round {round_index}")]
+    /// iterations — usually the field is too small for the security target.
+    #[error(
+        "t_ood fixed-point did not converge for round {round_index}; \
+         lower target_security_bits or use a larger field"
+    )]
     FixedPointDidNotConverge { round_index: usize },
 
     /// A PoW grind cannot close the analytic-to-target gap — the spec is too
     /// tight for any single grind to reach `target_security_bits`.
-    #[error("{pow} cannot be ground: {source}")]
+    #[error(
+        "{pow} cannot be ground: {source}; lower target_security_bits or \
+         switch to a less conservative decoding regime (Johnson/Capacity)"
+    )]
     PowUngrindable {
         pow: Pow,
         #[source]
@@ -94,12 +101,22 @@ pub enum DeriveError {
 
     /// A PoW grind fits the grind cap but exceeds the per-slot budget set by
     /// [`super::spec::SecuritySpec::pow_budget`].
-    #[error("{pow} requires {required} bits, exceeds spec.pow_budget = {max}")]
+    #[error(
+        "{pow} requires {required} bits, exceeds spec.pow_budget = {max}; \
+         raise pow_budget or lower target_security_bits"
+    )]
     PowBudgetExceeded { pow: Pow, required: Bits, max: Bits },
 
     /// Computed codeword length exceeds the NTT engine's supported order.
-    #[error("codeword length {length} exceeds the NTT engine's supported order")]
+    #[error(
+        "codeword length {length} exceeds the NTT engine's supported order; \
+         reduce vector_size or starting_log_inv_rate"
+    )]
     CodewordExceedsNtt { length: usize },
+
+    /// The tuning spec cannot produce a valid round layout.
+    #[error(transparent)]
+    Layout(#[from] LayoutError),
 
     /// Cross-round (or round → basecase) shape chain broken: the next
     /// component's source `vector_size` does not match the previous
@@ -137,14 +154,12 @@ pub enum DeriveError {
         recorded: Bits,
         recompute: Bits,
     },
+}
 
-    /// `tuning.vector_size` must be a power of 2.
-    #[error("tuning.vector_size ({vector_size}) must be a power of 2")]
-    TuningVectorSizeNotPowerOfTwo { vector_size: usize },
-
-    /// `tuning.folding_factor` must yield at least 1 at every round.
-    #[error("tuning.folding_factor min ({min}) must be ≥ 1")]
-    TuningFoldingFactorBelowOne { min: usize },
+impl From<CodewordLengthError> for DeriveError {
+    fn from(e: CodewordLengthError) -> Self {
+        Self::CodewordExceedsNtt { length: e.length }
+    }
 }
 
 /// Lift `Result<T, PowError>` into `Result<T, DeriveError>` by attaching a

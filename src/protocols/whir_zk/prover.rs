@@ -225,7 +225,8 @@ impl<F: Field> Config<F> {
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(
-            self.blinded_commitment.initial_committer.num_vectors, 1,
+            self.blinded_commitment.initial_committer.num_vectors(),
+            1,
             "zkWHIR currently expects one vector per commitment"
         );
         assert_eq!(
@@ -240,7 +241,7 @@ impl<F: Field> Config<F> {
         );
         assert_eq!(
             witness.blinding_vectors.len(),
-            self.blinding_commitment.initial_committer.num_vectors,
+            self.blinding_commitment.initial_committer.num_vectors(),
             "blinding vectors/witness mismatch"
         );
         assert_eq!(

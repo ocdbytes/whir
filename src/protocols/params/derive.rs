@@ -9,7 +9,7 @@ use crate::{
         error::DeriveError,
         layout::{round_layout, RoundLayout},
         protocol_config::{ProtocolConfig, RoundConfig},
-        spec::{LogInvRate, Mode, SecuritySpec, TuningSpec, ZkSpec},
+        spec::{LogInvRate, SecuritySpec, TuningSpec},
     },
 };
 
@@ -23,13 +23,12 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             basecase_log_inv_rate,
         } = round_layout(&tuning)?;
 
-        let mode: RoundBuildMode<'_> = match spec.mode {
-            Mode::Standard => Branch::Standard,
-            Mode::ZeroKnowledge => Branch::ZeroKnowledge(RoundBuildPayload {
-                zk_spec: ZkSpec::try_new(&spec).expect("matched Mode::ZeroKnowledge above"),
+        let mode: RoundBuildMode<'_> = spec.as_zk().map_or(Branch::Standard, |zk_spec| {
+            Branch::ZeroKnowledge(RoundBuildPayload {
+                zk_spec,
                 c_zk_log_inv_rate: LogInvRate::new(tuning.starting_log_inv_rate),
-            }),
-        };
+            })
+        });
 
         let rounds: Vec<RoundConfig<M>> = shapes
             .iter()
@@ -53,16 +52,12 @@ mod tests {
             embedding::Embedding,
             fields::{Field64, FieldWithSize},
         },
-        hash,
         protocols::{
             basecase::BasecaseMode,
             params::{
-                basecase as basecase_params, code_switch as code_switch_params,
                 error::{ChainSource, ChainTarget, DeriveError, Pow},
-                mask_proximity as mask_proximity_params,
                 protocol_config::{ProtocolConfig, RoundMode},
                 spec::{DecodingRegime, FoldingFactor, Mode, PowBudget, SecuritySpec, TuningSpec},
-                sumcheck as sumcheck_params,
                 test_utils::{assert_close, assert_pow_closes_gap, TestEmbedding},
             },
         },
@@ -101,13 +96,9 @@ mod tests {
     const PLAN_FIXTURE_TARGET_BITS: u32 = 40;
 
     fn test_spec(mode: Mode) -> SecuritySpec {
-        SecuritySpec {
-            mode,
-            decoding_regime: DecodingRegime::Johnson,
-            target_security_bits: PLAN_FIXTURE_TARGET_BITS,
-            pow_budget: PowBudget::per_slot(LOOSE_POW_BUDGET_BITS),
-            hash_id: hash::BLAKE3,
-        }
+        SecuritySpec::new(PLAN_FIXTURE_TARGET_BITS)
+            .with_mode(mode)
+            .with_pow_budget(PowBudget::per_slot(LOOSE_POW_BUDGET_BITS))
     }
 
     #[test]
@@ -116,7 +107,7 @@ mod tests {
         let vector_size = 1usize << LOG_VECTOR_SIZE_NO_ROUNDS;
         let plan = ProtocolConfig::<TestEmbedding>::derive(spec, tuning_with(vector_size)).unwrap();
         assert!(plan.rounds().is_empty());
-        assert_eq!(plan.basecase().commit.vector_size, vector_size);
+        assert_eq!(plan.basecase().commit().vector_size(), vector_size);
     }
 
     #[test]
@@ -129,7 +120,7 @@ mod tests {
         .unwrap();
         assert!(plan.rounds().is_empty());
         assert!(matches!(
-            plan.basecase().mode,
+            plan.basecase().mode(),
             BasecaseMode::ZeroKnowledge
         ));
     }
@@ -185,9 +176,13 @@ mod tests {
         .unwrap();
         for r in plan.rounds() {
             let mask_oracle = r.mask_oracle().expect("ZK round has a mask oracle");
-            let k = r.code_switch().source.interleaving_depth.trailing_zeros() as usize;
+            let k = r
+                .code_switch()
+                .source()
+                .interleaving_depth()
+                .trailing_zeros() as usize;
             let expected_num_masks = k + 1;
-            assert_eq!(mask_oracle.c_zk().num_vectors, 2 * expected_num_masks);
+            assert_eq!(mask_oracle.c_zk().num_vectors(), 2 * expected_num_masks);
         }
     }
 
@@ -248,11 +243,11 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            plan.basecase().mode,
+            plan.basecase().mode(),
             BasecaseMode::ZeroKnowledge
         ));
-        assert_eq!(plan.basecase().commit.interleaving_depth, 1);
-        assert_eq!(plan.basecase().sumcheck.final_size(), 1);
+        assert_eq!(plan.basecase().commit().interleaving_depth(), 1);
+        assert_eq!(plan.basecase().sumcheck().final_size(), 1);
     }
 
     const LOOSE_POW_BUDGET_BITS: u32 = 60;
@@ -337,7 +332,7 @@ mod tests {
         assert!(n >= 2, "need ≥ 2 rounds to break a mid-chain link");
         assert!(plan.check_all_invariants(), "fresh plan must validate");
 
-        let bad_size = plan.rounds()[0].code_switch().target.vector_size + 1;
+        let bad_size = plan.rounds()[0].code_switch().target().vector_size() + 1;
         plan.corrupt_round_target_vector_size_for_test(0, bad_size);
 
         let err = plan
@@ -411,13 +406,10 @@ mod tests {
         let recorded = plan
             .rounds()
             .first()
-            .and_then(|r| r.sumcheck().recorded_analytic)
+            .map(|r| r.sumcheck().analytic())
             .expect("params solver records sumcheck analytic");
         // Bump the recorded value far from the recompute → triggers drift.
-        plan.corrupt_round_sumcheck_recorded_analytic_for_test(
-            0,
-            Bits::new(f64::from(recorded) + 10.0),
-        );
+        plan.corrupt_round_sumcheck_analytic_for_test(0, Bits::new(f64::from(recorded) + 10.0));
         let err = plan
             .validate_security_target_met()
             .expect_err("recorded vs recompute mismatch must trip drift check");
@@ -481,7 +473,7 @@ mod tests {
         )
         .unwrap();
         assert!(plan.rounds().is_empty());
-        assert!(plan.basecase().commit.unique_decoding());
+        assert!(plan.basecase().commit().unique_decoding());
     }
 
     #[test]
@@ -496,7 +488,7 @@ mod tests {
         )
         .unwrap();
         assert!(plan.rounds().is_empty());
-        assert!(plan.basecase().commit.unique_decoding());
+        assert!(plan.basecase().commit().unique_decoding());
     }
 
     #[test]
@@ -513,11 +505,11 @@ mod tests {
         assert!(!plan.rounds().is_empty(), "expected multi-round plan");
         for r in plan.rounds() {
             let cs = r.code_switch();
-            assert!(cs.source.unique_decoding());
-            assert!(cs.target.unique_decoding());
-            assert!(cs.out_domain_samples >= 1);
+            assert!(cs.source().unique_decoding());
+            assert!(cs.target().unique_decoding());
+            assert!(cs.out_domain_samples() >= 1);
         }
-        assert!(plan.basecase().commit.unique_decoding());
+        assert!(plan.basecase().commit().unique_decoding());
     }
 
     #[test]
@@ -535,10 +527,10 @@ mod tests {
         for r in plan.rounds() {
             let mo = r.mask_oracle().expect("ZK round must own a mask oracle");
             assert!(mo.c_zk().unique_decoding());
-            assert!(r.code_switch().source.unique_decoding());
-            assert!(r.code_switch().out_domain_samples >= 1);
+            assert!(r.code_switch().source().unique_decoding());
+            assert!(r.code_switch().out_domain_samples() >= 1);
         }
-        assert!(plan.basecase().commit.unique_decoding());
+        assert!(plan.basecase().commit().unique_decoding());
     }
 
     #[test]
@@ -554,7 +546,7 @@ mod tests {
         .unwrap();
         assert!(!plan.rounds().is_empty(), "expected multi-round plan");
         for r in plan.rounds() {
-            assert!(r.code_switch().out_domain_samples >= 1);
+            assert!(r.code_switch().out_domain_samples() >= 1);
         }
     }
 
@@ -572,55 +564,18 @@ mod tests {
         assert!(!plan.rounds().is_empty(), "expected multi-round plan");
         for r in plan.rounds() {
             r.mask_oracle().expect("ZK round must own a mask oracle");
-            assert!(r.code_switch().out_domain_samples >= 1);
+            assert!(r.code_switch().out_domain_samples() >= 1);
         }
     }
 
+    /// Every slot from [`ProtocolConfig::pow_slots`] must close the gap to the
+    /// target with its configured grind, judged from a fresh recompute.
     fn assert_plan_meets_target_per_slot<M: Embedding>(
         spec: &SecuritySpec,
         plan: &ProtocolConfig<M>,
     ) {
-        for r in plan.rounds() {
-            let mask_info = r.mask_oracle_info();
-            let cs = r.code_switch();
-            assert_pow_closes_gap(
-                spec,
-                sumcheck_params::analytic_error_bits(&cs.source, mask_info),
-                &r.sumcheck().round_pow,
-            );
-            assert_pow_closes_gap(
-                spec,
-                code_switch_params::analytic_error_bits(
-                    &cs.source,
-                    &cs.target,
-                    cs.out_domain_samples,
-                    mask_info,
-                ),
-                &cs.pow,
-            );
-            if let Some(mo) = r.mask_oracle() {
-                let mp = mo.mask_proximity();
-                assert_pow_closes_gap(
-                    spec,
-                    mask_proximity_params::analytic_error_bits(&mp.c_zk_commit, mp.num_masks),
-                    &mp.pow,
-                );
-            }
-        }
-        assert_pow_closes_gap(
-            spec,
-            sumcheck_params::analytic_error_bits(&plan.basecase().commit, None),
-            &plan.basecase().sumcheck.round_pow,
-        );
-        if matches!(
-            plan.basecase().mode,
-            BasecaseMode::ZeroKnowledge
-        ) {
-            assert_pow_closes_gap(
-                spec,
-                basecase_params::analytic_error_bits(&plan.basecase().commit),
-                &plan.basecase().pow,
-            );
+        for slot in plan.pow_slots() {
+            assert_pow_closes_gap(spec, slot.recompute, &slot.pow);
         }
     }
 
@@ -651,10 +606,10 @@ mod tests {
                 prop_assert!(r.mask_oracle().is_none());
             }
             prop_assert!(matches!(
-                plan.basecase().mode,
+                plan.basecase().mode(),
                 BasecaseMode::Standard
             ));
-            prop_assert_eq!(plan.basecase().commit.interleaving_depth, 1);
+            prop_assert_eq!(plan.basecase().commit().interleaving_depth(), 1);
         }
 
         #[test]
@@ -673,15 +628,15 @@ mod tests {
                     panic!("expected ZK round");
                 };
                 let cs = r.code_switch();
-                let k = cs.source.interleaving_depth.trailing_zeros() as usize;
+                let k = cs.source().interleaving_depth().trailing_zeros() as usize;
                 let num_masks = k + 1;
-                prop_assert_eq!(mask_oracle.c_zk().num_vectors, 2 * num_masks);
-                prop_assert_eq!(mask_oracle.mask_proximity().num_masks, num_masks);
-                let source_mask = cs.source.mask_length();
+                prop_assert_eq!(mask_oracle.c_zk().num_vectors(), 2 * num_masks);
+                prop_assert_eq!(mask_oracle.mask_proximity().num_masks(), num_masks);
+                let source_mask = cs.source().mask_length();
                 prop_assert!(mask_oracle.l_zk().get() >= source_mask + t_ood.get());
             }
             prop_assert!(matches!(
-                plan.basecase().mode,
+                plan.basecase().mode(),
                 BasecaseMode::ZeroKnowledge
             ));
         }

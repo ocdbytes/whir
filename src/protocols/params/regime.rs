@@ -207,7 +207,7 @@ mod tests {
         use crate::{
             algebra::{embedding::Identity, fields::Field64},
             hash,
-            protocols::irs_commit::{Config, IrsMode},
+            protocols::irs_commit::{Config, IrsMode, IrsParams},
         };
         const PLACEHOLDER_SECURITY_TARGET_BITS: f64 = 80.0;
         const PLACEHOLDER_NUM_VECTORS: usize = 2;
@@ -215,16 +215,16 @@ mod tests {
         const PLACEHOLDER_INTERLEAVING_DEPTH: usize = 1;
         const LOG_INV_RATE: u32 = 2;
 
-        let config: Config<Identity<Field64>> = Config::new(
-            PLACEHOLDER_SECURITY_TARGET_BITS,
-            DecodingRegime::Johnson,
-            hash::BLAKE3,
-            PLACEHOLDER_NUM_VECTORS,
-            PLACEHOLDER_VECTOR_SIZE,
-            PLACEHOLDER_INTERLEAVING_DEPTH,
-            2_f64.powf(-f64::from(LOG_INV_RATE)),
-            IrsMode::Standard,
-        );
+        let config: Config<Identity<Field64>> = Config::new(IrsParams {
+            security_target: PLACEHOLDER_SECURITY_TARGET_BITS,
+            decoding_regime: DecodingRegime::Johnson,
+            hash_id: hash::BLAKE3,
+            num_vectors: PLACEHOLDER_NUM_VECTORS,
+            vector_size: PLACEHOLDER_VECTOR_SIZE,
+            interleaving_depth: PLACEHOLDER_INTERLEAVING_DEPTH,
+            rate: 2_f64.powf(-f64::from(LOG_INV_RATE)),
+            mode: IrsMode::Standard,
+        });
         let log_degree = (config.masked_message_length() as f64).log2();
         let got = DecodingRegime::Johnson.list_size_estimate(log_degree, f64::from(LOG_INV_RATE));
         let expected = config.list_size();

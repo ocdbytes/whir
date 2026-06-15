@@ -16,6 +16,7 @@ pub(crate) mod layout;
 pub(crate) mod mask_proximity;
 pub(crate) mod protocol_config;
 pub(crate) mod regime;
+pub(crate) mod solved;
 pub(crate) mod spec;
 pub(crate) mod sumcheck;
 
@@ -24,10 +25,13 @@ pub(crate) mod test_utils;
 
 pub use branch::{Branch, SolveMode};
 pub use error::{ChainSource, ChainTarget, DeriveError, Pow};
+pub use layout::LayoutError;
 pub use protocol_config::{
-    MaskOracleConfig, MaskOracleInfo, ProtocolConfig, RoundConfig, RoundMode,
+    BasecasePlan, MaskOracleConfig, MaskOracleInfo, ProtocolConfig, RoundConfig, RoundMode,
 };
+pub use solved::Solved;
 pub use spec::{
     DecodingRegime, FoldingFactor, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
-    PowBudget, RoundContext, SecuritySpec, TuningSpec, ZkSpec,
+    ParseDecodingRegimeError, PowBudget, RoundContext, SecuritySpec, TuningSpec, ZkSpec,
+    DEFAULT_POW_BUDGET_BITS,
 };

@@ -12,6 +12,7 @@ use crate::{
         params::{
             bounds::usize_to_f64,
             error::{grind_to_at, DeriveError, Pow},
+            solved::Solved,
             spec::SecuritySpec,
         },
     },
@@ -23,14 +24,17 @@ pub fn solve<F: Field>(
     c_zk: IrsConfig<Identity<F>>,
     num_masks: usize,
     round_index: usize,
-) -> Result<MaskProximityConfig<F>, DeriveError> {
+) -> Result<Solved<MaskProximityConfig<F>>, DeriveError> {
     let analytic = analytic_error_bits(&c_zk, num_masks);
     let pow = grind_to_at(
         spec,
         analytic,
         Pow::RoundMaskProximity { index: round_index },
     )?;
-    Ok(MaskProximityConfig::new(c_zk, num_masks, pow).with_recorded_analytic(analytic))
+    Ok(Solved::new(
+        MaskProximityConfig::new(c_zk, num_masks, pow),
+        analytic,
+    ))
 }
 
 /// γ-combination soundness (Lemma 7.4):
@@ -48,7 +52,7 @@ pub fn analytic_error_bits<F: Field>(c_zk: &IrsConfig<Identity<F>>, num_masks: u
 impl<F: Field> MaskProximityConfig<F> {
     /// Analytic soundness bits (excluding PoW) for the Lemma 7.4 γ-combination.
     pub fn analytic_bits(&self) -> Bits {
-        analytic_error_bits(&self.c_zk_commit, self.num_masks)
+        analytic_error_bits(self.c_zk_commit(), self.num_masks())
     }
 }
 
@@ -61,7 +65,7 @@ mod tests {
         algebra::fields::Field64,
         hash,
         protocols::{
-            irs_commit::IrsMode,
+            irs_commit::{IrsMode, IrsParams},
             params::{
                 spec::{DecodingRegime, Mode},
                 test_utils::{
@@ -110,9 +114,9 @@ mod tests {
         ) {
             let c_zk = build_test_c_zk(&spec, 1usize << l_zk_log, log_inv_rate, num_masks);
             let config = solve(&spec, c_zk, num_masks, 0).unwrap();
-            prop_assert_eq!(config.num_masks, num_masks);
-            prop_assert_eq!(config.c_zk_commit.num_vectors, 2 * num_masks);
-            prop_assert_eq!(config.c_zk_commit.interleaving_depth, 1);
+            prop_assert_eq!(config.num_masks(), num_masks);
+            prop_assert_eq!(config.c_zk_commit().num_vectors(), 2 * num_masks);
+            prop_assert_eq!(config.c_zk_commit().interleaving_depth(), 1);
         }
 
         #[test]
@@ -125,7 +129,7 @@ mod tests {
             let c_zk = build_test_c_zk(&spec, 1usize << l_zk_log, log_inv_rate, num_masks);
             let analytic = analytic_error_bits(&c_zk, num_masks);
             let config = solve(&spec, c_zk, num_masks, 0).unwrap();
-            assert_pow_closes_gap(&spec, analytic, &config.pow);
+            assert_pow_closes_gap(&spec, analytic, &config.pow());
         }
     }
 
@@ -148,16 +152,16 @@ mod tests {
         const NUM_MASKS: usize = 1;
 
         let spec = deterministic_spec(Mode::ZeroKnowledge);
-        let c_zk = IrsConfig::<Identity<Field64>>::new(
-            SECURITY_TARGET_BITS,
-            DecodingRegime::Johnson,
-            hash::BLAKE3,
-            NUM_VECTORS,
-            VECTOR_SIZE,
-            NON_UNIT_INTERLEAVING_DEPTH,
-            RATE,
-            IrsMode::Standard,
-        );
+        let c_zk = IrsConfig::<Identity<Field64>>::new(IrsParams {
+            security_target: SECURITY_TARGET_BITS,
+            decoding_regime: DecodingRegime::Johnson,
+            hash_id: hash::BLAKE3,
+            num_vectors: NUM_VECTORS,
+            vector_size: VECTOR_SIZE,
+            interleaving_depth: NON_UNIT_INTERLEAVING_DEPTH,
+            rate: RATE,
+            mode: IrsMode::Standard,
+        });
         let _ = solve(&spec, c_zk, NUM_MASKS, 0);
     }
 }

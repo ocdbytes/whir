@@ -19,6 +19,7 @@ use crate::{
             code_switch as code_switch_params,
             error::{ChainSource, ChainTarget, DeriveError, Pow},
             mask_proximity as mask_proximity_params,
+            solved::Solved,
             spec::{ListSize, MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
             sumcheck as sumcheck_params,
         },
@@ -32,7 +33,7 @@ pub struct ProtocolConfig<M: Embedding> {
     security: SecuritySpec,
     tuning: TuningSpec,
     rounds: Vec<RoundConfig<M>>,
-    basecase: BasecaseConfig<M::Target>,
+    basecase: BasecasePlan<M::Target>,
 }
 
 impl<M: Embedding> ProtocolConfig<M> {
@@ -40,7 +41,7 @@ impl<M: Embedding> ProtocolConfig<M> {
         security: SecuritySpec,
         tuning: TuningSpec,
         rounds: Vec<RoundConfig<M>>,
-        basecase: BasecaseConfig<M::Target>,
+        basecase: BasecasePlan<M::Target>,
     ) -> Self {
         Self {
             security,
@@ -63,6 +64,10 @@ impl<M: Embedding> ProtocolConfig<M> {
     }
 
     pub const fn basecase(&self) -> &BasecaseConfig<M::Target> {
+        self.basecase.config()
+    }
+
+    pub const fn basecase_plan(&self) -> &BasecasePlan<M::Target> {
         &self.basecase
     }
 
@@ -77,16 +82,77 @@ impl<M: Embedding> ProtocolConfig<M> {
     }
 
     /// Run every post-construction invariant check.
+    ///
+    /// Shape chaining runs first: the analytic recomputes behind the PoW
+    /// checks assume per-config shape invariants hold.
     pub fn validate(&self) -> Result<(), DeriveError> {
-        self.validate_pow_budget()?;
         self.validate_round_chaining()?;
+        self.validate_pow_budget()?;
         self.validate_security_target_met()?;
         Ok(())
     }
 
+    /// Every PoW slot in the plan, in round order followed by the basecase.
+    ///
+    /// The single source of truth for slot enumeration: budget validation,
+    /// target validation, and the per-slot test assertions all iterate this.
+    /// A sub-protocol added here is automatically covered by every check.
+    pub(crate) fn pow_slots(&self) -> impl Iterator<Item = PowSlot> + '_ {
+        let round_slots = self.rounds.iter().flat_map(|r| {
+            let mask_info = r.mask_oracle_info();
+            let index = r.round_index;
+            let cs = r.code_switch.config();
+            let sumcheck = PowSlot {
+                kind: Pow::RoundSumcheck { index },
+                pow: r.sumcheck.round_pow(),
+                recorded: r.sumcheck.analytic(),
+                recompute: sumcheck_params::analytic_error_bits(cs.source(), mask_info),
+            };
+            let code_switch = PowSlot {
+                kind: Pow::RoundCodeSwitch { index },
+                pow: cs.pow(),
+                recorded: r.code_switch.analytic(),
+                recompute: code_switch_params::analytic_error_bits(
+                    cs.source(),
+                    cs.target(),
+                    cs.out_domain_samples(),
+                    mask_info,
+                ),
+            };
+            let mask_proximity = r.mask_oracle().map(|mo| PowSlot {
+                kind: Pow::RoundMaskProximity { index },
+                pow: mo.mask_proximity.pow(),
+                recorded: mo.mask_proximity.analytic(),
+                recompute: mask_proximity_params::analytic_error_bits(
+                    mo.mask_proximity.c_zk_commit(),
+                    mo.mask_proximity.num_masks(),
+                ),
+            });
+            [Some(sumcheck), Some(code_switch), mask_proximity]
+                .into_iter()
+                .flatten()
+        });
+
+        let basecase = self.basecase.config();
+        let basecase_sumcheck = PowSlot {
+            kind: Pow::BasecaseSumcheck,
+            pow: basecase.sumcheck().round_pow(),
+            recorded: self.basecase.sumcheck_analytic(),
+            recompute: sumcheck_params::analytic_error_bits(basecase.commit(), None),
+        };
+        let gamma = basecase.is_zk().then(|| PowSlot {
+            kind: Pow::BasecaseGammaCombination,
+            pow: basecase.pow(),
+            recorded: self.basecase.gamma_analytic(),
+            recompute: basecase_params::analytic_error_bits(basecase.commit()),
+        });
+
+        round_slots.chain([Some(basecase_sumcheck), gamma].into_iter().flatten())
+    }
+
     /// For each PoW slot: verify (a) the analytic-bits floor recorded at
     /// solve time still matches a fresh recompute from the config's current
-    /// state, and (b) `recorded_analytic + pow.difficulty() ≥ target_security_bits`.
+    /// state, and (b) `recorded + pow.difficulty() ≥ target_security_bits`.
     ///
     /// `grind_to_at` guarantees (b) at solve time. If (a) holds, (b) holds
     /// trivially. If (a) drifts, (b) may fail — most often because a planner
@@ -97,84 +163,25 @@ impl<M: Embedding> ProtocolConfig<M> {
     /// assertions.
     pub fn validate_security_target_met(&self) -> Result<(), DeriveError> {
         const EPS: f64 = 1e-3;
+        let eps = Bits::new(EPS);
         let target = Bits::new(f64::from(self.security.target_security_bits));
-        let check = |pow_kind: Pow,
-                     recorded: Option<Bits>,
-                     recompute: Bits,
-                     pow_cfg: &PowConfig|
-         -> Result<(), DeriveError> {
-            if let Some(recorded) = recorded {
-                if (f64::from(recorded) - f64::from(recompute)).abs() > EPS {
-                    return Err(DeriveError::AnalyticDrift {
-                        pow: pow_kind,
-                        recorded,
-                        recompute,
-                    });
-                }
+        for slot in self.pow_slots() {
+            if slot.recorded.abs_diff(slot.recompute) > eps {
+                return Err(DeriveError::AnalyticDrift {
+                    pow: slot.kind,
+                    recorded: slot.recorded,
+                    recompute: slot.recompute,
+                });
             }
-            let analytic = recorded.unwrap_or(recompute);
-            let pow_bits = pow_cfg.difficulty();
-            let sum = f64::from(analytic) + f64::from(pow_bits);
-            if sum + EPS < f64::from(target) {
+            let pow_bits = slot.pow.difficulty();
+            if slot.recorded + pow_bits + eps < target {
                 return Err(DeriveError::SecurityTargetNotMet {
-                    pow: pow_kind,
-                    analytic,
+                    pow: slot.kind,
+                    analytic: slot.recorded,
                     pow_bits,
                     target,
                 });
             }
-            Ok(())
-        };
-        for r in &self.rounds {
-            let mask_info = r.mask_oracle_info();
-            check(
-                Pow::RoundSumcheck {
-                    index: r.round_index,
-                },
-                r.sumcheck.recorded_analytic,
-                sumcheck_params::analytic_error_bits(&r.code_switch.source, mask_info),
-                &r.sumcheck.round_pow,
-            )?;
-            check(
-                Pow::RoundCodeSwitch {
-                    index: r.round_index,
-                },
-                r.code_switch.recorded_analytic,
-                code_switch_params::analytic_error_bits(
-                    &r.code_switch.source,
-                    &r.code_switch.target,
-                    r.code_switch.out_domain_samples,
-                    mask_info,
-                ),
-                &r.code_switch.pow,
-            )?;
-            if let Some(mo) = r.mask_oracle() {
-                check(
-                    Pow::RoundMaskProximity {
-                        index: r.round_index,
-                    },
-                    mo.mask_proximity.recorded_analytic,
-                    mask_proximity_params::analytic_error_bits(
-                        &mo.mask_proximity.c_zk_commit,
-                        mo.mask_proximity.num_masks,
-                    ),
-                    &mo.mask_proximity.pow,
-                )?;
-            }
-        }
-        check(
-            Pow::BasecaseSumcheck,
-            self.basecase.sumcheck.recorded_analytic,
-            sumcheck_params::analytic_error_bits(&self.basecase.commit, None),
-            &self.basecase.sumcheck.round_pow,
-        )?;
-        if self.basecase.is_zk() {
-            check(
-                Pow::BasecaseGammaCombination,
-                self.basecase.recorded_analytic,
-                basecase_params::analytic_error_bits(&self.basecase.commit),
-                &self.basecase.pow,
-            )?;
         }
         Ok(())
     }
@@ -182,38 +189,16 @@ impl<M: Embedding> ProtocolConfig<M> {
     /// PoW slot difficulty ≤ `security.pow_budget` for every slot.
     pub fn validate_pow_budget(&self) -> Result<(), DeriveError> {
         let max = Bits::new(f64::from(self.security.pow_budget.bits()));
-        let check = |pow: Pow, cfg: &PowConfig| -> Result<(), DeriveError> {
-            let required = cfg.difficulty();
+        for slot in self.pow_slots() {
+            let required = slot.pow.difficulty();
             if required > max {
-                Err(DeriveError::PowBudgetExceeded { pow, required, max })
-            } else {
-                Ok(())
-            }
-        };
-        for r in &self.rounds {
-            check(
-                Pow::RoundSumcheck {
-                    index: r.round_index,
-                },
-                &r.sumcheck.round_pow,
-            )?;
-            check(
-                Pow::RoundCodeSwitch {
-                    index: r.round_index,
-                },
-                &r.code_switch.pow,
-            )?;
-            if let Some(mo) = r.mask_oracle() {
-                check(
-                    Pow::RoundMaskProximity {
-                        index: r.round_index,
-                    },
-                    &mo.mask_proximity.pow,
-                )?;
+                return Err(DeriveError::PowBudgetExceeded {
+                    pow: slot.kind,
+                    required,
+                    max,
+                });
             }
         }
-        check(Pow::BasecaseSumcheck, &self.basecase.sumcheck.round_pow)?;
-        check(Pow::BasecaseGammaCombination, &self.basecase.pow)?;
         Ok(())
     }
 
@@ -225,8 +210,8 @@ impl<M: Embedding> ProtocolConfig<M> {
         for window in self.rounds.windows(2) {
             let prev = &window[0];
             let next = &window[1];
-            let expected = prev.code_switch.target.vector_size;
-            let found = next.code_switch.source.vector_size;
+            let expected = prev.code_switch.target().vector_size();
+            let found = next.code_switch.source().vector_size();
             if expected != found {
                 return Err(DeriveError::RoundChainBroken {
                     from: ChainSource::Round(prev.round_index),
@@ -237,9 +222,9 @@ impl<M: Embedding> ProtocolConfig<M> {
             }
         }
 
-        let basecase_vector_size = self.basecase.commit.vector_size;
+        let basecase_vector_size = self.basecase.commit().vector_size();
         let expected = self.rounds.last().map_or(self.tuning.vector_size, |last| {
-            last.code_switch.target.vector_size
+            last.code_switch.target().vector_size()
         });
         if expected != basecase_vector_size {
             let from = self
@@ -279,7 +264,7 @@ impl<M: Embedding> ProtocolConfig<M> {
 impl<M: Embedding> ProtocolConfig<M> {
     /// Analytic soundness bits (excluding PoW).
     pub fn analytic_bits(&self) -> Bits {
-        let mut min_bits = f64::from(self.basecase.analytic_bits());
+        let mut min_bits = f64::from(self.basecase.config().analytic_bits());
         for round in &self.rounds {
             min_bits = min_bits.min(f64::from(round.analytic_bits()));
         }
@@ -287,10 +272,67 @@ impl<M: Embedding> ProtocolConfig<M> {
     }
 }
 
+/// One PoW grind slot in a derived plan: its identity, configured grind, the
+/// analytic floor recorded at solve time, and a fresh recompute of that floor
+/// for drift detection.
+pub struct PowSlot {
+    pub kind: Pow,
+    pub pow: PowConfig,
+    pub recorded: Bits,
+    pub recompute: Bits,
+}
+
+/// Output of [`super::basecase::solve`]: the runtime basecase config plus the
+/// analytic floors its two PoW slots were ground against.
+///
+/// `gamma_analytic` is always computed (the Lemma 7.4 formula is well-defined
+/// in both modes) but only enters validation when the basecase is ZK — the
+/// γ slot does not exist otherwise.
+#[derive(Clone, Debug)]
+pub struct BasecasePlan<F: Field> {
+    config: BasecaseConfig<F>,
+    sumcheck_analytic: Bits,
+    gamma_analytic: Bits,
+}
+
+impl<F: Field> BasecasePlan<F> {
+    pub(crate) const fn new(
+        config: BasecaseConfig<F>,
+        sumcheck_analytic: Bits,
+        gamma_analytic: Bits,
+    ) -> Self {
+        Self {
+            config,
+            sumcheck_analytic,
+            gamma_analytic,
+        }
+    }
+
+    pub const fn config(&self) -> &BasecaseConfig<F> {
+        &self.config
+    }
+
+    pub const fn sumcheck_analytic(&self) -> Bits {
+        self.sumcheck_analytic
+    }
+
+    pub const fn gamma_analytic(&self) -> Bits {
+        self.gamma_analytic
+    }
+}
+
+impl<F: Field> std::ops::Deref for BasecasePlan<F> {
+    type Target = BasecaseConfig<F>;
+
+    fn deref(&self) -> &BasecaseConfig<F> {
+        &self.config
+    }
+}
+
 #[cfg(test)]
 impl<M: Embedding> ProtocolConfig<M> {
     pub(crate) const fn override_basecase_pow_for_test(&mut self, pow: PowConfig) {
-        self.basecase.pow = pow;
+        self.basecase.config.set_pow_for_test(pow);
     }
 
     pub(crate) fn truncate_rounds_for_test(&mut self, len: usize) {
@@ -302,42 +344,44 @@ impl<M: Embedding> ProtocolConfig<M> {
         round_idx: usize,
         new_size: usize,
     ) {
-        self.rounds[round_idx].code_switch.target.vector_size = new_size;
+        self.rounds[round_idx]
+            .code_switch
+            .config_mut_for_test()
+            .target_mut_for_test()
+            .set_vector_size_for_test(new_size);
     }
 
-    pub(crate) fn corrupt_round_sumcheck_recorded_analytic_for_test(
+    pub(crate) fn corrupt_round_sumcheck_analytic_for_test(
         &mut self,
         round_idx: usize,
         new_value: Bits,
     ) {
-        self.rounds[round_idx].sumcheck.recorded_analytic = Some(new_value);
+        self.rounds[round_idx]
+            .sumcheck
+            .set_analytic_for_test(new_value);
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct RoundConfig<M: Embedding> {
     round_index: usize,
-    sumcheck: SumcheckConfig<M::Target>,
-    code_switch: CodeSwitchConfig<M>,
-    mode: RoundMode,
-    /// `Some` iff `mode.is_zk()`. Sized for this round's `k + 1` masks.
-    mask_oracle: Option<MaskOracleConfig<M::Target>>,
+    sumcheck: Solved<SumcheckConfig<M::Target>>,
+    code_switch: Solved<CodeSwitchConfig<M>>,
+    mode: RoundMode<M::Target>,
 }
 
 impl<M: Embedding> RoundConfig<M> {
     pub(crate) const fn new(
         round_index: usize,
-        sumcheck: SumcheckConfig<M::Target>,
-        code_switch: CodeSwitchConfig<M>,
-        mode: RoundMode,
-        mask_oracle: Option<MaskOracleConfig<M::Target>>,
+        sumcheck: Solved<SumcheckConfig<M::Target>>,
+        code_switch: Solved<CodeSwitchConfig<M>>,
+        mode: RoundMode<M::Target>,
     ) -> Self {
         Self {
             round_index,
             sumcheck,
             code_switch,
             mode,
-            mask_oracle,
         }
     }
 
@@ -345,21 +389,24 @@ impl<M: Embedding> RoundConfig<M> {
         self.round_index
     }
 
-    pub const fn sumcheck(&self) -> &SumcheckConfig<M::Target> {
+    pub const fn sumcheck(&self) -> &Solved<SumcheckConfig<M::Target>> {
         &self.sumcheck
     }
 
-    pub const fn code_switch(&self) -> &CodeSwitchConfig<M> {
+    pub const fn code_switch(&self) -> &Solved<CodeSwitchConfig<M>> {
         &self.code_switch
     }
 
-    pub const fn mode(&self) -> &RoundMode {
+    pub const fn mode(&self) -> &RoundMode<M::Target> {
         &self.mode
     }
 
     /// Borrow the round's mask oracle if this is a ZK round.
-    pub const fn mask_oracle(&self) -> Option<&MaskOracleConfig<M::Target>> {
-        self.mask_oracle.as_ref()
+    pub fn mask_oracle(&self) -> Option<&MaskOracleConfig<M::Target>> {
+        match &self.mode {
+            RoundMode::Standard => None,
+            RoundMode::ZeroKnowledge { mask_oracle, .. } => Some(mask_oracle),
+        }
     }
 
     /// Slim mask-oracle view derived from `mask_oracle()`.
@@ -370,18 +417,21 @@ impl<M: Embedding> RoundConfig<M> {
 
 /// Standard vs. ZK round.
 ///
-/// Non-generic — the per-round `MaskOracleConfig<F>` lives on
-/// [`RoundConfig`] as a sibling field.
-#[derive(Clone, Copy, Debug)]
-pub enum RoundMode {
+/// The ZK payload owns the round's mask oracle, so a mode/oracle mismatch is
+/// unrepresentable. Boxed to keep the `Standard` variant from paying the
+/// oracle's footprint.
+#[derive(Clone, Debug)]
+pub enum RoundMode<F: Field> {
     Standard,
     ZeroKnowledge {
         /// Lemma 9.9 OOD-sample budget (bounds doc §5.2).
         t_ood: OodSampleBudget,
+        /// Sized for this round's `k + 1` masks.
+        mask_oracle: Box<MaskOracleConfig<F>>,
     },
 }
 
-impl RoundMode {
+impl<F: Field> RoundMode<F> {
     pub const fn is_zk(&self) -> bool {
         matches!(self, Self::ZeroKnowledge { .. })
     }
@@ -391,15 +441,15 @@ impl<M: Embedding> RoundConfig<M> {
     /// Round-level analytic floor: the smallest of `sumcheck`, `code_switch`,
     /// and (when present) the per-round mask-oracle proximity check.
     pub fn analytic_bits(&self) -> Bits {
-        let source = &self.code_switch.source;
-        let target = &self.code_switch.target;
+        let source = &self.code_switch.source();
+        let target = &self.code_switch.target();
         let mask_info = self.mask_oracle_info();
 
         let sumcheck_term = f64::from(sumcheck_params::analytic_error_bits(source, mask_info));
         let code_switch_term = f64::from(code_switch_params::analytic_error_bits(
             source,
             target,
-            self.code_switch.out_domain_samples,
+            self.code_switch.out_domain_samples(),
             mask_info,
         ));
         let mask_oracle_term = self
@@ -421,14 +471,14 @@ pub struct MaskOracleConfig<F: Field> {
     c_zk: IrsConfig<Identity<F>>,
     /// `next_pow2(r + t_ood)` (Theorem 9.6 + Lemma 9.3).
     l_zk: MaskCodeMessageLen,
-    mask_proximity: MaskProximityConfig<F>,
+    mask_proximity: Solved<MaskProximityConfig<F>>,
 }
 
 impl<F: Field> MaskOracleConfig<F> {
     pub(crate) const fn new(
         c_zk: IrsConfig<Identity<F>>,
         l_zk: MaskCodeMessageLen,
-        mask_proximity: MaskProximityConfig<F>,
+        mask_proximity: Solved<MaskProximityConfig<F>>,
     ) -> Self {
         Self {
             c_zk,
@@ -445,7 +495,7 @@ impl<F: Field> MaskOracleConfig<F> {
         self.l_zk
     }
 
-    pub const fn mask_proximity(&self) -> &MaskProximityConfig<F> {
+    pub const fn mask_proximity(&self) -> &Solved<MaskProximityConfig<F>> {
         &self.mask_proximity
     }
 

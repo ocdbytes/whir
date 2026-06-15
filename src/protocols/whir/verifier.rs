@@ -56,7 +56,7 @@ impl<M: Embedding> Config<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let num_vectors = commitments.len() * self.initial_committer.num_vectors;
+        let num_vectors = commitments.len() * self.initial_committer.num_vectors();
         verify!(evaluations.len().is_multiple_of(num_vectors));
         let num_linear_forms = evaluations.len() / num_vectors;
         if num_vectors == 0 {
@@ -64,7 +64,7 @@ impl<M: Embedding> Config<M> {
         }
 
         let expected_matrix_len =
-            self.initial_out_domain_samples * self.initial_committer.num_vectors;
+            self.initial_out_domain_samples * self.initial_committer.num_vectors();
         for commitment in commitments {
             verify!(commitment.out_of_domain.points.len() == self.initial_out_domain_samples);
             verify!(commitment.out_of_domain.matrix.len() == expected_matrix_len);
@@ -129,7 +129,7 @@ impl<M: Embedding> Config<M> {
             // (If we did run it, all sumcheck polynomials would be constant zero)
             assert_eq!(the_sum, M::Target::ZERO);
             let folding_randomness =
-                verifier_state.verifier_message_vec(self.initial_sumcheck.num_rounds);
+                verifier_state.verifier_message_vec(self.initial_sumcheck.num_rounds());
             self.initial_skip_pow.verify(verifier_state)?;
             folding_randomness
         } else {
@@ -197,7 +197,8 @@ impl<M: Embedding> Config<M> {
         }
 
         // Final round (we receive the full vector instead of a commitment)
-        let final_vector = verifier_state.prover_messages_vec(self.final_sumcheck.initial_size)?;
+        let final_vector =
+            verifier_state.prover_messages_vec(self.final_sumcheck.initial_size())?;
 
         // Final proof of work.
         self.final_pow.verify(verifier_state)?;

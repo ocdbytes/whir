@@ -11,6 +11,7 @@ use crate::{
             branch::SolveMode,
             error::{grind_to_at, DeriveError, Pow},
             protocol_config::MaskOracleInfo,
+            solved::Solved,
             spec::{RoundContext, SecuritySpec},
         },
         sumcheck::{self, Config as SumcheckConfig, SumcheckMaskLen},
@@ -24,7 +25,7 @@ pub fn solve<M: Embedding>(
     source_irs: &IrsConfig<M>,
     mode: SolveMode,
     pow: Pow,
-) -> Result<SumcheckConfig<M::Target>, DeriveError> {
+) -> Result<Solved<SumcheckConfig<M::Target>>, DeriveError> {
     let (mask_oracle, output_mode) = match mode {
         SolveMode::Standard => (None, sumcheck::SumcheckMode::Standard),
         SolveMode::ZeroKnowledge(mask_oracle) => (
@@ -36,13 +37,15 @@ pub fn solve<M: Embedding>(
     };
     let analytic = analytic_error_bits(source_irs, mask_oracle);
     let round_pow = grind_to_at(spec, analytic, pow)?;
-    Ok(SumcheckConfig::new(
-        ctx.vector_size,
-        round_pow,
-        num_sumcheck_rounds(ctx),
-        output_mode,
-    )
-    .with_recorded_analytic(analytic))
+    Ok(Solved::new(
+        SumcheckConfig::new(
+            ctx.vector_size,
+            round_pow,
+            num_sumcheck_rounds(ctx),
+            output_mode,
+        ),
+        analytic,
+    ))
 }
 
 /// Per-sumcheck-round soundness in bits: `min(ε_mca, poly_identity_term)`.
@@ -58,7 +61,7 @@ pub fn analytic_error_bits<M: Embedding>(
     let prox_gaps = source_irs.rbr_soundness_fold_prox_gaps();
 
     let poly_id = mask_oracle.map_or(field_bits - log_list_size - 1.0, |info| {
-        let log_list_size_c_zk = info.c_zk_list_size.get().log2();
+        let log_list_size_c_zk = info.c_zk_list_size.log2();
         let log_l_zk = usize_to_f64(info.l_zk.get()).log2();
         field_bits - log_list_size - log_list_size_c_zk - log_l_zk
     });
@@ -102,7 +105,7 @@ mod tests {
     const FIXTURE_L_ZK: usize = 8;
 
     fn build_source_irs(spec: &SecuritySpec, ctx: &RoundContext) -> IrsConfig<TestEmbedding> {
-        irs_params::solve(spec, ctx, OodSampleBudget::ZERO)
+        irs_params::solve(spec, ctx, OodSampleBudget::ZERO).expect("source IRS fixture must solve")
     }
 
     const FIXTURE_LOG_VECTOR_SIZE: u32 = 4;
@@ -132,7 +135,7 @@ mod tests {
             Pow::RoundSumcheck { index: 0 },
         )
         .unwrap();
-        match config.mode {
+        match config.mode() {
             sumcheck::SumcheckMode::ZeroKnowledge { mask_length } => {
                 assert_eq!(mask_length.get(), 3);
             }
@@ -206,7 +209,7 @@ mod tests {
             let source_irs = build_source_irs(&spec, &ctx);
             let pow = Pow::RoundSumcheck { index: 0 };
             let config = solve(&spec, &ctx, &source_irs, SolveMode::Standard, pow).unwrap();
-            prop_assert!(matches!(config.mode, sumcheck::SumcheckMode::Standard));
+            prop_assert!(matches!(config.mode(), sumcheck::SumcheckMode::Standard));
         }
 
         #[test]
@@ -222,7 +225,7 @@ mod tests {
             let mode = build_minimal_mask_oracle(&spec)
                 .map_or(SolveMode::Standard, SolveMode::ZeroKnowledge);
             let config = solve(&spec, &ctx, &source_irs, mode, pow).unwrap();
-            prop_assert_eq!(config.num_rounds, ctx.folding_factor as usize);
+            prop_assert_eq!(config.num_rounds(), ctx.folding_factor as usize);
         }
 
         #[test]
@@ -251,7 +254,7 @@ mod tests {
             let pow = Pow::RoundSumcheck { index: 0 };
             let mode = mask_oracle.map_or(SolveMode::Standard, SolveMode::ZeroKnowledge);
             let config = solve(&spec, &ctx, &source_irs, mode, pow).unwrap();
-            assert_pow_closes_gap(&spec, error, &config.round_pow);
+            assert_pow_closes_gap(&spec, error, &config.round_pow());
         }
     }
 
@@ -260,7 +263,8 @@ mod tests {
         let spec = deterministic_spec(Mode::ZeroKnowledge);
         let ctx = fixture_ctx();
         let source_irs: IrsConfig<TestNonIdentityEmbedding> =
-            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO);
+            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO)
+                .expect("source IRS fixture must solve");
         let info = MaskOracleInfo {
             c_zk_list_size: ListSize::new(FIXTURE_C_ZK_LIST_SIZE),
             l_zk: MaskCodeMessageLen::new(FIXTURE_L_ZK),
@@ -274,7 +278,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            config.mode,
+            config.mode(),
             sumcheck::SumcheckMode::ZeroKnowledge { .. }
         ));
     }

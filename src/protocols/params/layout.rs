@@ -5,16 +5,31 @@
 //! [`super::build_round`] to instantiate per-round configs and by
 //! [`super::derive`] to drive the round/basecase split.
 
+use thiserror::Error;
+
 use crate::{
     algebra::embedding::Embedding,
     protocols::{
         irs_commit::Config as IrsConfig,
-        params::{
-            error::DeriveError,
-            spec::{RoundContext, TuningSpec},
-        },
+        params::spec::{RoundContext, TuningSpec},
     },
 };
+
+/// Reasons a [`TuningSpec`] cannot produce a valid round layout.
+///
+/// Nested into [`super::error::DeriveError`] via `#[from]`, so
+/// [`round_layout`] failures propagate through
+/// [`super::derive::ProtocolConfig::derive`] with `?`.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutError {
+    /// `tuning.vector_size` must be a power of 2.
+    #[error("tuning.vector_size ({vector_size}) must be a power of 2; pad the vector")]
+    VectorSizeNotPowerOfTwo { vector_size: usize },
+
+    /// `tuning.folding_factor` must yield at least 1 at every round.
+    #[error("tuning.folding_factor min ({min}) must be ≥ 1")]
+    FoldingFactorBelowOne { min: usize },
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RoundShape {
@@ -32,15 +47,15 @@ pub(super) struct RoundLayout {
     pub(super) basecase_log_inv_rate: u32,
 }
 
-pub(super) fn round_layout(tuning: &TuningSpec) -> Result<RoundLayout, DeriveError> {
+pub(super) fn round_layout(tuning: &TuningSpec) -> Result<RoundLayout, LayoutError> {
     if !tuning.vector_size.is_power_of_two() {
-        return Err(DeriveError::TuningVectorSizeNotPowerOfTwo {
+        return Err(LayoutError::VectorSizeNotPowerOfTwo {
             vector_size: tuning.vector_size,
         });
     }
     let min_folding = tuning.folding_factor.min();
     if min_folding < 1 {
-        return Err(DeriveError::TuningFoldingFactorBelowOne { min: min_folding });
+        return Err(LayoutError::FoldingFactorBelowOne { min: min_folding });
     }
 
     let mut num_vars = tuning.vector_size.trailing_zeros() as usize;
@@ -192,7 +207,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                DeriveError::TuningVectorSizeNotPowerOfTwo { vector_size: 12 }
+                LayoutError::VectorSizeNotPowerOfTwo { vector_size: 12 }
             ),
             "got {err:?}",
         );
@@ -207,7 +222,7 @@ mod tests {
         };
         let err = round_layout(&tuning).expect_err("folding_factor = 0 must fail");
         assert!(
-            matches!(err, DeriveError::TuningFoldingFactorBelowOne { min: 0 }),
+            matches!(err, LayoutError::FoldingFactorBelowOne { min: 0 }),
             "got {err:?}",
         );
     }

@@ -16,6 +16,7 @@ use std::{f64, fmt, num::NonZeroUsize};
 use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -61,38 +62,38 @@ impl IrsMode {
 #[serde(bound = "")]
 pub struct Config<M: Embedding> {
     /// Embedding into a (larger) field used for weights and drawing challenges.
-    pub embedding: Typed<M>,
+    embedding: Typed<M>,
 
     /// The number of vectors to commit to in one operation.
-    pub num_vectors: usize,
+    num_vectors: usize,
 
     /// The number of coefficients in each vector.
-    pub vector_size: usize,
+    vector_size: usize,
 
     /// The number of Reed-Solomon evaluation points.
-    pub codeword_length: usize,
+    codeword_length: usize,
 
     /// The number of independent codewords that are interleaved together.
-    pub interleaving_depth: usize,
+    interleaving_depth: usize,
 
     /// The matrix commitment configuration.
-    pub matrix_commit: matrix_commit::Config<M::Source>,
+    matrix_commit: matrix_commit::Config<M::Source>,
 
     /// Materialized Reed–Solomon decoding regime (Unique / Johnson w/ slack).
-    pub regime: DecodingRegimeParams,
+    regime: DecodingRegimeParams,
 
     /// The number of in-domain samples.
-    pub in_domain_samples: usize,
+    in_domain_samples: usize,
 
     /// Whether to sort and deduplicate the in-domain samples.
     ///
     /// Deduplication can slightly reduce proof size and prover/verifier
     /// complexity, but it makes transcript pattern and control flow
     /// non-deterministic.
-    pub deduplicate_in_domain: bool,
+    deduplicate_in_domain: bool,
 
     /// Standard / ZeroKnowledge.
-    pub mode: IrsMode,
+    mode: IrsMode,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default, Serialize, Deserialize)]
@@ -121,21 +122,61 @@ pub struct Evaluations<F> {
     pub matrix: Vec<F>,
 }
 
+/// Named-field inputs to [`Config::new`] / [`Config::try_new`].
+///
+/// `num_vectors`, `vector_size`, and `interleaving_depth` share a primitive
+/// type; named construction keeps call sites swap-proof.
+#[derive(Debug, Clone)]
+pub struct IrsParams {
+    pub security_target: f64,
+    pub decoding_regime: DecodingRegime,
+    pub hash_id: EngineId,
+    pub num_vectors: usize,
+    pub vector_size: usize,
+    pub interleaving_depth: usize,
+    pub rate: f64,
+    pub mode: IrsMode,
+}
+
+/// The computed codeword length exceeds the NTT engine's supported order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("codeword length {length} exceeds the NTT engine's supported order")]
+pub struct CodewordLengthError {
+    pub length: usize,
+}
+
 impl<M: Embedding> Config<M> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        security_target: f64,
-        decoding_regime: DecodingRegime,
-        hash_id: EngineId,
-        num_vectors: usize,
-        vector_size: usize,
-        interleaving_depth: usize,
-        rate: f64,
-        mode: IrsMode,
-    ) -> Self
+    /// Panicking version of [`Config::try_new`] for call sites that construct
+    /// from already-vetted parameters.
+    ///
+    /// # Panics
+    ///
+    /// If the codeword length exceeds the NTT engine's supported order.
+    pub fn new(params: IrsParams) -> Self
     where
         M: Default,
     {
+        Self::try_new(params).expect("IRS config construction failed")
+    }
+
+    /// # Errors
+    ///
+    /// [`CodewordLengthError`] when `masked_message_length / rate` exceeds the
+    /// NTT engine's supported order.
+    pub fn try_new(params: IrsParams) -> Result<Self, CodewordLengthError>
+    where
+        M: Default,
+    {
+        let IrsParams {
+            security_target,
+            decoding_regime,
+            hash_id,
+            num_vectors,
+            vector_size,
+            interleaving_depth,
+            rate,
+            mode,
+        } = params;
         assert!(vector_size.is_multiple_of(interleaving_depth));
         assert!(rate > 0. && rate <= 1.);
         let masked_message_length = vector_size / interleaving_depth + mode.mask_length();
@@ -144,14 +185,16 @@ impl<M: Embedding> Config<M> {
         // NTT zero-extends internally), so we only round the codeword side here.
         #[allow(clippy::cast_sign_loss)]
         let raw_codeword_length = (masked_message_length as f64 / rate).ceil() as usize;
-        let codeword_length = ntt::next_order::<M::Source>(raw_codeword_length)
-            .expect("codeword length exceeds NTT engine support");
+        let codeword_length =
+            ntt::next_order::<M::Source>(raw_codeword_length).ok_or(CodewordLengthError {
+                length: raw_codeword_length,
+            })?;
         let rate = masked_message_length as f64 / codeword_length as f64;
 
         let regime = DecodingRegimeParams::from_policy(decoding_regime, rate);
         let in_domain_samples = num_in_domain_queries(decoding_regime, security_target, rate).get();
 
-        Self {
+        Ok(Self {
             embedding: Typed::<M>::default(),
             num_vectors,
             vector_size,
@@ -166,7 +209,53 @@ impl<M: Embedding> Config<M> {
             in_domain_samples,
             deduplicate_in_domain: false,
             mode,
-        }
+        })
+    }
+
+    pub const fn num_vectors(&self) -> usize {
+        self.num_vectors
+    }
+
+    pub const fn vector_size(&self) -> usize {
+        self.vector_size
+    }
+
+    pub const fn codeword_length(&self) -> usize {
+        self.codeword_length
+    }
+
+    pub const fn interleaving_depth(&self) -> usize {
+        self.interleaving_depth
+    }
+
+    pub const fn matrix_commit(&self) -> &matrix_commit::Config<M::Source> {
+        &self.matrix_commit
+    }
+
+    pub const fn regime(&self) -> DecodingRegimeParams {
+        self.regime
+    }
+
+    pub const fn in_domain_samples(&self) -> usize {
+        self.in_domain_samples
+    }
+
+    pub const fn deduplicate_in_domain(&self) -> bool {
+        self.deduplicate_in_domain
+    }
+
+    pub const fn mode(&self) -> &IrsMode {
+        &self.mode
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn set_vector_size_for_test(&mut self, vector_size: usize) {
+        self.vector_size = vector_size;
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn set_in_domain_samples_for_test(&mut self, in_domain_samples: usize) {
+        self.in_domain_samples = in_domain_samples;
     }
 
     pub const fn num_cols(&self) -> usize {

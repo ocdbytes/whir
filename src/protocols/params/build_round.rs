@@ -38,15 +38,14 @@ pub(super) fn build_round_config<M: Embedding + Default>(
     mode: RoundBuildMode<'_>,
 ) -> Result<RoundConfig<M>, DeriveError> {
     let ctx = round_context(shape);
-    let ood_mode = mode.map(|p| f64::from(p.c_zk_log_inv_rate.get()));
+    let ood_mode = mode.map(|p| p.c_zk_log_inv_rate);
     let (source, t_ood) = solve_round_source::<M>(spec, shape, ood_mode)?;
 
-    let (target_budget, solve_mode, round_mode, mask_oracle) = match mode {
+    let (target_budget, solve_mode, round_mode) = match mode {
         Branch::Standard => (
             OodSampleBudget::ZERO,
             SolveMode::Standard,
             RoundMode::Standard,
-            None,
         ),
         Branch::ZeroKnowledge(RoundBuildPayload {
             zk_spec,
@@ -63,20 +62,19 @@ pub(super) fn build_round_config<M: Embedding + Default>(
                 shape.round_index,
             )?;
             let solve_mode = SolveMode::ZeroKnowledge(mask_oracle.info());
-            let round_mode = RoundMode::ZeroKnowledge {
-                t_ood: OodSampleBudget::new(t_ood),
-            };
             (
                 OodSampleBudget::new(t_ood),
                 solve_mode,
-                round_mode,
-                Some(mask_oracle),
+                RoundMode::ZeroKnowledge {
+                    t_ood: OodSampleBudget::new(t_ood),
+                    mask_oracle: Box::new(mask_oracle),
+                },
             )
         }
     };
 
     let target: IrsConfig<Identity<M::Target>> =
-        irs_params::solve(spec, &target_context(shape, &source), target_budget);
+        irs_params::solve(spec, &target_context(shape, &source), target_budget)?;
     let sumcheck = sumcheck_params::solve(
         spec,
         &ctx,
@@ -94,7 +92,6 @@ pub(super) fn build_round_config<M: Embedding + Default>(
         sumcheck,
         code_switch,
         round_mode,
-        mask_oracle,
     ))
 }
 
@@ -145,7 +142,7 @@ fn build_mask_oracle<M: Embedding>(
         source.mask_length(),
         c_zk_log_inv_rate,
         MaskProximityConfig::<M::Target>::num_vectors_for(num_masks),
-    );
+    )?;
     let c_zk_list_size_estimate = spec.decoding_regime.list_size_estimate(
         (l_zk.get() as f64).log2(),
         f64::from(c_zk_log_inv_rate.get()),
@@ -188,7 +185,7 @@ pub(super) fn solve_t_ood<M: Embedding + Default>(
     round_index: usize,
 ) -> Result<(IrsConfig<M>, usize), DeriveError> {
     if matches!(spec.decoding_regime, DecodingRegime::Unique) {
-        let source = irs_params::solve(spec, src_ctx, OodSampleBudget::new(1));
+        let source = irs_params::solve(spec, src_ctx, OodSampleBudget::new(1))?;
         return Ok((source, 1));
     }
 
@@ -196,7 +193,7 @@ pub(super) fn solve_t_ood<M: Embedding + Default>(
     let field_bits = M::Target::field_size_bits();
 
     for t_ood in 1..=T_OOD_MAX_ITER {
-        let source: IrsConfig<M> = irs_params::solve(spec, src_ctx, OodSampleBudget::new(t_ood));
+        let source: IrsConfig<M> = irs_params::solve(spec, src_ctx, OodSampleBudget::new(t_ood))?;
         let bits =
             ood_security_bits_at(spec, &source, t_ood, target_list_size, ood_mode, field_bits);
         if bits >= security_target {
@@ -226,9 +223,10 @@ fn ood_security_bits_at<M: Embedding>(
                 .mask_length()
                 .saturating_add(t_ood)
                 .next_power_of_two();
-            let c_zk_list = spec
-                .decoding_regime
-                .list_size_estimate(usize_to_f64(l_zk).log2(), c_zk_log_inv_rate);
+            let c_zk_list = spec.decoding_regime.list_size_estimate(
+                usize_to_f64(l_zk).log2(),
+                f64::from(c_zk_log_inv_rate.get()),
+            );
             (
                 usize_to_f64(source.message_length().saturating_add(l_zk)).log2(),
                 (target_list_size * c_zk_list).log2(),

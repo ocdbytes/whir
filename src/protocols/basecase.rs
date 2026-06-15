@@ -37,13 +37,10 @@ pub enum BasecaseMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<F: Field> {
-    pub commit: irs_commit::Config<Identity<F>>,
-    pub sumcheck: sumcheck::Config<F>,
-    pub mode: BasecaseMode,
-    pub pow: proof_of_work::Config,
-    /// γ-combination analytic floor recorded by `params::basecase::solve`
-    /// (ZK only). `None` for Standard mode or ad-hoc construction.
-    pub recorded_analytic: Option<crate::bits::Bits>,
+    commit: irs_commit::Config<Identity<F>>,
+    sumcheck: sumcheck::Config<F>,
+    mode: BasecaseMode,
+    pow: proof_of_work::Config,
 }
 
 impl<F: Field> Config<F> {
@@ -67,17 +64,32 @@ impl<F: Field> Config<F> {
             sumcheck,
             mode,
             pow,
-            recorded_analytic: None,
         }
     }
 
-    pub const fn with_recorded_analytic(mut self, analytic: crate::bits::Bits) -> Self {
-        self.recorded_analytic = Some(analytic);
-        self
+    pub const fn commit(&self) -> &irs_commit::Config<Identity<F>> {
+        &self.commit
+    }
+
+    pub const fn sumcheck(&self) -> &sumcheck::Config<F> {
+        &self.sumcheck
+    }
+
+    pub const fn mode(&self) -> BasecaseMode {
+        self.mode
+    }
+
+    pub const fn pow(&self) -> proof_of_work::Config {
+        self.pow
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn set_pow_for_test(&mut self, pow: proof_of_work::Config) {
+        self.pow = pow;
     }
 
     pub const fn size(&self) -> usize {
-        self.sumcheck.initial_size
+        self.sumcheck.initial_size()
     }
 
     pub const fn is_zk(&self) -> bool {
@@ -102,10 +114,10 @@ impl<F: Field> Config<F> {
         Hash: ProverMessage<[H::U]>,
         Standard: Distribution<F>,
     {
-        assert_eq!(self.commit.interleaving_depth, 1);
-        assert_eq!(self.commit.num_vectors, 1);
-        assert_eq!(self.commit.vector_size, self.sumcheck.initial_size);
-        assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size));
+        assert_eq!(self.commit.interleaving_depth(), 1);
+        assert_eq!(self.commit.num_vectors(), 1);
+        assert_eq!(self.commit.vector_size(), self.sumcheck.initial_size());
+        assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size()));
         debug_assert_eq!(dot(&vector, &covector), sum);
         if self.size() == 0 {
             return Opening {
@@ -205,10 +217,10 @@ impl<F: Field> Config<F> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        assert_eq!(self.commit.interleaving_depth, 1);
-        assert_eq!(self.commit.num_vectors, 1);
-        assert_eq!(self.commit.vector_size, self.sumcheck.initial_size);
-        assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size));
+        assert_eq!(self.commit.interleaving_depth(), 1);
+        assert_eq!(self.commit.num_vectors(), 1);
+        assert_eq!(self.commit.vector_size(), self.sumcheck.initial_size());
+        assert_eq!(self.sumcheck.final_size(), 1.min(self.commit.vector_size()));
         if self.size() == 0 {
             return Ok(Opening {
                 evaluation_points: Vec::new(),
@@ -218,7 +230,7 @@ impl<F: Field> Config<F> {
 
         let blind = self.maybe_receive_blind(verifier_state, &mut sum)?;
 
-        let vector = verifier_state.prover_messages_vec(self.commit.vector_size)?;
+        let vector = verifier_state.prover_messages_vec(self.commit.vector_size())?;
         let irs_randomness = verifier_state
             .prover_messages_vec(self.commit.mask_length() * self.commit.num_messages())?;
 
@@ -305,7 +317,6 @@ mod tests {
                     size.next_power_of_two().trailing_zeros() as usize,
                     sumcheck::SumcheckMode::Standard,
                 ),
-                recorded_analytic: None,
                 mode: if is_zk {
                     BasecaseMode::ZeroKnowledge
                 } else {

@@ -66,15 +66,11 @@ pub struct Config<F>
 where
     F: Field,
 {
-    pub field: Type<F>,
-    pub initial_size: usize,
-    pub round_pow: proof_of_work::Config,
-    pub num_rounds: usize,
-    pub mode: SumcheckMode,
-    /// Analytic-error floor recorded by the params solver that produced this
-    /// config. `None` when the config wasn't built via `params::sumcheck::solve`
-    /// (legacy/test paths). Drift checks compare this against a recompute.
-    pub recorded_analytic: Option<crate::bits::Bits>,
+    field: Type<F>,
+    initial_size: usize,
+    round_pow: proof_of_work::Config,
+    num_rounds: usize,
+    mode: SumcheckMode,
 }
 
 impl<F: Field> Config<F> {
@@ -99,13 +95,23 @@ impl<F: Field> Config<F> {
             round_pow,
             num_rounds,
             mode,
-            recorded_analytic: None,
         }
     }
 
-    pub const fn with_recorded_analytic(mut self, analytic: crate::bits::Bits) -> Self {
-        self.recorded_analytic = Some(analytic);
-        self
+    pub const fn initial_size(&self) -> usize {
+        self.initial_size
+    }
+
+    pub const fn round_pow(&self) -> proof_of_work::Config {
+        self.round_pow
+    }
+
+    pub const fn num_rounds(&self) -> usize {
+        self.num_rounds
+    }
+
+    pub const fn mode(&self) -> &SumcheckMode {
+        &self.mode
     }
 
     const fn mask_length(&self) -> usize {
@@ -113,6 +119,11 @@ impl<F: Field> Config<F> {
             SumcheckMode::Standard => 0,
             SumcheckMode::ZeroKnowledge { mask_length } => mask_length.get(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn override_round_pow_for_test(&mut self, round_pow: proof_of_work::Config) {
+        self.round_pow = round_pow;
     }
 
     pub fn final_size(&self) -> usize {

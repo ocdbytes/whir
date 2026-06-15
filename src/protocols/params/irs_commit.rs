@@ -6,9 +6,10 @@
 use crate::{
     algebra::embedding::Embedding,
     protocols::{
-        irs_commit::{num_in_domain_queries, Config as IrsConfig, IrsMode},
+        irs_commit::{num_in_domain_queries, Config as IrsConfig, IrsMode, IrsParams},
         params::{
             bounds::rate,
+            error::DeriveError,
             spec::{
                 LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, RoundContext, SecuritySpec,
                 ZkSpec,
@@ -21,7 +22,7 @@ pub fn solve<M: Embedding + Default>(
     spec: &SecuritySpec,
     ctx: &RoundContext,
     out_domain_samples: OodSampleBudget,
-) -> IrsConfig<M> {
+) -> Result<IrsConfig<M>, DeriveError> {
     let security_target = f64::from(spec.protocol_security_target_bits());
     let rate = rate(f64::from(ctx.log_inv_rate));
     let interleaving_depth = 1_usize << ctx.folding_factor;
@@ -35,16 +36,16 @@ pub fn solve<M: Embedding + Default>(
         }
     };
 
-    IrsConfig::new(
+    Ok(IrsConfig::try_new(IrsParams {
         security_target,
-        spec.decoding_regime,
-        spec.hash_id,
-        1,
-        ctx.vector_size,
+        decoding_regime: spec.decoding_regime,
+        hash_id: spec.hash_id,
+        num_vectors: 1,
+        vector_size: ctx.vector_size,
         interleaving_depth,
         rate,
         mode,
-    )
+    })?)
 }
 
 /// Shared C_zk IRS config for mask polynomials.
@@ -58,7 +59,7 @@ pub fn solve_mask_code<M: Embedding + Default>(
     source_mask_length: usize,
     log_inv_rate: LogInvRate,
     num_vectors: usize,
-) -> IrsConfig<M> {
+) -> Result<IrsConfig<M>, DeriveError> {
     let l_zk = l_zk.get();
     assert!(
         l_zk >= source_mask_length,
@@ -73,16 +74,16 @@ pub fn solve_mask_code<M: Embedding + Default>(
     let security_target = f64::from(spec.protocol_security_target_bits());
     let rate = rate(f64::from(log_inv_rate.get()));
 
-    IrsConfig::new(
+    Ok(IrsConfig::try_new(IrsParams {
         security_target,
-        spec.decoding_regime,
-        spec.hash_id,
+        decoding_regime: spec.decoding_regime,
+        hash_id: spec.hash_id,
         num_vectors,
-        l_zk,
-        1,
+        vector_size: l_zk,
+        interleaving_depth: 1,
         rate,
-        IrsMode::Standard,
-    )
+        mode: IrsMode::Standard,
+    })?)
 }
 
 #[cfg(test)]
@@ -162,11 +163,11 @@ mod tests {
             ctx in arb_round_ctx(),
             out_domain in 0usize..16,
         ) {
-            let config = solve::<M>(&spec, &ctx, OodSampleBudget::new(out_domain));
+            let config = solve::<M>(&spec, &ctx, OodSampleBudget::new(out_domain)).unwrap();
             prop_assert!(
-                config.mask_length() >= config.in_domain_samples + out_domain,
+                config.mask_length() >= config.in_domain_samples() + out_domain,
                 "mask {} < in_domain {} + out_domain {}",
-                config.mask_length(), config.in_domain_samples, out_domain,
+                config.mask_length(), config.in_domain_samples(), out_domain,
             );
         }
 
@@ -176,7 +177,7 @@ mod tests {
             ctx in arb_round_ctx(),
             out_domain in 0usize..8,
         ) {
-            let config = solve::<M>(&spec, &ctx, OodSampleBudget::new(out_domain));
+            let config = solve::<M>(&spec, &ctx, OodSampleBudget::new(out_domain)).unwrap();
             prop_assert_eq!(config.mask_length(), 0);
         }
     }
@@ -195,7 +196,8 @@ mod tests {
             folding_factor: SMOKE_FOLDING_FACTOR,
         };
         let config: IrsConfig<TestNonIdentityEmbedding> =
-            solve(&spec, &ctx, OodSampleBudget::new(SMOKE_OOD_BUDGET));
+            solve(&spec, &ctx, OodSampleBudget::new(SMOKE_OOD_BUDGET))
+                .expect("IRS fixture must solve");
         assert!(config.mask_length() > 0);
     }
 }

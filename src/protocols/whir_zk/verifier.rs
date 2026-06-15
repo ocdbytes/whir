@@ -53,7 +53,8 @@ impl<F: Field> Config<F> {
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(
-            self.blinded_commitment.initial_committer.num_vectors, 1,
+            self.blinded_commitment.initial_committer.num_vectors(),
+            1,
             "zkWHIR currently expects one vector per commitment"
         );
         let num_polynomials = commitment.f_hat.len();

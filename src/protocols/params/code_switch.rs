@@ -16,6 +16,7 @@ use crate::{
             branch::SolveMode,
             error::{grind_to_at, DeriveError, Pow},
             protocol_config::MaskOracleInfo,
+            solved::Solved,
             spec::SecuritySpec,
         },
     },
@@ -29,7 +30,7 @@ pub fn solve<M: Embedding>(
     t_ood: usize,
     mode: SolveMode,
     round_index: usize,
-) -> Result<CodeSwitchConfig<M>, DeriveError> {
+) -> Result<Solved<CodeSwitchConfig<M>>, DeriveError> {
     let (mask_oracle, output_mode) = match mode {
         SolveMode::Standard => (None, code_switch::CodeSwitchMode::Standard),
         SolveMode::ZeroKnowledge(mask_oracle) => {
@@ -52,10 +53,10 @@ pub fn solve<M: Embedding>(
     let analytic = analytic_error_bits(&source, &target, t_ood, mask_oracle);
     let pow = grind_to_at(spec, analytic, Pow::RoundCodeSwitch { index: round_index })?;
 
-    Ok(
-        CodeSwitchConfig::new(source, target, t_ood, output_mode, pow)
-            .with_recorded_analytic(analytic),
-    )
+    Ok(Solved::new(
+        CodeSwitchConfig::new(source, target, t_ood, output_mode, pow),
+        analytic,
+    ))
 }
 
 /// Per-round code-switch soundness in bits: `min` over Lemma 9.9's three RBR
@@ -88,9 +89,10 @@ pub fn analytic_error_bits<M: Embedding>(
     let in_domain_term = source.rbr_queries();
 
     // Combination term — Lemma 9.9, term 3 (γ-RLC, bounds doc §5.1).
-    let log_count =
-        usize_to_f64(t_ood.saturating_add(source.in_domain_samples * source.interleaving_depth))
-            .log2();
+    let log_count = usize_to_f64(
+        t_ood.saturating_add(source.in_domain_samples() * source.interleaving_depth()),
+    )
+    .log2();
     let combination_term = field_bits - log_count - combined_list.log2();
 
     Bits::new(ood_term.min(in_domain_term).min(combination_term).max(0.0))
@@ -107,22 +109,18 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::{
-        hash,
-        protocols::params::{
-            branch::OodMode,
-            build_round::{compute_l_zk, solve_t_ood},
-            irs_commit as irs_params,
-            spec::{
-                DecodingRegime, ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget,
-                PowBudget, RoundContext, SecuritySpec, ZkSpec,
-            },
-            test_utils::{
-                arb_standard_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec,
-                assert_close, assert_pow_closes_gap, build_round_io, deterministic_spec,
-                TestEmbedding, TestExtensionField, TestField, TestNonIdentityEmbedding,
-                TEST_TARGET_RANGE,
-            },
+    use crate::protocols::params::{
+        branch::OodMode,
+        build_round::{compute_l_zk, solve_t_ood},
+        irs_commit as irs_params,
+        spec::{
+            ListSize, LogInvRate, MaskCodeMessageLen, Mode, OodSampleBudget, PowBudget,
+            RoundContext, SecuritySpec, ZkSpec,
+        },
+        test_utils::{
+            arb_standard_spec as utils_standard_spec, arb_zk_spec as utils_zk_spec, assert_close,
+            assert_pow_closes_gap, build_round_io, deterministic_spec, TestEmbedding,
+            TestExtensionField, TestField, TestNonIdentityEmbedding, TEST_TARGET_RANGE,
         },
     };
 
@@ -172,7 +170,7 @@ mod tests {
         let l_choose_2 = target_list * (target_list - 1.0) / 2.0;
         let ood = (t_ood as f64) * (field_bits - log_deg_m1) - l_choose_2.log2();
         let in_domain = source.rbr_queries();
-        let count = t_ood + source.in_domain_samples * source.interleaving_depth;
+        let count = t_ood + source.in_domain_samples() * source.interleaving_depth();
         let comb = field_bits - (count as f64).log2() - target_list.log2();
         let expected = ood.min(in_domain).min(comb).max(0.0);
 
@@ -211,7 +209,7 @@ mod tests {
         let l_choose_2 = combined_list * (combined_list - 1.0) / 2.0;
         let ood = (t_ood as f64) * (field_bits - log_deg_m1) - l_choose_2.log2();
         let in_domain = source.rbr_queries();
-        let count = t_ood + source.in_domain_samples * source.interleaving_depth;
+        let count = t_ood + source.in_domain_samples() * source.interleaving_depth();
         let comb = field_bits - (count as f64).log2() - target_list.log2() - C_ZK_LIST_SIZE.log2();
         let expected = ood.min(in_domain).min(comb).max(0.0);
 
@@ -225,13 +223,7 @@ mod tests {
         const LIMITING_FOLDING_FACTOR: u32 = 1;
         const LIMITING_NUM_VARS: u32 = 4;
 
-        let spec = SecuritySpec {
-            mode: Mode::Standard,
-            decoding_regime: DecodingRegime::Johnson,
-            target_security_bits: LIMITING_TARGET_BITS,
-            pow_budget: PowBudget::Forbidden,
-            hash_id: hash::BLAKE3,
-        };
+        let spec = SecuritySpec::new(LIMITING_TARGET_BITS).with_pow_budget(PowBudget::Forbidden);
         let (source, target, t_ood) = build_round_io::<M>(
             &spec,
             LIMITING_LOG_INV_RATE,
@@ -247,7 +239,7 @@ mod tests {
         let l_choose_2 = target_list * (target_list - 1.0) / 2.0;
         let ood = (t_ood as f64) * (field_bits - log_deg_m1) - l_choose_2.log2();
         let in_domain = source.rbr_queries();
-        let count = t_ood + source.in_domain_samples * source.interleaving_depth;
+        let count = t_ood + source.in_domain_samples() * source.interleaving_depth();
         let comb = field_bits - (count as f64).log2() - target_list.log2();
         assert!(
             in_domain < ood && in_domain < comb,
@@ -267,8 +259,8 @@ mod tests {
             let (source, target, t_ood) =
                 build_round_io::<M>(&spec, log_inv_rate, folding_factor, num_vars, None);
             let config = solve(&spec, source, target, t_ood, SolveMode::Standard, 0).unwrap();
-            prop_assert!(matches!(config.mode, code_switch::CodeSwitchMode::Standard));
-            prop_assert!(config.out_domain_samples >= 1);
+            prop_assert!(matches!(config.mode(), code_switch::CodeSwitchMode::Standard));
+            prop_assert!(config.out_domain_samples() >= 1);
         }
 
         #[test]
@@ -288,7 +280,8 @@ mod tests {
                 r,
                 LogInvRate::new(log_inv_rate),
                 2,
-            );
+            )
+            .expect("C_zk fixture must solve");
             let mask_oracle = MaskOracleInfo {
                 c_zk_list_size: ListSize::new(c_zk.list_size()),
                 l_zk,
@@ -314,7 +307,7 @@ mod tests {
                 build_round_io::<M>(&spec, log_inv_rate, folding_factor, num_vars, None);
             let error = analytic_error_bits(&source, &target, t_ood, None);
             let config = solve(&spec, source, target, t_ood, SolveMode::Standard, 0).unwrap();
-            assert_pow_closes_gap(&spec, error, &config.pow);
+            assert_pow_closes_gap(&spec, error, &config.pow());
         }
     }
 
@@ -386,10 +379,14 @@ mod tests {
             &spec,
             &target_ctx,
             OodSampleBudget::ZERO,
-        );
+        )
+        .expect("target IRS fixture must solve");
 
         let config = solve(&spec, source, target, t_ood, SolveMode::Standard, 0).unwrap();
-        assert!(matches!(config.mode, code_switch::CodeSwitchMode::Standard));
+        assert!(matches!(
+            config.mode(),
+            code_switch::CodeSwitchMode::Standard
+        ));
     }
 
     const SMOKE_C_ZK_LIST_SIZE: f64 = 4.0;
@@ -407,7 +404,7 @@ mod tests {
             &spec,
             &source_ctx,
             target_list_size,
-            OodMode::ZeroKnowledge(f64::from(source_ctx.log_inv_rate)),
+            OodMode::ZeroKnowledge(LogInvRate::new(source_ctx.log_inv_rate)),
             0,
         )
         .unwrap();
@@ -415,7 +412,8 @@ mod tests {
             &spec,
             &target_ctx,
             OodSampleBudget::new(t_ood),
-        );
+        )
+        .expect("target IRS fixture must solve");
 
         let mask_oracle = MaskOracleInfo {
             c_zk_list_size: ListSize::new(SMOKE_C_ZK_LIST_SIZE),
@@ -431,7 +429,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            config.mode,
+            config.mode(),
             code_switch::CodeSwitchMode::ZeroKnowledge { .. }
         ));
     }

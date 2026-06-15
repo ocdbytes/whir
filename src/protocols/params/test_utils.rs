@@ -10,7 +10,6 @@ use crate::{
         fields::{Field64, Field64_2},
     },
     bits::Bits,
-    hash,
     protocols::{
         irs_commit::Config as IrsConfig,
         mask_proximity::Config as MaskProximityConfig,
@@ -43,13 +42,9 @@ pub const EPS: f64 = 1e-9;
 pub const FIXTURE_POW_BUDGET_BITS: u32 = 60;
 
 pub fn deterministic_spec(mode: Mode) -> SecuritySpec {
-    SecuritySpec {
-        mode,
-        decoding_regime: DecodingRegime::Johnson,
-        target_security_bits: FIXTURE_TARGET_BITS,
-        pow_budget: PowBudget::per_slot(FIXTURE_POW_BUDGET_BITS),
-        hash_id: hash::BLAKE3,
-    }
+    SecuritySpec::new(FIXTURE_TARGET_BITS)
+        .with_mode(mode)
+        .with_pow_budget(PowBudget::per_slot(FIXTURE_POW_BUDGET_BITS))
 }
 
 fn arb_decoding_regime() -> impl Strategy<Value = DecodingRegime> {
@@ -64,12 +59,11 @@ pub fn arb_spec(
     mode: Mode,
     target_range: RangeInclusive<u32>,
 ) -> impl Strategy<Value = SecuritySpec> {
-    (target_range, arb_decoding_regime()).prop_map(move |(target, decoding_regime)| SecuritySpec {
-        mode,
-        decoding_regime,
-        target_security_bits: target,
-        pow_budget: PowBudget::per_slot(FIXTURE_POW_BUDGET_BITS),
-        hash_id: hash::BLAKE3,
+    (target_range, arb_decoding_regime()).prop_map(move |(target, decoding_regime)| {
+        SecuritySpec::new(target)
+            .with_mode(mode)
+            .with_decoding_regime(decoding_regime)
+            .with_pow_budget(PowBudget::per_slot(FIXTURE_POW_BUDGET_BITS))
     })
 }
 
@@ -96,7 +90,8 @@ pub fn build_minimal_mask_oracle(spec: &SecuritySpec) -> Option<MaskOracleInfo> 
     let zk_spec = ZkSpec::try_new(spec)?;
     let l_zk = MaskCodeMessageLen::new(2);
     let c_zk: IrsConfig<TestEmbedding> =
-        irs_params::solve_mask_code(zk_spec, l_zk, 0, LogInvRate::new(1), 2);
+        irs_params::solve_mask_code(zk_spec, l_zk, 0, LogInvRate::new(1), 2)
+            .expect("minimal mask-code fixture must solve");
     Some(MaskOracleInfo {
         c_zk_list_size: ListSize::new(c_zk.list_size()),
         l_zk,
@@ -137,6 +132,7 @@ pub fn build_test_c_zk(
         LogInvRate::new(log_inv_rate),
         MaskProximityConfig::<TestField>::num_vectors_for(num_masks),
     )
+    .expect("C_zk fixture must solve")
 }
 
 /// Builds a self-consistent `(source, target, t_ood)` triplet matching the
@@ -159,7 +155,7 @@ pub fn build_round_io<M: Embedding + Default>(
         .decoding_regime
         .list_size_estimate(target_log_degree, f64::from(target_log_inv_rate));
     let ood_mode = c_zk_log_inv_rate.map_or(OodMode::Standard, |rate| {
-        OodMode::ZeroKnowledge(f64::from(rate))
+        OodMode::ZeroKnowledge(LogInvRate::new(rate))
     });
     let (source, t_ood) = solve_t_ood::<M>(spec, &source_ctx, target_list_size, ood_mode, 0)
         .expect("solve_t_ood diverged in test fixture");
@@ -169,6 +165,7 @@ pub fn build_round_io<M: Embedding + Default>(
         log_inv_rate: target_log_inv_rate,
         folding_factor,
     };
-    let target = irs_params::solve(spec, &target_ctx, OodSampleBudget::new(t_ood));
+    let target = irs_params::solve(spec, &target_ctx, OodSampleBudget::new(t_ood))
+        .expect("target IRS fixture must solve");
     (source, target, t_ood)
 }

@@ -134,7 +134,7 @@ impl<F: Field> Config<F> {
             size_policy.t2 >= size_policy.q_delta_2,
             "invalid blinding size policy: T2 must satisfy T2 >= q(delta2)"
         );
-        let k1 = 1usize << blinded.initial_sumcheck.num_rounds;
+        let k1 = 1usize << blinded.initial_sumcheck.num_rounds();
         let k2 = blinding_first_round_interleaving_depth;
         let sumcheck_coeff_leakage = size_policy
             .sumcheck_round_degree
@@ -173,12 +173,14 @@ impl<F: Field> Config<F> {
 
     /// Interleaving depth of the initial IRS commitment (= 2^folding_factor).
     pub(crate) const fn interleaving_depth(&self) -> usize {
-        self.blinded_commitment.initial_committer.interleaving_depth
+        self.blinded_commitment
+            .initial_committer
+            .interleaving_depth()
     }
 
     /// Generator ω of the full NTT domain (size = num_rows × interleaving_depth).
     pub(crate) fn omega_full(&self) -> F {
-        let codeword_length = self.blinded_commitment.initial_committer.codeword_length;
+        let codeword_length = self.blinded_commitment.initial_committer.codeword_length();
         let full_domain_size = codeword_length * self.interleaving_depth();
         crate::algebra::ntt::generator(full_domain_size)
     }
@@ -187,19 +189,19 @@ impl<F: Field> Config<F> {
     // #[deprecated = "RS codes do not necessarily have a generator."]
     fn omega_sub(&self) -> F {
         // Assume it has a generator, and the evaluation order is 1, g, g^2, ...
-        let codeword_length = self.blinded_commitment.initial_committer.codeword_length;
+        let codeword_length = self.blinded_commitment.initial_committer.codeword_length();
         crate::algebra::ntt::generator(codeword_length)
     }
 
     /// ζ = ω^num_rows — the interleaving_depth-th root of unity.
     pub(crate) fn zeta(&self) -> F {
-        let codeword_length = self.blinded_commitment.initial_committer.codeword_length;
+        let codeword_length = self.blinded_commitment.initial_committer.codeword_length();
         self.omega_full().pow([codeword_length as u64])
     }
 
     /// Precomputed sub-domain powers [1, ω_sub, ω_sub², ..., ω_sub^(num_rows-1)].
     pub(crate) fn omega_powers(&self) -> Vec<F> {
-        let codeword_length = self.blinded_commitment.initial_committer.codeword_length;
+        let codeword_length = self.blinded_commitment.initial_committer.codeword_length();
         crate::algebra::geometric_sequence(self.omega_sub(), codeword_length)
     }
 

@@ -58,8 +58,8 @@ pub struct RoundBuildPayload<'a> {
 pub type RoundBuildMode<'a> = Branch<RoundBuildPayload<'a>>;
 
 /// Mode flag for the OOD security bound. Payload is the `C_zk` log-inverse
-/// rate as `f64` (already coerced for the analytic formula).
-pub type OodMode = Branch<f64>;
+/// rate; formulas coerce to `f64` at the point of use.
+pub type OodMode = Branch<LogInvRate>;
 
 /// Solver-input mode for the per-round sumcheck and code-switch builders.
 pub type SolveMode = Branch<MaskOracleInfo>;

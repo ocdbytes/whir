@@ -70,7 +70,7 @@ impl<M: Embedding> Config<M> {
         // Input validation
         assert_eq!(
             num_vectors,
-            witnesses.len() * self.initial_committer.num_vectors
+            witnesses.len() * self.initial_committer.num_vectors()
         );
         assert_eq!(evaluations.len(), num_vectors * linear_forms.len());
         for vector in &vectors {
@@ -201,7 +201,7 @@ impl<M: Embedding> Config<M> {
             // There are no constraints yet, so we can skip the sumcheck.
             // (If we did run it, all sumcheck vectors would be constant zero)
             // TODO: Don't compute evaluations and constraints in the first place.
-            let folding_randomness = (0..self.initial_sumcheck.num_rounds)
+            let folding_randomness = (0..self.initial_sumcheck.num_rounds())
                 .map(|_| prover_state.verifier_message())
                 .collect();
             self.initial_skip_pow.prove(prover_state);
@@ -280,7 +280,7 @@ impl<M: Embedding> Config<M> {
         }
 
         // Directly send the vector to the verifier.
-        assert_eq!(vector.len(), self.final_sumcheck.initial_size);
+        assert_eq!(vector.len(), self.final_sumcheck.initial_size());
         for coeff in &vector {
             prover_state.prover_message(coeff);
         }

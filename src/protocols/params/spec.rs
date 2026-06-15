@@ -1,5 +1,6 @@
 use std::{
-    fmt::{self, Display, Formatter},
+    fmt::{self, Debug, Display, Formatter},
+    hash::{Hash, Hasher},
     marker::PhantomData,
     num::NonZeroU32,
     ops::Deref,
@@ -8,8 +9,16 @@ use std::{
 
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-use crate::{bits::Bits, engines::EngineId};
+use crate::{bits::Bits, engines::EngineId, hash};
+
+/// Default per-slot PoW budget when the user does not specify one.
+///
+/// 16 bits balances prover grinding cost against the security credit it buys:
+/// higher values slow the prover on every slot; lower values shrink the PoW
+/// contribution and push the analytic floor (and thus proof size) up.
+pub const DEFAULT_POW_BUDGET_BITS: u32 = 16;
 
 /// Per-slot proof-of-work policy.
 ///
@@ -17,7 +26,7 @@ use crate::{bits::Bits, engines::EngineId};
 /// - **Planning credit**: subtracted from `target_security_bits` so solvers
 ///   know the analytic floor they must reach.
 /// - **Validation cap**: rejects any per-slot PoW that exceeds `bits`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PowBudget {
     Forbidden,
     PerSlot { bits: NonZeroU32 },
@@ -42,7 +51,9 @@ impl PowBudget {
 }
 
 /// Phantom-typed newtype.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Trait impls are written by hand so that bounds apply to `T` only — tag
+/// types stay bare, uninhabited enums.
 pub struct Tagged<T, Tag>(T, PhantomData<Tag>);
 
 impl<T: Copy, Tag> Tagged<T, Tag> {
@@ -55,7 +66,35 @@ impl<T: Copy, Tag> Tagged<T, Tag> {
     }
 }
 
-#[derive(Debug, Clone)]
+impl<T: Debug, Tag> Debug for Tagged<T, Tag> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Tagged").field(&self.0).finish()
+    }
+}
+
+impl<T: Clone, Tag> Clone for Tagged<T, Tag> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), PhantomData)
+    }
+}
+
+impl<T: Copy, Tag> Copy for Tagged<T, Tag> {}
+
+impl<T: PartialEq, Tag> PartialEq for Tagged<T, Tag> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<T: Eq, Tag> Eq for Tagged<T, Tag> {}
+
+impl<T: Hash, Tag> Hash for Tagged<T, Tag> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecuritySpec {
     pub mode: Mode,
     pub decoding_regime: DecodingRegime,
@@ -65,14 +104,61 @@ pub struct SecuritySpec {
 }
 
 impl SecuritySpec {
+    /// Spec with canonical defaults: [`Mode::Standard`],
+    /// [`DecodingRegime::Johnson`], BLAKE3, and a
+    /// [`DEFAULT_POW_BUDGET_BITS`]-bit per-slot PoW budget.
+    ///
+    /// Override individual choices with the `with_*` methods or struct-update
+    /// syntax.
+    pub const fn new(target_security_bits: u32) -> Self {
+        Self {
+            mode: Mode::Standard,
+            decoding_regime: DecodingRegime::Johnson,
+            target_security_bits,
+            pow_budget: PowBudget::per_slot(DEFAULT_POW_BUDGET_BITS),
+            hash_id: hash::BLAKE3,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_mode(mut self, mode: Mode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_decoding_regime(mut self, decoding_regime: DecodingRegime) -> Self {
+        self.decoding_regime = decoding_regime;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_pow_budget(mut self, pow_budget: PowBudget) -> Self {
+        self.pow_budget = pow_budget;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_hash(mut self, hash_id: EngineId) -> Self {
+        self.hash_id = hash_id;
+        self
+    }
+
     pub fn protocol_security_target_bits(&self) -> Bits {
         let pow = self.pow_budget.bits();
         Bits::new(f64::from(self.target_security_bits.saturating_sub(pow)))
     }
+
+    /// Borrow this spec as a [`ZkSpec`] proof, or `None` in standard mode.
+    /// Prefer branching on this over matching `mode` and re-proving with
+    /// [`ZkSpec::try_new`].
+    pub fn as_zk(&self) -> Option<ZkSpec<'_>> {
+        ZkSpec::try_new(self)
+    }
 }
 
 /// Per-round folding strategy. `at_round(i)` returns the factor for round `i`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FoldingFactor {
     /// Same folding factor across all rounds.
     Constant(usize),
@@ -110,7 +196,7 @@ impl FoldingFactor {
 }
 
 /// Proof-size / prover-time / soundness-margin tradeoffs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuningSpec {
     pub vector_size: usize,
     pub starting_log_inv_rate: u32,
@@ -126,7 +212,7 @@ pub struct RoundContext {
 }
 
 /// Standard vs. zero-knowledge selection. Orthogonal to [`DecodingRegime`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
     Standard,
     ZeroKnowledge,
@@ -183,17 +269,20 @@ impl Display for DecodingRegime {
     }
 }
 
+/// Error returned by [`DecodingRegime`]'s [`FromStr`] impl.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid decoding regime: {0}, options are: Unique, Johnson, Capacity")]
+pub struct ParseDecodingRegimeError(String);
+
 impl FromStr for DecodingRegime {
-    type Err = String;
+    type Err = ParseDecodingRegimeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Unique" => Ok(Self::Unique),
             "Johnson" => Ok(Self::Johnson),
             "Capacity" => Ok(Self::Capacity),
-            _ => Err(format!(
-                "invalid decoding regime: {s}, options are: Unique, Johnson, Capacity"
-            )),
+            _ => Err(ParseDecodingRegimeError(s.to_owned())),
         }
     }
 }
@@ -221,11 +310,8 @@ mod decoding_regime_tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OodSampleBudgetTag {}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MaskCodeMessageLenTag {}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LogInvRateTag {}
 
 /// OOD-sample budget (Lemma 9.9 / bounds doc §5.2).
@@ -254,6 +340,11 @@ impl ListSize {
     pub const fn get(self) -> f64 {
         self.0 .0
     }
+
+    /// `log₂ |Λ|` — the form every analytic-error formula consumes.
+    pub fn log2(self) -> f64 {
+        self.get().log2()
+    }
 }
 
 #[cfg(test)]
@@ -264,13 +355,22 @@ mod tests {
     const TARGET_BITS: u32 = 100;
 
     fn spec(pow_budget: PowBudget) -> SecuritySpec {
-        SecuritySpec {
-            mode: Mode::ZeroKnowledge,
-            decoding_regime: DecodingRegime::Johnson,
-            target_security_bits: TARGET_BITS,
-            pow_budget,
-            hash_id: hash::BLAKE3,
-        }
+        SecuritySpec::new(TARGET_BITS)
+            .with_mode(Mode::ZeroKnowledge)
+            .with_pow_budget(pow_budget)
+    }
+
+    #[test]
+    fn new_uses_documented_defaults() {
+        let spec = SecuritySpec::new(128);
+        assert_eq!(spec.mode, Mode::Standard);
+        assert_eq!(spec.decoding_regime, DecodingRegime::Johnson);
+        assert_eq!(spec.target_security_bits, 128);
+        assert_eq!(
+            spec.pow_budget,
+            PowBudget::per_slot(DEFAULT_POW_BUDGET_BITS)
+        );
+        assert_eq!(spec.hash_id, hash::BLAKE3);
     }
 
     #[test]

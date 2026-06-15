@@ -42,15 +42,11 @@ pub enum CodeSwitchMode {
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Config<M: Embedding> {
-    pub source: IrsConfig<M>,
-    pub target: IrsConfig<Identity<M::Target>>,
-    pub mode: CodeSwitchMode,
-    pub out_domain_samples: usize,
-    pub pow: proof_of_work::Config,
-    /// Analytic-error floor recorded by `params::code_switch::solve`. `None`
-    /// for configs built via ad-hoc paths. Drift checks compare against a
-    /// recompute.
-    pub recorded_analytic: Option<crate::bits::Bits>,
+    source: IrsConfig<M>,
+    target: IrsConfig<Identity<M::Target>>,
+    mode: CodeSwitchMode,
+    out_domain_samples: usize,
+    pow: proof_of_work::Config,
 }
 
 /// Prover output from the code-switch.
@@ -74,11 +70,13 @@ impl<M: Embedding> Config<M> {
         pow: proof_of_work::Config,
     ) -> Self {
         assert_eq!(
-            source_config.num_vectors, 1,
+            source_config.num_vectors(),
+            1,
             "code-switch requires a single source vector"
         );
         assert_eq!(
-            target_config.num_vectors, 1,
+            target_config.num_vectors(),
+            1,
             "code-switch requires a single target vector"
         );
         // Construction 9.7 needs at least one OOD challenge; unique-decoding
@@ -91,16 +89,16 @@ impl<M: Embedding> Config<M> {
         // under C' = D^{ι_t}. The IRS splits the input of length ℓ into ι_t
         // parallel slices of length ℓ/ι_t, each encoded under D.
         assert_eq!(
-            target_config.vector_size,
+            target_config.vector_size(),
             source_config.message_length(),
             "target vector_size must equal source message_length (target encodes one polynomial of length ℓ)"
         );
         assert!(
-            target_config.interleaving_depth.is_power_of_two(),
+            target_config.interleaving_depth().is_power_of_two(),
             "target.interleaving_depth must be a power of 2"
         );
         assert!(
-            source_config.interleaving_depth.is_power_of_two(),
+            source_config.interleaving_depth().is_power_of_two(),
             "source.interleaving_depth must be a power of 2"
         );
         if let CodeSwitchMode::ZeroKnowledge {
@@ -122,7 +120,8 @@ impl<M: Embedding> Config<M> {
             // Definition 3.16: a t'-query ZK encoding requires r' ≥ t'; here
             // r' = target.mask_length.
             assert!(
-                target_config.mask_length() >= target_config.in_domain_samples + out_domain_samples,
+                target_config.mask_length()
+                    >= target_config.in_domain_samples() + out_domain_samples,
                 "target encoder violates t' ≤ r': queries must be covered by target mask"
             );
         } else {
@@ -139,13 +138,32 @@ impl<M: Embedding> Config<M> {
             mode,
             out_domain_samples,
             pow,
-            recorded_analytic: None,
         }
     }
 
-    pub const fn with_recorded_analytic(mut self, analytic: crate::bits::Bits) -> Self {
-        self.recorded_analytic = Some(analytic);
-        self
+    pub const fn source(&self) -> &IrsConfig<M> {
+        &self.source
+    }
+
+    pub const fn target(&self) -> &IrsConfig<Identity<M::Target>> {
+        &self.target
+    }
+
+    pub const fn mode(&self) -> &CodeSwitchMode {
+        &self.mode
+    }
+
+    pub const fn out_domain_samples(&self) -> usize {
+        self.out_domain_samples
+    }
+
+    pub const fn pow(&self) -> proof_of_work::Config {
+        self.pow
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn target_mut_for_test(&mut self) -> &mut IrsConfig<Identity<M::Target>> {
+        &mut self.target
     }
 
     /// Mask oracle length `ℓ_zk`. Returns 0 in Standard mode.
@@ -213,10 +231,10 @@ impl<M: Embedding> Config<M> {
         assert_eq!(mask.len(), self.message_mask_length());
         assert_eq!(
             1 << folding_randomness.len(),
-            self.source.interleaving_depth,
+            self.source.interleaving_depth(),
             "folding_randomness must have length log2(source.interleaving_depth) ({} != log2({}))",
             folding_randomness.len(),
-            self.source.interleaving_depth,
+            self.source.interleaving_depth(),
         );
 
         // Step 1: g := Enc_{C'}(f, r') — Construction 9.7 Step 1, p.55
@@ -361,7 +379,7 @@ impl<M: Embedding> Config<M> {
         U64: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        verify!(1 << folding_randomness.len() == self.source.interleaving_depth);
+        verify!(1 << folding_randomness.len() == self.source.interleaving_depth());
 
         let collapse_weights = eq_weights(folding_randomness);
 
@@ -384,7 +402,7 @@ impl<M: Embedding> Config<M> {
         let source_evaluations = self.source.verify(verifier_state, &[commitment])?;
         let collapsed_values: Vec<M::Target> = source_evaluations
             .matrix
-            .chunks_exact(self.source.interleaving_depth)
+            .chunks_exact(self.source.interleaving_depth())
             .map(|row| mixed_dot(self.source.embedding(), &collapse_weights, row))
             .collect();
 
@@ -491,7 +509,7 @@ mod tests {
                                     // to the value target_mask was sized for so
                                     // assumption (a) holds.
                                     if zk {
-                                        target.in_domain_samples = t_in;
+                                        target.set_in_domain_samples_for_test(t_in);
                                     }
                                     // r = post-fold randomness length (ι_s parallel
                                     // masks fold to a single length-mask_length chunk).
@@ -546,7 +564,7 @@ mod tests {
     where
         Standard: Distribution<F>,
     {
-        let log_iota = config.source.interleaving_depth.trailing_zeros() as usize;
+        let log_iota = config.source.interleaving_depth().trailing_zeros() as usize;
         random_vector(rng, log_iota)
     }
 
@@ -584,7 +602,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         // Commit the full pre-fold vector of length source.vector_size
         // (= ι · message_length), which IRS encodes as ι parallel codewords.
-        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size);
+        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size());
         let initial_sum: F = rng.gen();
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
@@ -638,7 +656,7 @@ mod tests {
         Hash: ProverMessage<[u8]>,
     {
         let mut rng = StdRng::seed_from_u64(seed);
-        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size);
+        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size());
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
@@ -709,7 +727,7 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut rng = StdRng::seed_from_u64(seed);
-        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size);
+        let f_full: Vec<F> = random_vector(&mut rng, config.source.vector_size());
 
         let mut covector: Vec<F> = random_vector(&mut rng, config.source.message_length());
         covector.resize(config.covector_length(), F::ZERO);
@@ -809,7 +827,7 @@ mod tests {
         crate::tests::init();
         let configs = Config::arbitrary(Identity::<fields::Field64>::new());
         proptest!(|(seed: u64, config in configs)| {
-            prop_assume!(config.source.in_domain_samples > 0);
+            prop_assume!(config.source.in_domain_samples() > 0);
             test_ior_identity_config(seed, &config);
         });
     }

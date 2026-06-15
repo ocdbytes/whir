@@ -11,6 +11,7 @@ use crate::{
         params::{
             error::{grind_to_at, DeriveError, Pow},
             irs_commit as irs_params,
+            protocol_config::BasecasePlan,
             spec::{Mode as SpecMode, OodSampleBudget, RoundContext, SecuritySpec},
             sumcheck as sumcheck_params,
         },
@@ -23,7 +24,7 @@ pub fn solve<F: Field>(
     spec: &SecuritySpec,
     vector_size: usize,
     log_inv_rate: u32,
-) -> Result<BasecaseConfig<F>, DeriveError> {
+) -> Result<BasecasePlan<F>, DeriveError> {
     assert!(vector_size > 0, "basecase requires vector_size ≥ 1");
 
     let ctx = RoundContext {
@@ -31,7 +32,7 @@ pub fn solve<F: Field>(
         log_inv_rate,
         folding_factor: 0,
     };
-    let commit = irs_params::solve(spec, &ctx, OodSampleBudget::ZERO);
+    let commit = irs_params::solve(spec, &ctx, OodSampleBudget::ZERO)?;
 
     let sumcheck_analytic = sumcheck_params::analytic_error_bits(&commit, None);
     let sumcheck_pow = grind_to_at(spec, sumcheck_analytic, Pow::BasecaseSumcheck)?;
@@ -40,30 +41,22 @@ pub fn solve<F: Field>(
         sumcheck_pow,
         vector_size.next_power_of_two().trailing_zeros() as usize,
         sumcheck::SumcheckMode::Standard,
-    )
-    .with_recorded_analytic(sumcheck_analytic);
+    );
 
-    let mode = match spec.mode {
-        SpecMode::Standard => basecase::BasecaseMode::Standard,
-        SpecMode::ZeroKnowledge => basecase::BasecaseMode::ZeroKnowledge,
+    let gamma_analytic = analytic_error_bits(&commit);
+    let (mode, pow) = match spec.mode {
+        SpecMode::Standard => (basecase::BasecaseMode::Standard, PowConfig::none()),
+        SpecMode::ZeroKnowledge => (
+            basecase::BasecaseMode::ZeroKnowledge,
+            grind_to_at(spec, gamma_analytic, Pow::BasecaseGammaCombination)?,
+        ),
     };
 
-    let (pow, gamma_analytic) = match mode {
-        basecase::BasecaseMode::Standard => (PowConfig::none(), None),
-        basecase::BasecaseMode::ZeroKnowledge => {
-            let a = analytic_error_bits(&commit);
-            (
-                grind_to_at(spec, a, Pow::BasecaseGammaCombination)?,
-                Some(a),
-            )
-        }
-    };
-
-    let mut cfg = BasecaseConfig::new(commit, sumcheck, mode, pow);
-    if let Some(a) = gamma_analytic {
-        cfg = cfg.with_recorded_analytic(a);
-    }
-    Ok(cfg)
+    Ok(BasecasePlan::new(
+        BasecaseConfig::new(commit, sumcheck, mode, pow),
+        sumcheck_analytic,
+        gamma_analytic,
+    ))
 }
 
 /// γ-combination soundness (Lemma 7.4 combination-randomness slot, paper p.45).
@@ -78,11 +71,11 @@ pub fn analytic_error_bits<F: Field>(commit: &IrsConfig<Identity<F>>) -> Bits {
 impl<F: Field> BasecaseConfig<F> {
     /// Analytic soundness bits (excluding PoW): `min(sumcheck round error, γ-slot error)`.
     pub fn analytic_bits(&self) -> Bits {
-        let sumcheck_term = f64::from(sumcheck_params::analytic_error_bits(&self.commit, None));
-        let min_bits = match self.mode {
+        let sumcheck_term = f64::from(sumcheck_params::analytic_error_bits(self.commit(), None));
+        let min_bits = match self.mode() {
             basecase::BasecaseMode::Standard => sumcheck_term,
             basecase::BasecaseMode::ZeroKnowledge => {
-                sumcheck_term.min(f64::from(analytic_error_bits(&self.commit)))
+                sumcheck_term.min(f64::from(analytic_error_bits(self.commit())))
             }
         };
         Bits::new(min_bits.max(0.0))
@@ -120,7 +113,7 @@ mod tests {
             folding_factor: 0,
         };
         let commit: IrsConfig<Identity<TestField>> =
-            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO);
+            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO).expect("IRS fixture must solve");
 
         let got = f64::from(analytic_error_bits(&commit));
         let field_bits = TestField::field_size_bits();
@@ -146,7 +139,7 @@ mod tests {
             folding_factor: 0,
         };
         let commit: IrsConfig<Identity<TestField>> =
-            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO);
+            irs_params::solve(&spec, &ctx, OodSampleBudget::ZERO).expect("IRS fixture must solve");
 
         let field_bits = TestField::field_size_bits();
         let log_list = commit.list_size().log2();
@@ -168,10 +161,10 @@ mod tests {
             (log_size, log_inv_rate) in arb_dims(),
         ) {
             let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
-            prop_assert!(matches!(config.mode, basecase::BasecaseMode::Standard));
-            prop_assert_eq!(config.commit.interleaving_depth, 1);
-            prop_assert_eq!(config.commit.num_vectors, 1);
-            prop_assert_eq!(config.commit.vector_size, config.sumcheck.initial_size);
+            prop_assert!(matches!(config.mode(), basecase::BasecaseMode::Standard));
+            prop_assert_eq!(config.commit().interleaving_depth(), 1);
+            prop_assert_eq!(config.commit().num_vectors(), 1);
+            prop_assert_eq!(config.commit().vector_size(), config.sumcheck().initial_size());
         }
 
         #[test]
@@ -180,8 +173,8 @@ mod tests {
             (log_size, log_inv_rate) in arb_dims(),
         ) {
             let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
-            prop_assert!(matches!(config.mode, basecase::BasecaseMode::ZeroKnowledge));
-            prop_assert!(config.commit.mask_length() > 0);
+            prop_assert!(matches!(config.mode(), basecase::BasecaseMode::ZeroKnowledge));
+            prop_assert!(config.commit().mask_length() > 0);
         }
 
         #[test]
@@ -190,7 +183,7 @@ mod tests {
             (log_size, log_inv_rate) in arb_dims(),
         ) {
             let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
-            assert_pow_closes_gap(&spec, analytic_error_bits(&config.commit), &config.pow);
+            assert_pow_closes_gap(&spec, analytic_error_bits(config.commit()), &config.pow());
         }
 
         #[test]
@@ -199,7 +192,7 @@ mod tests {
             (log_size, log_inv_rate) in arb_dims(),
         ) {
             let config = solve::<TestField>(&spec, 1usize << log_size, log_inv_rate).unwrap();
-            prop_assert_eq!(config.pow, PowConfig::none());
+            prop_assert_eq!(config.pow(), PowConfig::none());
         }
     }
 }

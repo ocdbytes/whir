@@ -54,7 +54,8 @@ impl<F: Field> Config<F> {
         Hash: ProverMessage<[H::U]>,
     {
         assert_eq!(
-            self.blinded_commitment.initial_committer.num_vectors, 1,
+            self.blinded_commitment.initial_committer.num_vectors(),
+            1,
             "zkWHIR currently expects one vector per commitment"
         );
 
@@ -95,7 +96,7 @@ impl<F: Field> Config<F> {
             blinding_polynomials.push(blinding);
         }
 
-        let blinding_num_vectors = self.blinding_commitment.initial_committer.num_vectors;
+        let blinding_num_vectors = self.blinding_commitment.initial_committer.num_vectors();
         assert_eq!(
             blinding_num_vectors,
             polynomials.len() * (num_witness_variables + 1),

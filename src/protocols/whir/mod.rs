@@ -152,13 +152,13 @@ impl<M: Embedding> Config<M> {
     /// Disable proof-of-work for test.
     #[cfg(test)]
     pub(crate) fn disable_pow(&mut self) {
-        self.initial_sumcheck.round_pow.threshold = u64::MAX;
+        self.initial_sumcheck.round_pow().threshold = u64::MAX;
         self.initial_skip_pow.threshold = u64::MAX;
         for round in &mut self.round_configs {
-            round.sumcheck.round_pow.threshold = u64::MAX;
+            round.sumcheck.round_pow().threshold = u64::MAX;
             round.pow.threshold = u64::MAX;
         }
-        self.final_sumcheck.round_pow.threshold = u64::MAX;
+        self.final_sumcheck.round_pow().threshold = u64::MAX;
         self.final_pow.threshold = u64::MAX;
     }
 }
