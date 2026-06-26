@@ -1,6 +1,18 @@
-//! Quadratic sumcheck protocol.
+//! Generic sumcheck protocol.
+//!
+//! The transcript / mask / challenge machinery is degree-agnostic. The
+//! round polynomial computation is delegated to a [`RoundPolyOracle`]:
+//!   - [`Config::prove`] is a thin wrapper that builds a dot-product oracle
+//!     (degree 2) — the legacy `⟨a, b⟩ = sum` reduction.
+//!   - [`Config::prove_with_oracle`] takes any oracle and is used by the
+//!     selector sumcheck (degree 3) and any future higher-degree variants.
+//!
+//! The verifier ([`Config::verify`]) is fully degree-generic: it derives `c_1`
+//! from the sumcheck invariant `p(0) + p(1) = sum` and accepts any
+//! degree-`d` round polynomial whose `d` non-`c_1` coefficients the prover
+//! sends.
 
-use std::fmt;
+use std::{fmt, num::NonZeroUsize};
 
 use ark_ff::Field;
 use ark_std::rand::{CryptoRng, RngCore};
@@ -59,6 +71,34 @@ pub enum SumcheckMode {
     ZeroKnowledge { mask_length: SumcheckMaskLen },
 }
 
+/// Per-round polynomial provider for [`Config::prove_with_oracle`].
+///
+/// The prover loop owns the transcript, masking, challenge sampling, and
+/// per-round PoW; the oracle owns the round polynomial computation and the
+/// internal-state fold. Implementations should pick the in-place fold
+/// strategy that best fits their state representation — the dot-product
+/// oracle fuses fold and round-poly into one pass via
+/// [`crate::algebra::sumcheck::fold_and_compute_polynomial`], for example.
+pub trait RoundPolyOracle<F: Field> {
+    /// Degree `d` of every round polynomial.
+    fn degree(&self) -> usize;
+
+    /// Compute the round polynomial's `d` non-`c_1` coefficients
+    /// `[c_0, c_2, c_3, …, c_d]` for the current round. If `prev_challenge`
+    /// is `Some(r)`, the oracle must first fold its internal state by `r`
+    /// (the challenge sampled in the previous round) and then compute the
+    /// new round polynomial.
+    ///
+    /// `c_1` is the verifier-derivable coefficient
+    /// `c_1 = sum − 2·c_0 − Σ_{i≥2} c_i` and is recovered by the prover
+    /// loop, so the oracle never returns it.
+    fn fold_and_compute(&mut self, prev_challenge: Option<F>) -> Vec<F>;
+
+    /// Apply the final round's challenge so the oracle's internal state
+    /// reflects the fully folded representation when the loop exits.
+    fn finalize(&mut self, final_challenge: F);
+}
+
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -71,6 +111,10 @@ where
     round_pow: proof_of_work::Config,
     num_rounds: usize,
     mode: SumcheckMode,
+    /// Maximum degree of each round polynomial in the folded variable.
+    /// `2` for the legacy dot-product sumcheck; `3` for the selector
+    /// sumcheck (where `P_r(X) = eq(X, β) · ⟨M(X), V(X)⟩` is cubic).
+    degree: NonZeroUsize,
 }
 
 impl<F: Field> Config<F> {
@@ -79,8 +123,10 @@ impl<F: Field> Config<F> {
         round_pow: proof_of_work::Config,
         num_rounds: usize,
         mode: SumcheckMode,
+        degree: NonZeroUsize,
     ) -> Self {
         assert!(num_rounds == 0 || initial_size.next_power_of_two() >= 1 << num_rounds);
+        assert!(degree.get() >= 2, "sumcheck degree must be ≥ 2");
         // `SumcheckMaskLen::new` already enforces the ≥ 3 floor at construction;
         // here we only need the field-characteristic precondition from Lemma 6.4.
         if matches!(mode, SumcheckMode::ZeroKnowledge { .. }) {
@@ -95,7 +141,12 @@ impl<F: Field> Config<F> {
             round_pow,
             num_rounds,
             mode,
+            degree,
         }
+    }
+
+    pub const fn degree(&self) -> NonZeroUsize {
+        self.degree
     }
 
     pub const fn initial_size(&self) -> usize {
@@ -137,16 +188,16 @@ impl<F: Field> Config<F> {
         }
     }
 
-    /// Runs the quadratic sumcheck protocol as configured.
+    /// Reduce a claim `dot(a, b) == sum` via the degree-2 dot-product sumcheck.
     ///
-    /// It reduces a claim of the form `dot(a, b) == sum` to an exponentially
-    /// smaller claim `dot(a', b') == sum'` where `a'` is `a` folded in place
-    /// and similarly for `b`.
+    /// Thin wrapper around [`Self::prove_with_oracle`] that builds a
+    /// dot-product oracle. The oracle folds `a` and `b` in place; on return
+    /// they contain the post-loop folded values.
     ///
-    /// This function:
-    /// - Samples random values to progressively reduce the polynomial.
-    /// - Applies proof-of-work grinding if required.
-    /// - Returns the sampled folding randomness values used in each reduction step.
+    /// # Panics
+    ///
+    /// Panics if `self.degree() != 2`. Use [`Self::prove_with_oracle`]
+    /// directly for higher-degree sumchecks.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn prove<H, R>(
         &self,
@@ -163,16 +214,53 @@ impl<F: Field> Config<F> {
         [u8; 32]: Decoding<[H::U]>,
         U64: Codec<[H::U]>,
     {
-        assert!(
-            self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
+        assert_eq!(
+            self.degree.get(),
+            2,
+            "Config::prove only supports degree-2 dot-product sumchecks; use prove_with_oracle"
         );
         assert_eq!(a.len(), self.initial_size);
         assert_eq!(b.len(), self.initial_size);
         debug_assert_eq!(dot(a, b), *sum);
+
+        self.prove_with_oracle(prover_state, sum, masks, DotProductOracle { a, b })
+    }
+
+    /// Generic sumcheck prover. Drives the transcript / mask / challenge /
+    /// PoW loop; delegates per-round polynomial computation to `oracle`.
+    ///
+    /// The `degree()` reported by `oracle` must match this config's degree.
+    /// On return, `oracle`'s internal state reflects the fully folded
+    /// representation (via [`RoundPolyOracle::finalize`]).
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    pub fn prove_with_oracle<O, H, R>(
+        &self,
+        prover_state: &mut ProverState<H, R>,
+        sum: &mut F,
+        masks: &[F],
+        mut oracle: O,
+    ) -> SumcheckOpening<F>
+    where
+        O: RoundPolyOracle<F>,
+        H: DuplexSpongeInterface,
+        R: CryptoRng + RngCore,
+        F: Codec<[H::U]>,
+        [u8; 32]: Decoding<[H::U]>,
+        U64: Codec<[H::U]>,
+    {
+        assert!(
+            self.num_rounds == 0 || self.initial_size.next_power_of_two() >= 1 << self.num_rounds
+        );
+        assert_eq!(
+            oracle.degree(),
+            self.degree.get(),
+            "RoundPolyOracle::degree must match Config::degree"
+        );
         assert_eq!(masks.len(), self.num_rounds * self.mask_length());
 
+        let degree = self.degree.get();
         let half = F::from(2).inverse().unwrap();
-        let polynomial_len = self.mask_length().max(3);
+        let polynomial_len = self.mask_length().max(degree + 1);
 
         let (mut mask_sum, mask_rlc) = self.maybe_send_initial_mask_sum(prover_state, masks);
 
@@ -182,16 +270,18 @@ impl<F: Field> Config<F> {
         for (round, mask) in
             chunks_exact_or_empty(masks, self.mask_length(), self.num_rounds).enumerate()
         {
-            // Fold and compute sumcheck polynomial in one pass.
-            let (c0, c2) = if let Some(w) = prev_round_challenge {
-                fold_and_compute_polynomial(a, b, w)
-            } else {
-                compute_sumcheck_polynomial(a, b)
-            };
-            let c1 = *sum - c0.double() - c2;
+            // Oracle computes the round polynomial's non-c1 coefficients
+            // `[c_0, c_2, c_3, …, c_d]` (length d). The fold of the oracle's
+            // internal state by `prev_round_challenge` is fused into this call
+            // when the oracle supports it.
+            let coeffs_no_c1 = oracle.fold_and_compute(prev_round_challenge);
+            debug_assert_eq!(coeffs_no_c1.len(), degree);
+            let c0 = coeffs_no_c1[0];
+            let high = &coeffs_no_c1[1..]; // c_2, c_3, …, c_d
+            let c1 = *sum - c0.double() - high.iter().copied().sum::<F>();
 
             // Build round polynomial. In Standard (`mask = []`, `mask_rlc = 1`,
-            // `mask_sum = 0`) this collapses to `[c0, c1, c2]`.
+            // `mask_sum = 0`) this collapses to `[c_0, c_1, c_2, …, c_d]`.
             univariate.clear();
             univariate.resize(polynomial_len, F::ZERO);
             let sum_multiple = F::from(1 << self.num_rounds.saturating_sub(round + 1));
@@ -201,7 +291,9 @@ impl<F: Field> Config<F> {
             univariate[0] += (mask_sum - sum_multiple * eval_01(mask)) * half;
             univariate[0] += mask_rlc * c0;
             univariate[1] += mask_rlc * c1;
-            univariate[2] += mask_rlc * c2;
+            for (slot, c) in univariate.iter_mut().skip(2).zip(high.iter()) {
+                *slot += mask_rlc * *c;
+            }
 
             prover_state.prover_message(&univariate[0]);
             prover_state.prover_messages(&univariate[2..]);
@@ -210,15 +302,20 @@ impl<F: Field> Config<F> {
             self.round_pow.prove(prover_state);
             let r = prover_state.verifier_message::<F>();
             round_challenges.push(r);
-            *sum = (c2 * r + c1) * r + c0;
+            // Update sum to p(r). Horner over [c_0, c_1, c_2, …, c_d].
+            let mut s = *high.last().unwrap_or(&F::ZERO);
+            for &c in high.iter().rev().skip(1) {
+                s = s * r + c;
+            }
+            s = s * r + c1;
+            s = s * r + c0;
+            *sum = s;
 
             mask_sum = univariate_evaluate(&univariate, r) - mask_rlc * *sum;
             prev_round_challenge = Some(r);
         }
-        if let Some(w) = prev_round_challenge {
-            // Final fold of the inputs (no polynomial computation).
-            fold(a, w);
-            fold(b, w);
+        if let Some(r) = prev_round_challenge {
+            oracle.finalize(r);
         }
 
         *sum = mask_sum + mask_rlc * *sum;
@@ -275,7 +372,7 @@ impl<F: Field> Config<F> {
 
         let mask_rlc = self.maybe_receive_initial_mask_sum(verifier_state, sum)?;
 
-        let mut univariate = vec![F::ZERO; self.mask_length().max(3)];
+        let mut univariate = vec![F::ZERO; self.mask_length().max(self.degree.get() + 1)];
         let mut round_challenges = Vec::with_capacity(self.num_rounds);
         for _ in 0..self.num_rounds {
             // Receive all but linear coefficient.
@@ -354,6 +451,34 @@ fn eval_01<F: Field>(coefficients: &[F]) -> F {
     coefficients[0] + coefficients.iter().sum::<F>()
 }
 
+/// Degree-2 dot-product oracle for [`Config::prove_with_oracle`]: reduces
+/// `⟨a, b⟩ = sum` via the legacy quadratic sumcheck. Folds `a` and `b` in
+/// place using [`fold_and_compute_polynomial`] to fuse the previous-round
+/// fold with the current-round polynomial computation in a single pass.
+struct DotProductOracle<'a, F: Field> {
+    a: &'a mut Vec<F>,
+    b: &'a mut Vec<F>,
+}
+
+impl<F: Field> RoundPolyOracle<F> for DotProductOracle<'_, F> {
+    fn degree(&self) -> usize {
+        2
+    }
+
+    fn fold_and_compute(&mut self, prev_challenge: Option<F>) -> Vec<F> {
+        let (c0, c2) = match prev_challenge {
+            Some(w) => fold_and_compute_polynomial(self.a, self.b, w),
+            None => compute_sumcheck_polynomial(self.a, self.b),
+        };
+        vec![c0, c2]
+    }
+
+    fn finalize(&mut self, final_challenge: F) {
+        fold(self.a, final_challenge);
+        fold(self.b, final_challenge);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ark_std::rand::{
@@ -394,6 +519,7 @@ mod tests {
                         proof_of_work::Config::none(),
                         num_rounds,
                         mode,
+                        NonZeroUsize::new(2).expect("2 is non-zero"),
                     )
                 },
             )
@@ -491,6 +617,7 @@ mod tests {
                 SumcheckMode::ZeroKnowledge {
                     mask_length: SumcheckMaskLen::new(3),
                 },
+                NonZeroUsize::new(2).expect("2 is non-zero"),
             ),
         );
     }
@@ -506,6 +633,7 @@ mod tests {
                 SumcheckMode::ZeroKnowledge {
                     mask_length: SumcheckMaskLen::new(3),
                 },
+                NonZeroUsize::new(2).expect("2 is non-zero"),
             ),
         );
     }
@@ -521,6 +649,7 @@ mod tests {
                 SumcheckMode::ZeroKnowledge {
                     mask_length: SumcheckMaskLen::new(3),
                 },
+                NonZeroUsize::new(2).expect("2 is non-zero"),
             ),
         );
     }

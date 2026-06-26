@@ -14,7 +14,7 @@ use crate::{
             basecase as basecase_params,
             bounds::usize_to_f64,
             code_switch as code_switch_params,
-            error::{ChainSource, ChainTarget, DeriveError, Pow},
+            error::{ChainSource, ChainTarget, DeriveError, Pow, RoundSlot},
             mask_proximity as mask_proximity_params,
             solved::Solved,
             spec::{ListSize, MaskCodeMessageLen, OodSampleBudget, SecuritySpec, TuningSpec},
@@ -98,16 +98,16 @@ impl<M: Embedding> ProtocolConfig<M> {
     pub(crate) fn pow_slots(&self) -> impl Iterator<Item = PowSlot> + '_ {
         let round_slots = self.rounds.iter().flat_map(|r| {
             let mask_info = r.mask_oracle_info();
-            let index = r.round_index;
+            let round = r.slot;
             let cs = r.code_switch.config();
             let sumcheck = PowSlot {
-                kind: Pow::RoundSumcheck { index },
+                kind: Pow::RoundSumcheck { round },
                 pow: r.sumcheck.round_pow(),
                 recorded: r.sumcheck.analytic(),
                 recompute: sumcheck_params::analytic_error_bits(cs.source(), mask_info),
             };
             let code_switch = PowSlot {
-                kind: Pow::RoundCodeSwitch { index },
+                kind: Pow::RoundCodeSwitch { round },
                 pow: cs.pow(),
                 recorded: r.code_switch.analytic(),
                 recompute: code_switch_params::analytic_error_bits(
@@ -121,7 +121,7 @@ impl<M: Embedding> ProtocolConfig<M> {
                 .mask_oracle()
                 .map(|mo| {
                     [mo.sumcheck_masks(), mo.cs_mask()].map(|mp| PowSlot {
-                        kind: Pow::RoundMaskProximity { index },
+                        kind: Pow::RoundMaskProximity { round },
                         pow: mp.pow(),
                         recorded: mp.analytic(),
                         recompute: mask_proximity_params::analytic_error_bits(
@@ -219,8 +219,8 @@ impl<M: Embedding> ProtocolConfig<M> {
             let found = next.code_switch.source().vector_size();
             if expected != found {
                 return Err(DeriveError::RoundChainBroken {
-                    from: ChainSource::Round(prev.round_index),
-                    to: ChainTarget::NextRound(next.round_index),
+                    from: ChainSource::Round(prev.slot.index()),
+                    to: ChainTarget::NextRound(next.slot.index()),
                     expected,
                     found,
                 });
@@ -235,7 +235,7 @@ impl<M: Embedding> ProtocolConfig<M> {
             let from = self
                 .rounds
                 .last()
-                .map_or(ChainSource::Tuning, |r| ChainSource::Round(r.round_index));
+                .map_or(ChainSource::Tuning, |r| ChainSource::Round(r.slot.index()));
             return Err(DeriveError::RoundChainBroken {
                 from,
                 to: ChainTarget::Basecase,
@@ -371,7 +371,7 @@ impl<M: Embedding> ProtocolConfig<M> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct RoundConfig<M: Embedding> {
-    round_index: usize,
+    slot: RoundSlot,
     sumcheck: Solved<SumcheckConfig<M::Target>>,
     code_switch: Solved<CodeSwitchConfig<M>>,
     mode: RoundMode<M::Target>,
@@ -379,21 +379,21 @@ pub struct RoundConfig<M: Embedding> {
 
 impl<M: Embedding> RoundConfig<M> {
     pub(crate) const fn new(
-        round_index: usize,
+        slot: RoundSlot,
         sumcheck: Solved<SumcheckConfig<M::Target>>,
         code_switch: Solved<CodeSwitchConfig<M>>,
         mode: RoundMode<M::Target>,
     ) -> Self {
         Self {
-            round_index,
+            slot,
             sumcheck,
             code_switch,
             mode,
         }
     }
 
-    pub const fn round_index(&self) -> usize {
-        self.round_index
+    pub const fn slot(&self) -> RoundSlot {
+        self.slot
     }
 
     pub const fn sumcheck(&self) -> &Solved<SumcheckConfig<M::Target>> {

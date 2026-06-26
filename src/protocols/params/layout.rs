@@ -14,7 +14,7 @@ use crate::{
         params::{
             adaptive::plan_adaptive_rates,
             branch::RoundBuildMode,
-            error::DeriveError,
+            error::{DeriveError, RoundSlot},
             spec::{RateSchedule, RoundContext, SecuritySpec, TuningSpec},
         },
     },
@@ -34,11 +34,16 @@ pub enum LayoutError {
     /// `tuning.folding_factor` must yield at least 1 at every round.
     #[error("tuning.folding_factor min ({min}) must be ≥ 1")]
     FoldingFactorBelowOne { min: usize },
+
+    /// `FoldingFactor::PerRound` was given an empty schedule, which has no
+    /// well-defined fold at any round.
+    #[error("tuning.folding_factor PerRound schedule is empty")]
+    EmptyFoldingSchedule,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RoundShape {
-    pub(super) round_index: usize,
+    pub(super) round_slot: RoundSlot,
     pub(super) source_vector_size: usize,
     pub(super) source_log_inv_rate: u32,
     pub(super) source_folding_factor: u32,
@@ -68,6 +73,11 @@ pub(super) fn round_layout<M: Embedding + Default>(
         }
         .into());
     }
+    // Reject an empty PerRound schedule up front so `min`/`at_round` below
+    // (and every later consumer) can assume a well-defined fold.
+    if tuning.folding_factor.is_empty_schedule() {
+        return Err(LayoutError::EmptyFoldingSchedule.into());
+    }
     let min_folding = tuning.folding_factor.min();
     if min_folding < 1 {
         return Err(LayoutError::FoldingFactorBelowOne { min: min_folding }.into());
@@ -88,7 +98,7 @@ pub(super) fn round_layout<M: Embedding + Default>(
             .rate_schedule
             .step(log_inv_rate, source_folding as u32);
         shapes.push(RoundShape {
-            round_index: round,
+            round_slot: RoundSlot::Shared(round),
             source_vector_size: 1usize << num_vars,
             source_log_inv_rate: log_inv_rate,
             source_folding_factor: source_folding as u32,
@@ -305,6 +315,21 @@ mod tests {
                 err,
                 DeriveError::Layout(LayoutError::FoldingFactorBelowOne { min: 0 })
             ),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
+    fn round_layout_rejects_empty_per_round_folding() {
+        let tuning = TuningSpec {
+            vector_size: 1 << LOG_VECTOR_SIZE_MULTI_ROUND,
+            starting_log_inv_rate: FIXTURE_LOG_INV_RATE,
+            folding_factor: FoldingFactor::PerRound(Vec::new()),
+            rate_schedule: RateSchedule::Stepping,
+        };
+        let err = layout(&tuning).expect_err("empty PerRound schedule must fail");
+        assert!(
+            matches!(err, DeriveError::Layout(LayoutError::EmptyFoldingSchedule)),
             "got {err:?}",
         );
     }

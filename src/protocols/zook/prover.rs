@@ -53,13 +53,17 @@ use crate::{
     },
     hash::Hash,
     protocols::{
-        code_switch::{self, fold_chunks},
+        code_switch::fold_chunks,
         irs_commit::Witness as IrsWitness,
         mask_proximity,
         mask_proximity::Config as MaskProximityConfig,
-        params::protocol_config::{MaskOracleConfig, ProtocolConfig, RoundConfig},
+        params::config::{MaskOracleConfig, ProtocolConfig, RoundConfig},
         sumcheck::{SumcheckMode, SumcheckOpening},
-        zook::commit::{CommittedState, CommittedWitness},
+        zook::{
+            block::ProverBlock,
+            commit::{CommittedState, CommittedWitness},
+            round::prove_whir_round,
+        },
     },
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverMessage, ProverState,
@@ -112,10 +116,7 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
             .map(|(v, weight)| *v * weight)
             .sum();
 
-        // Reduce to basecase inputs `(message, witness, covector, sum)`. The
-        // two arms differ only in how those are obtained.
         let (message, basecase_witness, covector, sum) = match committed.state {
-            // Basecase-only plan: use the committed witness directly.
             CommittedState::Basecase {
                 message,
                 irs_witness,
@@ -124,19 +125,19 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
                 message,
                 irs_witness,
             } => {
-                let mut state = ProverRoundState {
-                    message,
-                    irs_witness,
-                    covector,
-                    sum: batched_evaluation,
-                };
+                let mut block =
+                    ProverBlock::single_source(message, covector, batched_evaluation, irs_witness);
                 for round in self.rounds() {
-                    state = prove_round(round, state, ps);
+                    block = prove_whir_round(round, block, ps);
                 }
-                // After per-round reconciliation, state.sum is bound to
-                // dot(state.message, state.covector) — no extra transcript
-                // send needed entering basecase.
-                (state.message, state.irs_witness, state.covector, state.sum)
+                let ProverBlock {
+                    message,
+                    covector,
+                    sum,
+                    mut witnesses,
+                    ..
+                } = block;
+                (message, witnesses.remove(0), covector, sum)
             }
         };
 
@@ -149,102 +150,9 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
     }
 }
 
-/// Per-round transient state. `irs_witness` is `IrsWitness<F>` throughout
-/// because we restrict to `Identity<F>` embeddings (M::Source = M::Target = F).
-struct ProverRoundState<F: Field> {
-    message: Vec<F>,
-    irs_witness: IrsWitness<F>,
-    covector: Vec<F>,
-    sum: F,
-}
-
-#[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::prove_round", fields(msg_len = round.code_switch().source().message_length(), message_len = state.message.len())))]
-fn prove_round<F, H, R>(
-    round: &RoundConfig<Identity<F>>,
-    mut state: ProverRoundState<F>,
-    ps: &mut ProverState<H, R>,
-) -> ProverRoundState<F>
-where
-    F: Field + Default + Zeroize + Codec<[H::U]>,
-    Standard: Distribution<F>,
-    H: DuplexSpongeInterface,
-    R: RngCore + CryptoRng,
-    u8: Decoding<[H::U]>,
-    [u8; 32]: Decoding<[H::U]>,
-    U64: Codec<[H::U]>,
-    Hash: ProverMessage<[H::U]>,
-{
-    let msg_len = round.code_switch().source().message_length();
-
-    debug_assert_eq!(
-        dot(&state.message, &state.covector),
-        state.sum,
-        "prove_round entry: dot(message, covector) must equal sum"
-    );
-
-    // Samples and commits the sumcheck-masks tree (ZK) or is a no-op (Standard).
-    // cs_fresh_padding is pre-sampled here because it does not depend on folding randomness.
-    let mut masker = RoundMaskOracle::begin(round, ps);
-
-    let opening = round.sumcheck().prove(
-        ps,
-        &mut state.message,
-        &mut state.covector,
-        &mut state.sum,
-        masker.sumcheck_blinding(),
-    );
-
-    // Build cs_mask = (folded_irs_masks ‖ cs_fresh_padding), commit its tree,
-    // send mask_eval_sum cleartext, reconcile sum to the unmasked dot.
-    masker.bind_code_switch_mask(&state.irs_witness, &opening, &mut state.sum, ps);
-
-    debug_assert_eq!(
-        dot(&state.message, &state.covector),
-        state.sum,
-        "post-reconcile: dot(message, covector) must equal sum"
-    );
-
-    // Extend covector for ZK mask region; +0 in Standard mode.
-    state
-        .covector
-        .resize(msg_len + masker.covector_extension(), F::ZERO);
-    let cs_witness = round.code_switch().prove(
-        ps,
-        state.message,
-        std::mem::take(&mut state.irs_witness),
-        code_switch::Claim {
-            covector: &mut state.covector,
-            sum: &mut state.sum,
-        },
-        &opening.round_challenges,
-        masker.code_switch_blinding(),
-    );
-
-    // Prove both mask trees; subtract cs_mask contribution to project sum to f-only.
-    masker.finish(
-        &opening.round_challenges,
-        &state.covector[msg_len..],
-        &mut state.sum,
-        ps,
-    );
-    drop(opening);
-
-    state.message = cs_witness.message;
-    state.irs_witness = cs_witness.target_witness;
-    state.covector.truncate(state.message.len());
-
-    debug_assert_eq!(
-        dot(&state.message, &state.covector),
-        state.sum,
-        "prove_round exit: dot(message, covector) must equal sum"
-    );
-
-    state
-}
-
 /// The committed mask tree for the sumcheck sub-protocol.
 /// Holds k blinding polynomials sampled before sumcheck and opened after code-switch.
-struct SumcheckMaskTree<'a, F: Field> {
+pub(crate) struct SumcheckMaskTree<'a, F: Field> {
     cfg: &'a MaskProximityConfig<F>,
     padded_masks: Vec<Vec<F>>,
     flat_coefficients: Vec<F>,
@@ -340,7 +248,7 @@ impl<'a, F: Field + Zeroize> SumcheckMaskTree<'a, F> {
 
 /// The committed mask tree for the code-switch sub-protocol.
 /// Holds the single (r_folded ‖ fresh_padding) polynomial, built after sumcheck.
-struct CodeSwitchMask<'a, F: Field> {
+pub(crate) struct CodeSwitchMask<'a, F: Field> {
     cfg: &'a MaskProximityConfig<F>,
     poly: Vec<F>,
     tree_witness: mask_proximity::Witness<F>,
@@ -412,7 +320,7 @@ impl<'a, F: Field + Zeroize> CodeSwitchMask<'a, F> {
 /// Transitions: Disabled (Standard) or BeforeCodeSwitch → AfterCodeSwitch.
 /// The Disabled variant is the Null Object: all methods on it are no-ops or
 /// return empty slices, so prove_round has no ZK-specific branches.
-enum RoundMaskOracle<'a, F: Field> {
+pub(crate) enum RoundMaskOracle<'a, F: Field> {
     /// Standard mode or basecase-only round: no mask oracle.
     Disabled,
     /// ZK round — sumcheck-masks tree committed, cs_mask not yet built.
@@ -431,7 +339,10 @@ enum RoundMaskOracle<'a, F: Field> {
 impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
     /// Construct the oracle for this round: Disabled if no mask oracle, otherwise
     /// sample and commit the sumcheck-masks tree (BeforeCodeSwitch).
-    fn begin<H, R>(round: &'a RoundConfig<Identity<F>>, ps: &mut ProverState<H, R>) -> Self
+    pub(crate) fn begin<H, R>(
+        round: &'a RoundConfig<Identity<F>>,
+        ps: &mut ProverState<H, R>,
+    ) -> Self
     where
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
@@ -461,7 +372,7 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
     }
 
     /// Flat sumcheck blinding coefficients. Returns &[] for Disabled.
-    fn sumcheck_blinding(&self) -> &[F] {
+    pub(crate) fn sumcheck_blinding(&self) -> &[F] {
         match self {
             Self::BeforeCodeSwitch { sc_tree, .. } => sc_tree.blinding(),
             _ => &[],
@@ -469,11 +380,13 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
     }
 
     /// Build and commit the cs_mask tree, send δ cleartext, reconcile *sum.
-    /// Transitions BeforeCodeSwitch → AfterCodeSwitch in place.
-    /// No-op for Disabled.
-    fn bind_code_switch_mask<H, R>(
+    /// θ-combines per-block source-IRS masks into a virtual source mask before
+    /// folding; collapses to a `clone()` when t = 1 and theta = [F::ONE].
+    /// Transitions BeforeCodeSwitch → AfterCodeSwitch in place; no-op for Disabled.
+    pub(crate) fn bind_code_switch_mask_multi_source<H, R>(
         &mut self,
-        irs_witness: &IrsWitness<F>,
+        witnesses: &[&IrsWitness<F>],
+        theta: &[F],
         opening: &SumcheckOpening<F>,
         sum: &mut F,
         ps: &mut ProverState<H, R>,
@@ -484,6 +397,13 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
         Standard: Distribution<F>,
         Hash: ProverMessage<[H::U]>,
     {
+        assert_eq!(
+            witnesses.len(),
+            theta.len(),
+            "witnesses and theta must have matching length"
+        );
+        assert!(!witnesses.is_empty(), "at least one source witness");
+
         let (mask_oracle, mut sc_tree, cs_fresh_padding) =
             match std::mem::replace(self, Self::Disabled) {
                 Self::BeforeCodeSwitch {
@@ -500,10 +420,30 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
         // Blinding coefficients are no longer needed after sumcheck.
         sc_tree.wipe_blinding();
 
-        // cs_mask = (r_folded ‖ s): r folds the source IRS randomness by the sumcheck challenges.
+        // θ-combine per-block source-IRS masks before fold_chunks; t = 1 collapses to a copy.
+        let mask_len = witnesses[0].masks.len();
+        let virtual_source_masks: Vec<F> = if witnesses.len() == 1 && theta[0] == F::ONE {
+            witnesses[0].masks.clone()
+        } else {
+            let mut combined = vec![F::ZERO; mask_len];
+            for (w, &t) in witnesses.iter().zip(theta) {
+                debug_assert_eq!(
+                    w.masks.len(),
+                    mask_len,
+                    "all active blocks must share IrsConfig (hence mask length)"
+                );
+                for (acc, &m) in combined.iter_mut().zip(&w.masks) {
+                    *acc += t * m;
+                }
+            }
+            combined
+        };
+
+        // cs_mask = (r_folded ‖ s): r folds the (virtual) source IRS randomness by
+        // the sumcheck challenges.
         let source_mask_len = mask_oracle.l_zk().get() - cs_fresh_padding.len();
         let r_folded = fold_chunks(
-            &irs_witness.masks,
+            &virtual_source_masks,
             source_mask_len,
             &opening.round_challenges,
         );
@@ -533,7 +473,7 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
 
     /// Number of elements to extend the covector by for the ZK region.
     /// Returns 0 for Disabled.
-    const fn covector_extension(&self) -> usize {
+    pub(crate) const fn covector_extension(&self) -> usize {
         match self {
             Self::AfterCodeSwitch { cs_mask, .. } => cs_mask.len(),
             _ => 0,
@@ -541,7 +481,7 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
     }
 
     /// Code-switch mask polynomial coefficients. Returns &[] for Disabled.
-    fn code_switch_blinding(&self) -> &[F] {
+    pub(crate) fn code_switch_blinding(&self) -> &[F] {
         match self {
             Self::AfterCodeSwitch { cs_mask, .. } => cs_mask.blinding(),
             Self::Disabled => &[],
@@ -557,7 +497,7 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
 
     /// Prove both mask trees and subtract the cs_mask contribution from *sum.
     /// No-op for Disabled.
-    fn finish<H, R>(
+    pub(crate) fn finish<H, R>(
         self,
         round_challenges: &[F],
         cs_mask_covector: &[F],
