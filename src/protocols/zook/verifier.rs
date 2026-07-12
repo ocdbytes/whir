@@ -102,7 +102,7 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
                 groups: vec![ClaimGroup {
                     evaluation_point: opening.evaluation_points,
                     initial_claim_scale: F::ONE,
-                    gamma: batching_challenge,
+                    batching_challenge,
                 }],
                 linear_forms_contribution: opening.linear_form_evaluation,
             });
@@ -175,7 +175,7 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
             groups: vec![ClaimGroup {
                 evaluation_point: full_eval_point,
                 initial_claim_scale: scale_suffixes[0],
-                gamma: batching_challenge,
+                batching_challenge,
             }],
             linear_forms_contribution,
         })

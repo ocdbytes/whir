@@ -2,7 +2,7 @@
 //!
 //! Each bundle is committed independently via [`BatchedProtocolConfig::commit_bundle`]:
 //! its polys are flattened into one vector, committed under the bundle's IRS config,
-//! and its intra-bundle `gamma` is sampled at commit time. Reuses the shared
+//! and its intra-bundle `batching_challenge` is sampled at commit time. Reuses the shared
 //! [`CommittedState`] from [`super::super::commit`].
 
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
@@ -23,24 +23,24 @@ use crate::{
     },
 };
 
-/// Prover handle from [`BatchedProtocolConfig::commit_bundle`]; carries the per-bundle `gamma`.
+/// Prover handle from [`BatchedProtocolConfig::commit_bundle`]; carries the per-bundle `batching_challenge`.
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct BundleCommittedWitness<M: Embedding> {
     pub(crate) state: CommittedState<M>,
-    pub(crate) gamma: M::Target,
+    pub(crate) batching_challenge: M::Target,
 }
 
-/// Verifier handle from [`BatchedProtocolConfig::receive_bundle_commitment`]; carries `gamma`.
+/// Verifier handle from [`BatchedProtocolConfig::receive_bundle_commitment`]; carries `batching_challenge`.
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct BundleCommitment<F> {
     pub(crate) irs_commitment: IrsCommitment,
-    pub(crate) gamma: F,
+    pub(crate) batching_challenge: F,
 }
 
 impl<M: Embedding + Default> BatchedProtocolConfig<M> {
-    /// Commit one bundle and sample its intra-bundle `gamma`. Pass one handle per bundle to
+    /// Commit one bundle and sample its intra-bundle `batching_challenge`. Pass one handle per bundle to
     /// [`BatchedProtocolConfig::prove`] in bundle-config order.
     #[cfg_attr(
         feature = "tracing",
@@ -78,14 +78,14 @@ impl<M: Embedding + Default> BatchedProtocolConfig<M> {
 
         let irs_witness = bundle_cfg.irs_config.commit(ps, &[&flat]);
         let message = lift(bundle_cfg.irs_config.embedding(), &flat);
-        let gamma: M::Target = ps.verifier_message();
+        let batching_challenge: M::Target = ps.verifier_message();
 
         BundleCommittedWitness {
             state: CommittedState::Round {
                 message,
                 irs_witness,
             },
-            gamma,
+            batching_challenge,
         }
     }
 
@@ -106,10 +106,10 @@ impl<M: Embedding + Default> BatchedProtocolConfig<M> {
     {
         let bundle_cfg = &self.bundle_configs()[bundle_idx];
         let irs_commitment = bundle_cfg.irs_config.receive_commitment(vs)?;
-        let gamma: M::Target = vs.verifier_message();
+        let batching_challenge: M::Target = vs.verifier_message();
         Ok(BundleCommitment {
             irs_commitment,
-            gamma,
+            batching_challenge,
         })
     }
 }
@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_bundles_bind_gamma_at_commit_time() {
+    fn multiple_bundles_bind_batching_challenge_at_commit_time() {
         let cfg = BatchedProtocolConfig::<TestEmbedding>::derive(
             batched_test_spec(),
             batched_tuning(vec![
@@ -263,9 +263,18 @@ mod tests {
         let commitment_c = cfg.receive_bundle_commitment(&mut vs, 2).unwrap();
         vs.check_eof().unwrap();
 
-        assert_eq!(committed_a.gamma, commitment_a.gamma);
-        assert_eq!(committed_b.gamma, commitment_b.gamma);
-        assert_eq!(committed_c.gamma, commitment_c.gamma);
+        assert_eq!(
+            committed_a.batching_challenge,
+            commitment_a.batching_challenge
+        );
+        assert_eq!(
+            committed_b.batching_challenge,
+            commitment_b.batching_challenge
+        );
+        assert_eq!(
+            committed_c.batching_challenge,
+            commitment_c.batching_challenge
+        );
     }
 
     #[test]

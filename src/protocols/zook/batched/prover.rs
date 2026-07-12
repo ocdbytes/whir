@@ -215,7 +215,7 @@ fn intro_bundle<F: Field>(
         "bundles[{bundle_idx}].poly_len mismatches scheduled BundleSpec",
     );
 
-    let material = build_bundle_claim(bundle, committed.gamma);
+    let reduced_claim = build_bundle_claim(bundle, committed.batching_challenge);
 
     let (message, irs_witness) = match committed.state {
         CommittedState::Round {
@@ -227,8 +227,8 @@ fn intro_bundle<F: Field>(
              supported by the batched protocol",
         ),
     };
-    debug_assert_eq!(message.len(), material.covector.len());
-    debug_assert_eq!(dot(&message, &material.covector), material.sum);
+    debug_assert_eq!(message.len(), reduced_claim.covector.len());
+    debug_assert_eq!(dot(&message, &reduced_claim.covector), reduced_claim.sum);
 
-    ProverBlock::single_source(message, material.covector, material.sum, irs_witness)
+    ProverBlock::single_source(message, reduced_claim.covector, reduced_claim.sum, irs_witness)
 }

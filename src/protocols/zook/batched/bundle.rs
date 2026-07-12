@@ -59,22 +59,22 @@ impl<'a, F: Field> BundleDescriptor<'a, F> {
     }
 
     /// Bundle's initial sum `s = Σ_{k, j} γ^{idx(k, j)} · v_{k, j}` from claim values.
-    pub fn initial_sum(&self, gamma: F) -> F {
+    pub fn initial_sum(&self, batching_challenge: F) -> F {
         let total = self.total_claims();
         if total == 0 {
             return F::ZERO;
         }
-        let mut gamma_powers = Vec::with_capacity(total);
-        gamma_powers.push(F::ONE);
+        let mut claim_weights = Vec::with_capacity(total);
+        claim_weights.push(F::ONE);
         for _ in 1..total {
-            let next = *gamma_powers.last().unwrap() * gamma;
-            gamma_powers.push(next);
+            let next = *claim_weights.last().unwrap() * batching_challenge;
+            claim_weights.push(next);
         }
         let mut idx = 0;
         let mut s = F::ZERO;
         for claims in &self.per_poly_claims {
             for claim in claims {
-                s += gamma_powers[idx] * claim.value;
+                s += claim_weights[idx] * claim.value;
                 idx += 1;
             }
         }
@@ -142,18 +142,21 @@ pub fn flatten_polys<F: Field>(bundle: &WitnessBundle<F>) -> Vec<F> {
 }
 
 /// γ-RLC reduction of a bundle into one virtual block (combined covector + sum + γ powers).
-pub fn build_bundle_claim<F: Field>(bundle: &WitnessBundle<F>, gamma: F) -> BundleClaimMaterial<F> {
+pub fn build_bundle_claim<F: Field>(
+    bundle: &WitnessBundle<F>,
+    batching_challenge: F,
+) -> BundleClaimMaterial<F> {
     bundle.assert_well_formed();
     let n = bundle.num_polys();
     let m = bundle.poly_len();
     let total = bundle.total_claims();
 
-    let mut gamma_powers = Vec::with_capacity(total);
+    let mut claim_weights = Vec::with_capacity(total);
     if total > 0 {
-        gamma_powers.push(F::ONE);
+        claim_weights.push(F::ONE);
         for _ in 1..total {
-            let next = *gamma_powers.last().unwrap() * gamma;
-            gamma_powers.push(next);
+            let next = *claim_weights.last().unwrap() * batching_challenge;
+            claim_weights.push(next);
         }
     }
 
@@ -163,7 +166,7 @@ pub fn build_bundle_claim<F: Field>(bundle: &WitnessBundle<F>, gamma: F) -> Bund
     for (k, claims) in bundle.per_poly_claims.iter().enumerate() {
         let poly_slice = &mut covector[k * m..(k + 1) * m];
         for claim in claims {
-            let weight = gamma_powers[idx];
+            let weight = claim_weights[idx];
             claim.form.accumulate(poly_slice, weight);
             sum += weight * claim.value;
             idx += 1;
@@ -174,7 +177,7 @@ pub fn build_bundle_claim<F: Field>(bundle: &WitnessBundle<F>, gamma: F) -> Bund
     BundleClaimMaterial {
         covector,
         sum,
-        gamma_powers,
+        claim_weights,
     }
 }
 
@@ -182,7 +185,7 @@ pub fn build_bundle_claim<F: Field>(bundle: &WitnessBundle<F>, gamma: F) -> Bund
 pub struct BundleClaimMaterial<F: Field> {
     pub covector: Vec<F>,
     pub sum: F,
-    pub gamma_powers: Vec<F>,
+    pub claim_weights: Vec<F>,
 }
 
 /// Per-bundle γ-RLC soundness in bits via Schwartz–Zippel on a `(total_claims − 1)`-degree
@@ -280,13 +283,13 @@ mod tests {
             let (polys, per_poly_claims) = build_random_bundle(n, d, claims, rng.gen());
             let bundle = bundle_view(&polys, &per_poly_claims);
             let flat = flatten_polys(&bundle);
-            let gamma: F = rng.gen();
-            let material = build_bundle_claim(&bundle, gamma);
+            let batching_challenge: F = rng.gen();
+            let reduced_claim = build_bundle_claim(&bundle, batching_challenge);
             assert_eq!(
-                material.covector.len(),
+                reduced_claim.covector.len(),
                 bundle.num_polys() * bundle.poly_len()
             );
-            assert_eq!(dot(&flat, &material.covector), material.sum);
+            assert_eq!(dot(&flat, &reduced_claim.covector), reduced_claim.sum);
         }
     }
 
@@ -297,9 +300,9 @@ mod tests {
         per_poly_claims[1][0].1 += F::ONE;
         let bundle = bundle_view(&polys, &per_poly_claims);
         let flat = flatten_polys(&bundle);
-        let gamma: F = rng.gen();
-        let material = build_bundle_claim(&bundle, gamma);
-        assert_ne!(dot(&flat, &material.covector), material.sum);
+        let batching_challenge: F = rng.gen();
+        let reduced_claim = build_bundle_claim(&bundle, batching_challenge);
+        assert_ne!(dot(&flat, &reduced_claim.covector), reduced_claim.sum);
     }
 
     #[test]
@@ -308,23 +311,23 @@ mod tests {
         let polys = vec![random_vector::<F>(&mut rng, 4); 2];
         let per_poly_claims: Vec<Vec<(MultilinearExtension<F>, F)>> = vec![vec![], vec![]];
         let bundle = bundle_view(&polys, &per_poly_claims);
-        let material = build_bundle_claim(&bundle, F::from(7u64));
-        assert_eq!(material.sum, F::ZERO);
-        assert!(material.covector.iter().all(|&x| x == F::ZERO));
-        assert!(material.gamma_powers.is_empty());
+        let reduced_claim = build_bundle_claim(&bundle, F::from(7u64));
+        assert_eq!(reduced_claim.sum, F::ZERO);
+        assert!(reduced_claim.covector.iter().all(|&x| x == F::ZERO));
+        assert!(reduced_claim.claim_weights.is_empty());
     }
 
     #[test]
-    fn gamma_powers_are_geometric_sequence() {
+    fn claim_weights_are_geometric_sequence() {
         let mut rng = StdRng::seed_from_u64(99);
         let (polys, per_poly_claims) = build_random_bundle(2, 3, 3, rng.gen());
         let bundle = bundle_view(&polys, &per_poly_claims);
-        let gamma: F = rng.gen();
-        let material = build_bundle_claim(&bundle, gamma);
-        assert_eq!(material.gamma_powers.len(), bundle.total_claims());
-        assert_eq!(material.gamma_powers[0], F::ONE);
-        for w in material.gamma_powers.windows(2) {
-            assert_eq!(w[1], w[0] * gamma);
+        let batching_challenge: F = rng.gen();
+        let reduced_claim = build_bundle_claim(&bundle, batching_challenge);
+        assert_eq!(reduced_claim.claim_weights.len(), bundle.total_claims());
+        assert_eq!(reduced_claim.claim_weights[0], F::ONE);
+        for w in reduced_claim.claim_weights.windows(2) {
+            assert_eq!(w[1], w[0] * batching_challenge);
         }
     }
 }

@@ -231,7 +231,7 @@ impl FoldingFactor {
     /// well-defined fold at any round. Callers reject this at the input
     /// boundary (see `round_layout`) so [`Self::at_round`] and [`Self::min`]
     /// can stay infallible.
-    pub fn is_empty_schedule(&self) -> bool {
+    pub const fn is_empty_schedule(&self) -> bool {
         matches!(self, Self::PerRound(factors) if factors.is_empty())
     }
 }

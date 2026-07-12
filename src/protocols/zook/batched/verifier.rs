@@ -77,17 +77,17 @@ impl<F: Field + Default> BatchedProtocolConfig<Identity<F>> {
             .validate_security_target_met_for_claims(&claim_counts)
             .is_ok());
 
-        let mut gammas: Vec<F> = Vec::with_capacity(n);
+        let mut batching_challenges: Vec<F> = Vec::with_capacity(n);
         let mut initial_sums: Vec<F> = Vec::with_capacity(n);
         for (i, &bundle) in bundles.iter().enumerate() {
             let bcfg = &self.bundle_configs()[i];
             verify!(bundle.num_polys == bcfg.spec.num_polys);
             verify!(bundle.length == bcfg.spec.length);
 
-            let gamma = commitments[i].gamma;
-            let s = bundle.initial_sum(gamma);
-            gammas.push(gamma);
-            initial_sums.push(s);
+            let batching_challenge = commitments[i].batching_challenge;
+            let initial_sum = bundle.initial_sum(batching_challenge);
+            batching_challenges.push(batching_challenge);
+            initial_sums.push(initial_sum);
         }
 
         let mut bundle_pre_scales: Vec<F> = vec![F::ZERO; n];
@@ -168,18 +168,21 @@ impl<F: Field + Default> BatchedProtocolConfig<Identity<F>> {
                 active_commitments.push(cmt);
                 sums.push(initial_sums[idx]);
             }
-            let t = sums.len();
+            let num_active_blocks = sums.len();
             assert!(
-                t >= 1,
+                num_active_blocks >= 1,
                 "round {r}: active list must be non-empty (scheduler invariant)"
             );
             if let Some(join) = self.schedule().join_at(r) {
                 debug_assert_eq!(
-                    join.t, t,
+                    join.t, num_active_blocks,
                     "round {r}: schedule.t mismatches active list size",
                 );
             } else {
-                debug_assert_eq!(1, t, "round {r}: no join scheduled but active.len != 1",);
+                debug_assert_eq!(
+                    1, num_active_blocks,
+                    "round {r}: no join scheduled but active.len != 1",
+                );
             }
 
             let merged = merge_active_verify(
@@ -326,7 +329,7 @@ impl<F: Field + Default> BatchedProtocolConfig<Identity<F>> {
                 ClaimGroup {
                     evaluation_point,
                     initial_claim_scale,
-                    gamma: gammas[b],
+                    batching_challenge: batching_challenges[b],
                 }
             })
             .collect();

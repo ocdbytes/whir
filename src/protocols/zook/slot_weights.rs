@@ -28,9 +28,9 @@ pub fn build<F: Field>(theta: &[F], folding_randomness: &[F]) -> Vec<F> {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(theta.len() * num_cols);
-    for &t in theta {
-        for &c in &collapse {
-            out.push(t * c);
+    for &theta_b in theta {
+        for &col_weight in &collapse {
+            out.push(theta_b * col_weight);
         }
     }
     out

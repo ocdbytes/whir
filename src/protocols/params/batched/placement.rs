@@ -133,11 +133,14 @@ where
 fn selector_merge_config_for_join<F: Field>(
     spec: &SecuritySpec,
     join_index: usize,
-    t: usize,
+    active_block_count: usize,
     message_length: usize,
 ) -> Result<selector_merge::Config<F>, DeriveError> {
-    let preview =
-        selector_merge::Config::<F>::new(t, message_length, proof_of_work::Config::none());
+    let preview = selector_merge::Config::<F>::new(
+        active_block_count,
+        message_length,
+        proof_of_work::Config::none(),
+    );
     let pow = if preview.selector_dim() == 0 {
         proof_of_work::Config::none()
     } else {
@@ -148,7 +151,11 @@ fn selector_merge_config_for_join<F: Field>(
             Pow::BatchedSelectorMerge { index: join_index },
         )?
     };
-    Ok(selector_merge::Config::<F>::new(t, message_length, pow))
+    Ok(selector_merge::Config::<F>::new(
+        active_block_count,
+        message_length,
+        pow,
+    ))
 }
 
 /// Inputs shared across every bundle's pre-merge round body.

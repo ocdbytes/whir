@@ -22,8 +22,8 @@ use crate::{
 /// Unified terminator for both single-track and batched zook verification.
 ///
 /// `groups` holds one [`ClaimGroup`] per independently-batched claim set:
-///   - single-track: exactly one group, `gamma` = the form-batching challenge;
-///   - batched: one group per bundle, `gamma` = the bundle's intra-bundle γ.
+///   - single-track: exactly one group, `batching_challenge` = the form-batching challenge;
+///   - batched: one group per bundle, `batching_challenge` = the bundle's intra-bundle γ.
 ///
 /// Finish with [`Self::verify`] (flat form list, single-track) or
 /// [`Self::verify_bundles`] (per-bundle descriptors, batched).
@@ -44,7 +44,7 @@ pub struct ClaimGroup<F: ark_ff::Field> {
     /// Cumulative product of code-switch scale factors reaching this group.
     pub initial_claim_scale: F,
     /// Form-batching challenge (single-track) or intra-bundle γ (batched).
-    pub gamma: F,
+    pub batching_challenge: F,
 }
 
 impl<F: ark_ff::Field> FinalClaim<F> {
@@ -76,7 +76,7 @@ impl<F: ark_ff::Field> FinalClaim<F> {
     {
         verify!(self.groups.len() == 1);
         self.check_groups(1, |g, _| {
-            let rlc = geometric_sequence(g.gamma, linear_forms.len());
+            let rlc = geometric_sequence(g.batching_challenge, linear_forms.len());
             let form_mle_sum: F = linear_forms
                 .iter()
                 .zip(&rlc)
@@ -102,14 +102,14 @@ impl<F: ark_ff::Field> FinalClaim<F> {
             let eq_high = eq_weights(k_pt);
 
             let total_claims = bundle.total_claims();
-            let gamma_powers = geometric_sequence(group.gamma, total_claims);
+            let claim_weights = geometric_sequence(group.batching_challenge, total_claims);
 
             let mut idx = 0;
             let mut form_sum = F::ZERO;
             for (k, claims) in bundle.per_poly_claims.iter().enumerate() {
                 let eq_k = eq_high[k];
                 for claim in claims {
-                    form_sum += gamma_powers[idx] * eq_k * claim.form.mle_evaluate(b_pt);
+                    form_sum += claim_weights[idx] * eq_k * claim.form.mle_evaluate(b_pt);
                     idx += 1;
                 }
             }
