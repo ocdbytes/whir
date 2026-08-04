@@ -216,8 +216,10 @@ mod tests {
             .iter()
             .map(|f| f.evaluate(&embedding, &witness))
             .collect();
-        let form_refs: Vec<&dyn LinearForm<MixedField>> =
-            forms.iter().map(|f| f as &dyn LinearForm<MixedField>).collect();
+        let form_refs: Vec<&dyn LinearForm<MixedField>> = forms
+            .iter()
+            .map(|f| f as &dyn LinearForm<MixedField>)
+            .collect();
 
         let ds = make_ds(label);
         let mut ps = ProverState::new_std(&ds);

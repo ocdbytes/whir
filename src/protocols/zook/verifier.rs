@@ -237,10 +237,7 @@ enum RoundMaskOracleCheck<'a, F: Field> {
 
 impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
     /// Receive the sumcheck-masks commitment (ZK) or construct Disabled (Standard).
-    fn begin<M, H>(
-        round: &'a RoundConfig<M>,
-        vs: &mut VerifierState<H>,
-    ) -> VerificationResult<Self>
+    fn begin<M, H>(round: &'a RoundConfig<M>, vs: &mut VerifierState<H>) -> VerificationResult<Self>
     where
         M: Embedding<Target = F>,
         F: Codec<[H::U]>,
