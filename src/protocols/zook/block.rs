@@ -8,34 +8,44 @@
 
 use ark_ff::Field;
 
-use crate::protocols::irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness};
+use crate::{
+    algebra::embedding::Embedding,
+    protocols::irs_commit::{Commitment as IrsCommitment, Witness as IrsWitness},
+};
 
 /// Prover-side round state.
 ///
+/// The `(message, covector, sum, theta)` scalars live in the target field
+/// `M::Target`; the source IRS `witnesses` live in `M::Source`. For round 0 the
+/// source is the base field; every later round runs over `Identity<M::Target>`
+/// (source = target). A round's code-switch consumes the `M::Source` witnesses
+/// and yields an `M::Target` one, so a round maps `ProverBlock<M>` to
+/// `ProverBlock<Identity<M::Target>>`.
+///
 /// `witnesses` holds the active source IRS witnesses; in single-track and
-/// pre-merge rounds it has length 1 with `theta = [F::ONE]`. After a selector
+/// pre-merge rounds it has length 1 with `theta = [ONE]`. After a selector
 /// merge it has length `t` with `theta` from the merge opening.
-pub struct ProverBlock<F: Field> {
-    pub(crate) message: Vec<F>,
-    pub(crate) covector: Vec<F>,
-    pub(crate) sum: F,
-    pub(crate) witnesses: Vec<IrsWitness<F>>,
-    pub(crate) theta: Vec<F>,
+pub struct ProverBlock<M: Embedding> {
+    pub(crate) message: Vec<M::Target>,
+    pub(crate) covector: Vec<M::Target>,
+    pub(crate) sum: M::Target,
+    pub(crate) witnesses: Vec<IrsWitness<M::Source>>,
+    pub(crate) theta: Vec<M::Target>,
 }
 
-impl<F: Field> ProverBlock<F> {
+impl<M: Embedding> ProverBlock<M> {
     pub(crate) fn single_source(
-        message: Vec<F>,
-        covector: Vec<F>,
-        sum: F,
-        witness: IrsWitness<F>,
+        message: Vec<M::Target>,
+        covector: Vec<M::Target>,
+        sum: M::Target,
+        witness: IrsWitness<M::Source>,
     ) -> Self {
         Self {
             message,
             covector,
             sum,
             witnesses: vec![witness],
-            theta: vec![F::ONE],
+            theta: vec![<M::Target as Field>::ONE],
         }
     }
 }

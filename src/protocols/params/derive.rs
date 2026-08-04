@@ -1,7 +1,7 @@
 //! Derives a [`ProtocolConfig`] from a spec + tuning.
 
 use crate::{
-    algebra::embedding::Embedding,
+    algebra::embedding::{Embedding, Identity},
     protocols::params::{
         basecase as basecase_params,
         branch::{Branch, RoundBuildMode, RoundBuildPayload},
@@ -37,9 +37,16 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             basecase_log_inv_rate,
         } = round_layout::<M>(&spec, &tuning, mode)?;
 
-        let rounds: Vec<RoundConfig<M>> = shapes
-            .iter()
+        // Round 0 carries the base→ext embedding `M`; every later round runs
+        // ext→ext on the code-switch output, so it is built over
+        // `Identity<M::Target>`.
+        let mut shape_iter = shapes.iter();
+        let first_round: Option<RoundConfig<M>> = shape_iter
+            .next()
             .map(|shape| build_round_config::<M>(&spec, shape, mode))
+            .transpose()?;
+        let tail_rounds: Vec<RoundConfig<Identity<M::Target>>> = shape_iter
+            .map(|shape| build_round_config::<Identity<M::Target>>(&spec, shape, mode))
             .collect::<Result<_, _>>()?;
 
         // When at least one round exists, the last round's `code_switch.target`
@@ -49,13 +56,21 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         // existing witness directly to `basecase.prove` without re-encoding.
         // PoW (sumcheck + γ-combination) is re-solved against the swapped
         // IRS so analytic + PoW still meets the security target.
-        let basecase = if let Some(last) = rounds.last() {
-            basecase_params::solve_with_commit(&spec, last.code_switch().target().clone())?
+        let last_target = tail_rounds
+            .last()
+            .map(|last| last.code_switch().target().clone())
+            .or_else(|| {
+                first_round
+                    .as_ref()
+                    .map(|last| last.code_switch().target().clone())
+            });
+        let basecase = if let Some(target) = last_target {
+            basecase_params::solve_with_commit(&spec, target)?
         } else {
             basecase_params::solve(&spec, basecase_vector_size, basecase_log_inv_rate)?
         };
 
-        let plan = Self::new(spec, tuning, rounds, basecase);
+        let plan = Self::new(spec, tuning, first_round, tail_rounds, basecase);
         plan.validate()?;
         Ok(plan)
     }

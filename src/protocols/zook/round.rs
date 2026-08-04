@@ -7,12 +7,15 @@
 //! `code_switch::prove` / `verify_for_implicit` and `bind_code_switch_mask`
 //! were themselves wrappers around the multi-source primitives.
 
-use ark_ff::Field;
+use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 use zeroize::Zeroize;
 
 use crate::{
-    algebra::{dot, embedding::Identity},
+    algebra::{
+        dot,
+        embedding::{Embedding, Identity},
+    },
     buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
@@ -32,15 +35,19 @@ use crate::{
     },
 };
 
+/// Prove one WHIR round. Round 0 carries the base→ext embedding `M` (its
+/// `witnesses` are `IrsWitness<M::Source>`); the code-switch yields an
+/// `M::Target` witness, so the output block is `ProverBlock<Identity<M::Target>>`.
 #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, name = "zook::prove_whir_round", fields(msg_len = round.code_switch().source().message_length(), t = block.witnesses.len())))]
-pub fn prove_whir_round<F, H, R>(
-    round: &RoundConfig<Identity<F>>,
-    block: ProverBlock<F>,
+pub fn prove_whir_round<M, H, R>(
+    round: &RoundConfig<M>,
+    block: ProverBlock<M>,
     ps: &mut ProverState<H, R>,
-) -> ProverBlock<F>
+) -> ProverBlock<Identity<M::Target>>
 where
-    F: Field + Default + Zeroize + Codec<[H::U]>,
-    Standard: Distribution<F>,
+    M: Embedding,
+    M::Target: Field + Default + Zeroize + Codec<[H::U]>,
+    Standard: Distribution<M::Target>,
     H: DuplexSpongeInterface,
     R: RngCore + CryptoRng,
     u8: Decoding<[H::U]>,
@@ -84,8 +91,17 @@ where
     let message = message_buf.into_vec();
     let mut covector = covector_buf.into_vec();
 
-    let witness_refs: Vec<&IrsWitness<F>> = witnesses.iter().collect();
-    masker.bind_code_switch_mask_multi_source(&witness_refs, &theta, &opening, &mut sum, ps);
+    // Round 0's witnesses are base-field; the θ-combine inside the masker lifts
+    // them into `M::Target` via the embedding before folding.
+    let witness_refs: Vec<&IrsWitness<M::Source>> = witnesses.iter().collect();
+    masker.bind_code_switch_mask_multi_source(
+        round.code_switch().source().embedding(),
+        &witness_refs,
+        &theta,
+        &opening,
+        &mut sum,
+        ps,
+    );
 
     debug_assert_eq!(
         dot(&message, &covector),
@@ -93,7 +109,7 @@ where
         "prove_whir_round post-reconcile: dot(message, covector) must equal sum"
     );
 
-    covector.resize(msg_len + masker.covector_extension(), F::ZERO);
+    covector.resize(msg_len + masker.covector_extension(), M::Target::ZERO);
 
     let slot_weights = slot_weights::build(&theta, &opening.round_challenges);
     let cs_witness = round.code_switch().prove_virtual(
@@ -133,15 +149,22 @@ pub struct VerifyRoundOutput<F: Field> {
     pub(crate) update_params: CovectorUpdateParams<F>,
 }
 
+/// The next-block-plus-round-output pair returned by [`verify_whir_round`].
+type VerifyRoundResult<F> = VerificationResult<(VerifierBlock<F>, VerifyRoundOutput<F>)>;
+
+/// Verify one WHIR round. The verifier holds no base-field state (commitments
+/// are field-agnostic and all arithmetic is in `M::Target`), so only the round
+/// config's embedding `M` varies — round 0 opens a base source IRS.
 #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, name = "zook::verify_whir_round", fields(msg_len = round.code_switch().source().message_length(), t = block.commitments.len())))]
-pub fn verify_whir_round<F, H>(
-    round: &RoundConfig<Identity<F>>,
-    block: VerifierBlock<F>,
+pub fn verify_whir_round<M, H>(
+    round: &RoundConfig<M>,
+    block: VerifierBlock<M::Target>,
     vs: &mut VerifierState<H>,
-) -> VerificationResult<(VerifierBlock<F>, VerifyRoundOutput<F>)>
+) -> VerifyRoundResult<M::Target>
 where
-    F: Field + Default + Codec<[H::U]>,
-    Standard: Distribution<F>,
+    M: Embedding,
+    M::Target: Field + Default + Codec<[H::U]>,
+    Standard: Distribution<M::Target>,
     H: DuplexSpongeInterface,
     u8: Decoding<[H::U]>,
     [u8; 32]: Decoding<[H::U]>,

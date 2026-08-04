@@ -29,7 +29,10 @@ use crate::{
     protocols::{
         code_switch::CovectorUpdateParams,
         irs_commit::Commitment as IrsCommitment,
-        params::batched::{BatchedProtocolConfig, MergeSchedule},
+        params::{
+            batched::{BatchedProtocolConfig, MergeSchedule},
+            config::RoundConfig,
+        },
         zook::{
             batched::{bundle::BundleDescriptor, commit::BundleCommitment},
             block::VerifierBlock,
@@ -149,7 +152,13 @@ impl<F: Field + Default> BatchedProtocolConfig<Identity<F>> {
 
         let mut carrier: Option<VerifierBlock<F>> = None;
 
-        for (r, round) in self.inner().rounds().iter().enumerate() {
+        let inner_rounds: Vec<&RoundConfig<Identity<F>>> = self
+            .inner()
+            .first_round()
+            .into_iter()
+            .chain(self.inner().tail_rounds())
+            .collect();
+        for (r, round) in inner_rounds.into_iter().enumerate() {
             let carrier_existed = carrier.is_some();
             let mut active_commitments: Vec<IrsCommitment> = Vec::new();
             let mut sums: Vec<F> = Vec::new();

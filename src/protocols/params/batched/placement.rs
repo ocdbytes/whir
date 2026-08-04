@@ -90,7 +90,7 @@ pub(super) fn place<M: Embedding + Default>(
 where
     M::Target: Field,
 {
-    if inner.rounds().is_empty() {
+    if !inner.has_rounds() {
         return Err(DeriveError::BatchedUnsupported {
             reason: "merge point too small to support shared rounds (basecase-only inner); \
                      use a smaller folding factor or larger bundles"
@@ -110,7 +110,12 @@ where
         canonical_num_polys,
         starting_log_inv_rate: tuning.starting_log_inv_rate,
         shared_first_fold: tuning.folding_factor.at_round(0) as u32,
-        inner_first_source: inner.rounds()[0].code_switch().config().source(),
+        inner_first_source: inner
+            .first_round()
+            .expect("has_rounds checked above")
+            .code_switch()
+            .config()
+            .source(),
     };
 
     let mut bundle_configs: Vec<BundleConfig<M>> = Vec::with_capacity(tuning.bundles.len());

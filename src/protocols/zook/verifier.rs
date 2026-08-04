@@ -29,7 +29,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        embedding::Identity,
+        embedding::{Embedding, Identity},
         geometric_sequence,
         linear_form::{LinearForm, UnivariateEvaluation},
     },
@@ -51,21 +51,24 @@ use crate::{
     verify,
 };
 
-impl<F: Field + Default> ProtocolConfig<Identity<F>> {
+impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Verify `f(witness) == evaluations[j]` for every linear_form `f = linear_forms[j]` against
     /// the received commitment.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify", fields(vector_size = self.tuning().vector_size, num_rounds = self.rounds().len(), num_claims = linear_forms.len())))]
+    ///
+    /// The verifier holds no base-field state — all arithmetic is in `M::Target`
+    /// — so only round 0's dispatch (over embedding `M`) is embedding-aware.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds(), num_claims = linear_forms.len())))]
     pub fn verify<H>(
         &self,
         vs: &mut VerifierState<H>,
         commitment: Commitment,
-        linear_forms: &[&dyn LinearForm<F>],
-        evaluations: &[F],
-    ) -> VerificationResult<FinalClaim<F>>
+        linear_forms: &[&dyn LinearForm<M::Target>],
+        evaluations: &[M::Target],
+    ) -> VerificationResult<FinalClaim<M::Target>>
     where
-        Standard: Distribution<F>,
+        M::Target: Default + Codec<[H::U]>,
+        Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface,
-        F: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
         [u8; 32]: Decoding<[H::U]>,
         U64: Codec<[H::U]>,
@@ -81,27 +84,29 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
             "zook requires ≥ 1 (form, value) pair"
         );
 
+        let one = <M::Target as Field>::ONE;
+
         // RLC challenge binds the form/value set to the commitment.
-        let batching_challenge: F = vs.verifier_message();
-        let claim_weights = geometric_sequence(F::ONE, batching_challenge, linear_forms.len());
-        let batched_evaluation: F = evaluations
+        let batching_challenge: M::Target = vs.verifier_message();
+        let claim_weights = geometric_sequence(one, batching_challenge, linear_forms.len());
+        let batched_evaluation: M::Target = evaluations
             .iter()
             .zip(&claim_weights)
             .map(|(v, weight)| *v * weight)
             .sum();
 
         // Basecase-only path: no rounds, evaluate directly.
-        if self.rounds().is_empty() {
+        if !self.has_rounds() {
             let opening =
                 self.basecase()
                     .verify(vs, &commitment.irs_commitment, batched_evaluation)?;
             // No constraint terms, no round scalings: linear_forms_contribution = opening.linear_form_evaluation,
-            // initial_claim_scale = F::ONE. The caller checks:
-            // F::ONE × Σ_j claim_weight_j × form_j.mle_at(evaluation_point) == linear_forms_contribution
+            // initial_claim_scale = ONE. The caller checks:
+            // ONE × Σ_j claim_weight_j × form_j.mle_at(evaluation_point) == linear_forms_contribution
             return Ok(FinalClaim {
                 groups: vec![ClaimGroup {
                     evaluation_point: opening.evaluation_points,
-                    initial_claim_scale: F::ONE,
+                    initial_claim_scale: one,
                     batching_challenge,
                 }],
                 linear_forms_contribution: opening.linear_form_evaluation,
@@ -109,14 +114,26 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
         }
 
         let mut block = VerifierBlock::single_source(batched_evaluation, commitment.irs_commitment);
-        let mut constraints: Vec<ImplicitConstraint<F>> = Vec::new();
-        let mut all_round_challenges: Vec<F> = Vec::new();
+        let mut constraints: Vec<ImplicitConstraint<M::Target>> = Vec::new();
+        let mut all_round_challenges: Vec<M::Target> = Vec::new();
         let mut challenges_at: Vec<usize> = vec![0];
-        let mut round_scale_factors: Vec<F> = Vec::new();
+        let mut round_scale_factors: Vec<M::Target> = Vec::new();
 
-        for round in self.rounds() {
+        // Round 0 verifies over `M` (opens a base source IRS); the tail is ext→ext.
+        let first = self
+            .first_round()
+            .expect("has_rounds() true implies a first round");
+        let first_msg_len = first.code_switch().source().message_length();
+        let (next, out) = verify_whir_round::<M, H>(first, block, vs)?;
+        all_round_challenges.extend_from_slice(&out.round_challenges);
+        push_constraints(&mut constraints, &out.update_params, first_msg_len, 0);
+        round_scale_factors.push(out.update_params.original_sl_coeff);
+        challenges_at.push(all_round_challenges.len());
+        block = next;
+
+        for round in self.tail_rounds() {
             let msg_len = round.code_switch().source().message_length();
-            let (next, out) = verify_whir_round(round, block, vs)?;
+            let (next, out) = verify_whir_round::<Identity<M::Target>, H>(round, block, vs)?;
             all_round_challenges.extend_from_slice(&out.round_challenges);
             push_constraints(
                 &mut constraints,
@@ -134,7 +151,7 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
             .verify(vs, &block.commitments[0], block.sum)?;
 
         // full_eval_point = all round challenges ++ basecase evaluation points.
-        let full_eval_point: Vec<F> = all_round_challenges
+        let full_eval_point: Vec<M::Target> = all_round_challenges
             .iter()
             .chain(opening.evaluation_points.iter())
             .copied()
@@ -147,14 +164,14 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
 
         // Compute scale_suffixes[round_idx] = Π_{r'=round_idx..num_completed_rounds-1} round_scale_factors[r'].
         let num_completed_rounds = round_scale_factors.len();
-        let mut scale_suffixes = vec![F::ONE; num_completed_rounds + 1];
+        let mut scale_suffixes = vec![one; num_completed_rounds + 1];
         for round_idx in (0..num_completed_rounds).rev() {
             scale_suffixes[round_idx] =
                 round_scale_factors[round_idx] * scale_suffixes[round_idx + 1];
         }
 
         // constraint_sum = Σ_c c.batching_weight × scale_suffixes[c.round+1] × mle_of_geom(c.eval_point, z_suffix)
-        let constraint_sum: F = constraints
+        let constraint_sum: M::Target = constraints
             .iter()
             .map(|c| {
                 let z_suffix_start = challenges_at[c.added_at_round + 1];
@@ -253,11 +270,12 @@ pub(crate) enum RoundMaskOracleCheck<'a, F: Field> {
 
 impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
     /// Receive the sumcheck-masks commitment (ZK) or construct Disabled (Standard).
-    pub(crate) fn begin<H>(
-        round: &'a RoundConfig<Identity<F>>,
+    pub(crate) fn begin<M, H>(
+        round: &'a RoundConfig<M>,
         vs: &mut VerifierState<H>,
     ) -> VerificationResult<Self>
     where
+        M: Embedding<Target = F>,
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
         Hash: ProverMessage<[H::U]>,

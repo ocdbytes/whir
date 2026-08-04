@@ -143,6 +143,28 @@ impl<M: Embedding> BatchedProtocolConfig<M> {
         &self.tuning
     }
 
+    /// Shape-match `other` against the source IRS of the inner round at
+    /// `join_round` (0 = base `first_round`, ≥1 = ext `tail_rounds`). Field-free,
+    /// so it spans the head/tail type split.
+    fn join_source_matches<A: Embedding>(
+        &self,
+        join_round: usize,
+        other: &irs_commit::Config<A>,
+    ) -> bool {
+        if join_round == 0 {
+            self.inner.first_round().is_some_and(|first| {
+                irs_shape_matches(other, first.code_switch().config().source())
+            })
+        } else {
+            self.inner
+                .tail_rounds()
+                .get(join_round - 1)
+                .is_some_and(|round| {
+                    irs_shape_matches(other, round.code_switch().config().source())
+                })
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn validate_static_invariants(&self) -> Result<(), DeriveError>
     where
@@ -192,10 +214,10 @@ impl<M: Embedding> BatchedProtocolConfig<M> {
             let Some(round) = join.round_index else {
                 return Err(batched_invariant("basecase join encountered in schedule"));
             };
-            if round >= self.inner.rounds().len() {
+            if round >= self.inner.num_rounds() {
                 return Err(batched_invariant(format!(
                     "join {join_pos} targets round {round}, but inner has {} rounds",
-                    self.inner.rounds().len()
+                    self.inner.num_rounds()
                 )));
             }
             if join_pos == 0 && round != 0 {
@@ -231,11 +253,10 @@ impl<M: Embedding> BatchedProtocolConfig<M> {
                     join.t
                 )));
             }
-            let expected_len = self.inner.rounds()[round]
-                .code_switch()
-                .config()
-                .source()
-                .vector_size();
+            let expected_len = self
+                .inner
+                .round_source_vector_size(round)
+                .expect("round < num_rounds checked above");
             if join.selector.message_length() != expected_len {
                 return Err(batched_invariant(format!(
                     "join {join_pos} selector length = {}, expected round {round} source vector_size {expected_len}",
@@ -278,12 +299,12 @@ impl<M: Embedding> BatchedProtocolConfig<M> {
                     "bundle_configs[{i}] has unsupported basecase join"
                 )));
             };
-            let join_source = self.inner.rounds()[join_round]
-                .code_switch()
-                .config()
-                .source();
             if cfg.pre_merge_rounds.is_empty() {
-                if !irs_shape_matches(&cfg.irs_config, join_source) {
+                // A bundle that joins without pre-merge rounds carries a base
+                // `M::Source` witness, so it can only match a round whose source
+                // is `IrsConfig<M>` — i.e. round 0 (`first_round`). Tail rounds
+                // are ext-only; joining one requires a prior code-switch.
+                if !self.join_source_matches(join_round, &cfg.irs_config) {
                     return Err(batched_invariant(format!(
                         "bundle_configs[{i}].irs_config does not match join round {join_round} source"
                     )));
@@ -314,7 +335,7 @@ impl<M: Embedding> BatchedProtocolConfig<M> {
                 .code_switch()
                 .config()
                 .target();
-            if !irs_shape_matches(last_target, join_source) {
+            if !self.join_source_matches(join_round, last_target) {
                 return Err(batched_invariant(format!(
                     "bundle_configs[{i}] final pre-merge target does not match join round {join_round} source"
                 )));

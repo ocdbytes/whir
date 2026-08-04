@@ -20,7 +20,10 @@ use crate::{
     hash::Hash,
     protocols::{
         irs_commit::Witness as IrsWitness,
-        params::batched::{BatchedProtocolConfig, MergeSchedule},
+        params::{
+            batched::{BatchedProtocolConfig, MergeSchedule},
+            config::RoundConfig,
+        },
         zook::{
             batched::{
                 bundle::{build_bundle_claim, WitnessBundle},
@@ -68,7 +71,7 @@ impl<F: Field + Default + Zeroize> BatchedProtocolConfig<Identity<F>> {
         self.validate_security_target_met_for_claims(&claim_counts)
             .expect("runtime batched claim counts violate the configured security target");
 
-        let mut bundle_blocks: Vec<Option<ProverBlock<F>>> = bundles
+        let mut bundle_blocks: Vec<Option<ProverBlock<Identity<F>>>> = bundles
             .iter()
             .zip(committed)
             .enumerate()
@@ -87,9 +90,15 @@ impl<F: Field + Default + Zeroize> BatchedProtocolConfig<Identity<F>> {
             *slot = Some(block);
         }
 
-        let mut carrier: Option<ProverBlock<F>> = None;
-        for (r, round) in self.inner().rounds().iter().enumerate() {
-            let mut active: Vec<ProverBlock<F>> = Vec::new();
+        let mut carrier: Option<ProverBlock<Identity<F>>> = None;
+        let inner_rounds: Vec<&RoundConfig<Identity<F>>> = self
+            .inner()
+            .first_round()
+            .into_iter()
+            .chain(self.inner().tail_rounds())
+            .collect();
+        for (r, round) in inner_rounds.into_iter().enumerate() {
+            let mut active: Vec<ProverBlock<Identity<F>>> = Vec::new();
             if let Some(c) = carrier.take() {
                 active.push(c);
             }
@@ -148,9 +157,9 @@ impl<F: Field + Default + Zeroize> BatchedProtocolConfig<Identity<F>> {
 fn merge_active<F, H, R>(
     schedule: &MergeSchedule<F>,
     round_idx: usize,
-    mut active: Vec<ProverBlock<F>>,
+    mut active: Vec<ProverBlock<Identity<F>>>,
     ps: &mut ProverState<H, R>,
-) -> ProverBlock<F>
+) -> ProverBlock<Identity<F>>
 where
     F: Field + Default + Zeroize + Codec<[H::U]>,
     Standard: Distribution<F>,
@@ -203,7 +212,7 @@ fn intro_bundle<F: Field>(
     bundle_idx: usize,
     bundle: &WitnessBundle<F>,
     committed: BundleCommittedWitness<Identity<F>>,
-) -> ProverBlock<F> {
+) -> ProverBlock<Identity<F>> {
     bundle.assert_well_formed();
     let bcfg = &cfg.bundle_configs()[bundle_idx];
     assert_eq!(

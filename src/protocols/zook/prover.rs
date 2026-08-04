@@ -40,7 +40,7 @@
 //! After all rounds: commit the final folded message via `basecase.commit`
 //! and run `basecase.prove`. Basecase-only plans skip the loop.
 
-use ark_ff::Field;
+use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -48,8 +48,11 @@ use zeroize::Zeroize;
 
 use crate::{
     algebra::{
-        dot, embedding::Identity, geometric_sequence, linear_form::LinearForm, random_vector,
-        univariate_evaluate,
+        dot,
+        embedding::{Embedding, Identity},
+        geometric_sequence, lift,
+        linear_form::LinearForm,
+        random_vector, univariate_evaluate,
     },
     buffer::{Buffer, BufferOps},
     hash::Hash,
@@ -72,21 +75,25 @@ use crate::{
     },
 };
 
-impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
+impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Prove `f(witness) == evaluations[j]` for every linear_form `f = linear_forms[j]` against
     /// the committed witness. Consumes `committed`.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::prove", fields(vector_size = self.tuning().vector_size, num_rounds = self.rounds().len(), num_claims = linear_forms.len())))]
+    ///
+    /// Round 0's code-switch folds the base witness (`IrsWitness<M::Source>`)
+    /// into an ext IRS, so only it is embedding-aware; later rounds are ext→ext.
+    /// Message, covector, and sum are in `M::Target` throughout.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::prove", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds(), num_claims = linear_forms.len())))]
     pub fn prove<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
-        committed: CommittedWitness<Identity<F>>,
-        linear_forms: &[&dyn LinearForm<F>],
-        evaluations: &[F],
+        committed: CommittedWitness<M>,
+        linear_forms: &[&dyn LinearForm<M::Target>],
+        evaluations: &[M::Target],
     ) where
-        Standard: Distribution<F>,
+        M::Target: Field + Default + Zeroize + Codec<[H::U]>,
+        Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
-        F: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
         [u8; 32]: Decoding<[H::U]>,
         U64: Codec<[H::U]>,
@@ -103,15 +110,16 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
         );
 
         // RLC challenge binds the form/value set to the commitment.
-        let batching_challenge: F = ps.verifier_message();
-        let claim_weights = geometric_sequence(F::ONE, batching_challenge, linear_forms.len());
+        let batching_challenge: M::Target = ps.verifier_message();
+        let claim_weights =
+            geometric_sequence(M::Target::ONE, batching_challenge, linear_forms.len());
 
         // Materialize the combined covector = Σ γ^j · form_j and combined value.
-        let mut covector = vec![F::ZERO; self.tuning().vector_size];
+        let mut covector = vec![M::Target::ZERO; self.tuning().vector_size];
         for (form, &weight) in linear_forms.iter().zip(&claim_weights) {
             form.accumulate(&mut covector, weight);
         }
-        let batched_evaluation: F = evaluations
+        let batched_evaluation: M::Target = evaluations
             .iter()
             .zip(&claim_weights)
             .map(|(v, weight)| *v * weight)
@@ -126,10 +134,19 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
                 message,
                 irs_witness,
             } => {
-                let mut block =
-                    ProverBlock::single_source(message, covector, batched_evaluation, irs_witness);
-                for round in self.rounds() {
-                    block = prove_whir_round(round, block, ps);
+                // Round 0 runs over `M` (base witness); the tail is ext→ext.
+                let block = ProverBlock::<M>::single_source(
+                    message,
+                    covector,
+                    batched_evaluation,
+                    irs_witness,
+                );
+                let first = self
+                    .first_round()
+                    .expect("CommittedState::Round implies at least one round");
+                let mut block = prove_whir_round::<M, _, _>(first, block, ps);
+                for round in self.tail_rounds() {
+                    block = prove_whir_round::<Identity<M::Target>, _, _>(round, block, ps);
                 }
                 let ProverBlock {
                     message,
@@ -344,11 +361,9 @@ pub(crate) enum RoundMaskOracle<'a, F: Field> {
 impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
     /// Construct the oracle for this round: Disabled if no mask oracle, otherwise
     /// sample and commit the sumcheck-masks tree (BeforeCodeSwitch).
-    pub(crate) fn begin<H, R>(
-        round: &'a RoundConfig<Identity<F>>,
-        ps: &mut ProverState<H, R>,
-    ) -> Self
+    pub(crate) fn begin<M, H, R>(round: &'a RoundConfig<M>, ps: &mut ProverState<H, R>) -> Self
     where
+        M: Embedding<Target = F>,
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -388,14 +403,16 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
     /// θ-combines per-block source-IRS masks into a virtual source mask before
     /// folding; collapses to a `clone()` when t = 1 and theta = [F::ONE].
     /// Transitions BeforeCodeSwitch → AfterCodeSwitch in place; no-op for Disabled.
-    pub(crate) fn bind_code_switch_mask_multi_source<H, R>(
+    pub(crate) fn bind_code_switch_mask_multi_source<M, H, R>(
         &mut self,
-        witnesses: &[&IrsWitness<F>],
+        embedding: &M,
+        witnesses: &[&IrsWitness<M::Source>],
         theta: &[F],
         opening: &SumcheckOpening<F>,
         sum: &mut F,
         ps: &mut ProverState<H, R>,
     ) where
+        M: Embedding<Target = F>,
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -425,10 +442,13 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
         // Blinding coefficients are no longer needed after sumcheck.
         sc_tree.wipe_blinding();
 
-        // θ-combine per-block source-IRS masks before fold_chunks; t = 1 collapses to a copy.
+        // θ-combine per-block source-IRS masks, lifting base masks into the
+        // target field via the embedding. `Σ θ_i · φ(mask_i)`; t = 1 collapses to
+        // a plain lift. After this the virtual masks are in `F = M::Target`, so
+        // the subsequent `fold_chunks` is same-field.
         let mask_len = witnesses[0].masks.len();
         let virtual_source_masks: Vec<F> = if witnesses.len() == 1 && theta[0] == F::ONE {
-            witnesses[0].masks.to_slice().to_vec()
+            lift(embedding, witnesses[0].masks.to_slice())
         } else {
             let mut combined = vec![F::ZERO; mask_len];
             for (w, &t) in witnesses.iter().zip(theta) {
@@ -438,7 +458,7 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
                     "all active blocks must share IrsConfig (hence mask length)"
                 );
                 for (acc, &m) in combined.iter_mut().zip(w.masks.to_slice()) {
-                    *acc += t * m;
+                    *acc += embedding.mixed_mul(t, m);
                 }
             }
             combined
