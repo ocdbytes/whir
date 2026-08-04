@@ -300,7 +300,7 @@ impl<F: Field> RoundPolyOracle<F> for SelectorOracle<'_, F> {
 
 #[cfg(test)]
 mod tests {
-    use ark_ff::{AdditiveGroup, Field as _};
+    use ark_ff::AdditiveGroup;
     use ark_std::rand::{rngs::StdRng, SeedableRng};
 
     use super::*;

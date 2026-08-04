@@ -243,7 +243,6 @@ impl<F: Field> Config<F> {
 
 #[cfg(test)]
 mod tests {
-    use ark_ff::Field as _;
     use ark_std::rand::{rngs::StdRng, SeedableRng};
 
     use super::*;

@@ -200,7 +200,7 @@ pub fn analytic_error_bits(total_claims: usize, field_bits: f64) -> Bits {
 
 #[cfg(test)]
 mod tests {
-    use ark_ff::{AdditiveGroup, Field as _};
+    use ark_ff::AdditiveGroup;
     use ark_std::rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
