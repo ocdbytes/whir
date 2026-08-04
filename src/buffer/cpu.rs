@@ -244,6 +244,28 @@ impl<F: Field> BufferMath<F> for CpuBuffer<F> {
         crate::algebra::mixed_dot(embedding, &other.data, &self.data)
     }
 
+    fn mixed_sumcheck_polynomial<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        other: &CpuBuffer<M::Target>,
+    ) -> (M::Target, M::Target) {
+        crate::algebra::sumcheck::mixed_compute_sumcheck_polynomial(
+            embedding,
+            &self.data,
+            &other.data,
+        )
+    }
+
+    fn mixed_fold<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        weight: M::Target,
+    ) -> CpuBuffer<M::Target> {
+        CpuBuffer {
+            data: crate::algebra::sumcheck::mixed_fold(embedding, &self.data, weight),
+        }
+    }
+
     fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(
         &self,
         embedding: &M,
