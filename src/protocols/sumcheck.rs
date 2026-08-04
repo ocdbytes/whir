@@ -527,6 +527,63 @@ mod tests {
         });
     }
 
+    /// The delayed lift's core claim: proving with a source-field `a` through
+    /// a real embedding is byte-identical (proof and outputs) to lifting `a`
+    /// up front and proving through `Identity`.
+    #[test]
+    fn mixed_prove_matches_lifted_transcript() {
+        use crate::algebra::{embedding::Basefield, fields::Field64_3, lift};
+        crate::tests::init();
+        let embedding = Basefield::<Field64_3>::new();
+        proptest!(|(seed: u64, config in Config::<Field64_3>::arbitrary())| {
+            let instance = U64(seed);
+            let ds = DomainSeparator::protocol(&config)
+                .session(&format!("Mixed vs lifted at {}:{}", file!(), line!()))
+                .instance(&instance);
+            let mut rng = StdRng::seed_from_u64(seed);
+            let a_source: Vec<Field64> = random_vector(&mut rng, config.initial_size);
+            let covector: Vec<Field64_3> = random_vector(&mut rng, config.initial_size);
+            let masks: Vec<Field64_3> =
+                random_vector(&mut rng, config.mask_length() * config.num_rounds);
+            let a_lifted = lift(&embedding, &a_source);
+            let initial_sum = dot(&a_lifted, &covector);
+
+            let run = |mixed: bool| {
+                let mut b = Buffer::from(covector.as_slice());
+                let mut sum = initial_sum;
+                let mut prover_state = ProverState::new_std(&ds);
+                let (folded, opening) = if mixed {
+                    config.prove(
+                        &mut prover_state,
+                        &embedding,
+                        &Buffer::from(a_source.as_slice()),
+                        &mut b,
+                        &mut sum,
+                        &masks,
+                    )
+                } else {
+                    config.prove(
+                        &mut prover_state,
+                        &Identity::new(),
+                        &Buffer::from(a_lifted.as_slice()),
+                        &mut b,
+                        &mut sum,
+                        &masks,
+                    )
+                };
+                (
+                    prover_state.proof(),
+                    folded.into_vec(),
+                    b.into_vec(),
+                    sum,
+                    opening.round_challenges,
+                    opening.mask_rlc,
+                )
+            };
+            assert_eq!(run(true), run(false));
+        });
+    }
+
     #[test]
     fn test_single_round() {
         test_config(
