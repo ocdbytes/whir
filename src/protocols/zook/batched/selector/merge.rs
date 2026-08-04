@@ -1,4 +1,5 @@
 //! Selector-merge: reduce `t` active blocks sharing one IRS commit config to a single virtual block.
+//!
 //! `t == 1` is a no-op (no transcript writes), preserving byte-identical proofs with the single-track path.
 
 use ark_ff::Field;
@@ -303,7 +304,7 @@ mod tests {
         let cfg = Config::<F>::new(1, 4, proof_of_work::Config::none());
 
         let ds = DomainSeparator::protocol(&"selector-merge-noop-test")
-            .session(&format!("noop"))
+            .session(&"noop".to_string())
             .instance(&Empty);
 
         let mut ps_merge = ProverState::new_std(&ds);
@@ -349,7 +350,7 @@ mod tests {
         let cfg = Config::<F>::new(3, 8, proof_of_work::Config::none());
 
         let ds = DomainSeparator::protocol(&"selector-merge-theta-test")
-            .session(&format!("theta-check"))
+            .session(&"theta-check".to_string())
             .instance(&Empty);
 
         let mut ps = ProverState::new_std(&ds);
@@ -363,6 +364,10 @@ mod tests {
         }
     }
 
+    // Exercises the `prove` sum-consistency `debug_assert!`, which is compiled
+    // out in release builds, so the panic it checks only exists with
+    // `debug_assertions` on.
+    #[cfg(debug_assertions)]
     #[test]
     fn altered_sum_rejected() {
         let (messages, covectors, mut sums) = build_blocks(3, 4, 11);
@@ -370,14 +375,13 @@ mod tests {
         let cfg = Config::<F>::new(3, 4, proof_of_work::Config::none());
 
         let ds = DomainSeparator::protocol(&"selector-merge-bad-test")
-            .session(&format!("bad-sum"))
+            .session(&"bad-sum".to_string())
             .instance(&Empty);
 
         let mut ps = ProverState::new_std(&ds);
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = cfg.prove(&mut ps, &messages, &covectors, &sums);
         }))
-        .err()
-        .expect("debug assert should panic on inconsistent sums");
+        .expect_err("debug assert should panic on inconsistent sums");
     }
 }

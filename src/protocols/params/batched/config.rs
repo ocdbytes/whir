@@ -63,7 +63,7 @@ pub struct MergeSchedule<F: Field> {
 
 impl<F: Field> MergeSchedule<F> {
     /// Empty schedule.
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self { joins: Vec::new() }
     }
 
@@ -110,7 +110,7 @@ impl<M: Embedding> BatchedProtocolConfig<M> {
         Ok(cfg)
     }
 
-    pub(crate) fn new_unchecked(
+    pub(crate) const fn new_unchecked(
         inner: ProtocolConfig<M>,
         schedule: MergeSchedule<M::Target>,
         bundle_configs: Vec<BundleConfig<M>>,
@@ -143,6 +143,7 @@ impl<M: Embedding> BatchedProtocolConfig<M> {
         &self.tuning
     }
 
+    #[allow(clippy::too_many_lines)]
     fn validate_static_invariants(&self) -> Result<(), DeriveError>
     where
         M::Target: Field,
@@ -419,7 +420,7 @@ fn batched_invariant(reason: impl Into<String>) -> DeriveError {
     }
 }
 
-pub(super) fn irs_shape_matches<A: Embedding, B: Embedding>(
+pub(super) const fn irs_shape_matches<A: Embedding, B: Embedding>(
     lhs: &irs_commit::Config<A>,
     rhs: &irs_commit::Config<B>,
 ) -> bool {

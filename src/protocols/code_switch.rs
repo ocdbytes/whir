@@ -244,7 +244,7 @@ impl<M: Embedding> Config<M> {
         &self,
         prover_state: &mut ProverState<H, R>,
         message: Vec<M::Target>,
-        witness: IrsWitness<M::Source>,
+        witness: &IrsWitness<M::Source>,
         claim: Claim<'_, M::Target>,
         folding_randomness: &[M::Target],
         mask: &[M::Target],
@@ -279,7 +279,7 @@ impl<M: Embedding> Config<M> {
         self.prove_virtual(
             prover_state,
             message,
-            &[&witness],
+            &[witness],
             &slot_weights,
             claim,
             mask,
@@ -873,7 +873,7 @@ mod tests {
         let witness = config.prove(
             &mut prover_state,
             folded_message.clone(),
-            source_witness,
+            &source_witness,
             Claim {
                 covector: &mut covector,
                 sum: &mut prover_sum,
@@ -982,7 +982,7 @@ mod tests {
         let _witness = config.prove(
             &mut prover_state,
             folded_message,
-            source_witness,
+            &source_witness,
             Claim {
                 covector: &mut covector,
                 sum: &mut prover_sum,
@@ -1047,7 +1047,7 @@ mod tests {
         let _witness = config.prove(
             &mut prover_state,
             tampered,
-            source_witness,
+            &source_witness,
             Claim {
                 covector: &mut covector,
                 sum: &mut prover_sum,

@@ -33,7 +33,7 @@ use crate::{
 };
 
 #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, name = "zook::prove_whir_round", fields(msg_len = round.code_switch().source().message_length(), t = block.witnesses.len())))]
-pub(crate) fn prove_whir_round<F, H, R>(
+pub fn prove_whir_round<F, H, R>(
     round: &RoundConfig<Identity<F>>,
     block: ProverBlock<F>,
     ps: &mut ProverState<H, R>,
@@ -128,13 +128,13 @@ where
 
 /// Verifier-side output of one round: the data needed by the caller to
 /// accumulate implicit constraints and track per-round scale factors.
-pub(crate) struct VerifyRoundOutput<F: Field> {
+pub struct VerifyRoundOutput<F: Field> {
     pub(crate) round_challenges: Vec<F>,
     pub(crate) update_params: CovectorUpdateParams<F>,
 }
 
 #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, name = "zook::verify_whir_round", fields(msg_len = round.code_switch().source().message_length(), t = block.commitments.len())))]
-pub(crate) fn verify_whir_round<F, H>(
+pub fn verify_whir_round<F, H>(
     round: &RoundConfig<Identity<F>>,
     block: VerifierBlock<F>,
     vs: &mut VerifierState<H>,

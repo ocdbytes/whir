@@ -30,6 +30,9 @@ use crate::{
 
 impl<M: Embedding + Default> BatchedProtocolConfig<M> {
     /// Derive a [`BatchedProtocolConfig`] from a security spec and a batched tuning.
+    // Mirrors `ProtocolConfig::derive`, which also takes an owned `SecuritySpec`
+    // config input; the body only needs to borrow it.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn derive(spec: SecuritySpec, tuning: BatchedTuningSpec) -> Result<Self, DeriveError>
     where
         M::Target: Field,

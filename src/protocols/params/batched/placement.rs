@@ -71,6 +71,13 @@ pub(super) fn merge_point_vsize(
     Ok(merge_vsize)
 }
 
+/// Per-bundle configs (each with its pre-merge rounds) plus the single round-0
+/// merge schedule produced by [`place`].
+type Placement<M> = (
+    Vec<BundleConfig<M>>,
+    MergeSchedule<<M as Embedding>::Target>,
+);
+
 /// Build the per-bundle configs (each with its pre-merge rounds) and the single
 /// round-0 merge schedule, against the inner derived at the merge point.
 pub(super) fn place<M: Embedding + Default>(
@@ -79,7 +86,7 @@ pub(super) fn place<M: Embedding + Default>(
     canonical_num_polys: usize,
     folds_per_bundle: &[Vec<usize>],
     inner: &ProtocolConfig<M>,
-) -> Result<(Vec<BundleConfig<M>>, MergeSchedule<M::Target>), DeriveError>
+) -> Result<Placement<M>, DeriveError>
 where
     M::Target: Field,
 {

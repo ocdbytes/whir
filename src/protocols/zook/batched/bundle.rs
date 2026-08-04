@@ -24,7 +24,7 @@ pub struct BundleDescriptor<'a, F: Field> {
     pub per_poly_claims: Vec<Vec<BundleClaim<'a, F>>>,
 }
 
-impl<'a, F: Field> BundleDescriptor<'a, F> {
+impl<F: Field> BundleDescriptor<'_, F> {
     /// Validate verifier-facing structural invariants.
     pub fn validate(&self) -> VerificationResult<()> {
         verify!(self.num_polys.is_power_of_two());
@@ -44,17 +44,17 @@ impl<'a, F: Field> BundleDescriptor<'a, F> {
     }
 
     /// log₂ of `num_polys × length`.
-    pub fn domain_bits(&self) -> usize {
+    pub const fn domain_bits(&self) -> usize {
         self.num_polys.trailing_zeros() as usize + self.length.trailing_zeros() as usize
     }
 
     /// log₂ of `num_polys` (high bits of the eval point — poly axis).
-    pub fn log_num_polys(&self) -> usize {
+    pub const fn log_num_polys(&self) -> usize {
         self.num_polys.trailing_zeros() as usize
     }
 
     /// log₂ of `length` (low bits of the eval point — message axis).
-    pub fn log_length(&self) -> usize {
+    pub const fn log_length(&self) -> usize {
         self.length.trailing_zeros() as usize
     }
 
@@ -82,9 +82,9 @@ impl<'a, F: Field> BundleDescriptor<'a, F> {
     }
 }
 
-impl<'a, F: Field> WitnessBundle<'a, F> {
+impl<F: Field> WitnessBundle<'_, F> {
     /// Number of polys `N`.
-    pub fn num_polys(&self) -> usize {
+    pub const fn num_polys(&self) -> usize {
         self.polys.len()
     }
 
@@ -214,13 +214,10 @@ mod tests {
 
     type F = Field64;
     type Emb = Identity<F>;
+    /// `(polys, per_poly_claims)` produced by [`build_random_bundle`].
+    type RandomBundle = (Vec<Vec<F>>, Vec<Vec<(MultilinearExtension<F>, F)>>);
 
-    fn build_random_bundle(
-        n: usize,
-        d: usize,
-        claims_per_poly: usize,
-        seed: u64,
-    ) -> (Vec<Vec<F>>, Vec<Vec<(MultilinearExtension<F>, F)>>) {
+    fn build_random_bundle(n: usize, d: usize, claims_per_poly: usize, seed: u64) -> RandomBundle {
         let embedding = Emb::default();
         let mut rng = StdRng::seed_from_u64(seed);
         let m = 1usize << d;

@@ -15,7 +15,7 @@ use crate::protocols::irs_commit::{Commitment as IrsCommitment, Witness as IrsWi
 /// `witnesses` holds the active source IRS witnesses; in single-track and
 /// pre-merge rounds it has length 1 with `theta = [F::ONE]`. After a selector
 /// merge it has length `t` with `theta` from the merge opening.
-pub(crate) struct ProverBlock<F: Field> {
+pub struct ProverBlock<F: Field> {
     pub(crate) message: Vec<F>,
     pub(crate) covector: Vec<F>,
     pub(crate) sum: F,
@@ -46,7 +46,7 @@ impl<F: Field> ProverBlock<F> {
 /// commitments and the post-sumcheck running `sum`. The verifier never
 /// materialises `(message, covector)` — they're folded into the implicit
 /// constraint accumulator owned by the caller.
-pub(crate) struct VerifierBlock<F: Field> {
+pub struct VerifierBlock<F: Field> {
     pub(crate) sum: F,
     pub(crate) commitments: Vec<IrsCommitment>,
     pub(crate) theta: Vec<F>,

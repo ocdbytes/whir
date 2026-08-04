@@ -41,6 +41,9 @@ pub const MAX_DIFFICULTY: f64 = 60.0;
 fn accepted_count_upper_bound(threshold: u64) -> f64 {
     let accepted = u128::from(threshold) + 1;
     let rounded = accepted as f64;
+    // `rounded` is `accepted as f64` with `accepted >= 1`, so it is always
+    // non-negative; the round-trip back to `u128` cannot lose a sign.
+    #[allow(clippy::cast_sign_loss)]
     if (rounded as u128) < accepted {
         f64::from_bits(rounded.to_bits() + 1)
     } else {

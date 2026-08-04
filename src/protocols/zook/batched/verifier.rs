@@ -49,6 +49,7 @@ impl<F: Field + Default> BatchedProtocolConfig<Identity<F>> {
     /// Verify all per-poly claims across one or more bundles. Returns a
     /// [`FinalClaim`] that the caller must finish via [`FinalClaim::verify_bundles`].
     #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::batched::verify", fields(num_bundles = bundles.len())))]
+    #[allow(clippy::too_many_lines)]
     pub fn verify<H>(
         &self,
         vs: &mut VerifierState<H>,
@@ -189,7 +190,7 @@ impl<F: Field + Default> BatchedProtocolConfig<Identity<F>> {
                 self.schedule(),
                 r,
                 active_commitments,
-                sums,
+                &sums,
                 carrier_existed,
                 &joiner_bundle_indices,
                 &mut bundle_pre_scales,
@@ -344,11 +345,14 @@ impl<F: Field + Default> BatchedProtocolConfig<Identity<F>> {
 /// Selector-merge the active commitments + per-block sums into one virtual
 /// [`VerifierBlock`]. Records the per-bundle pre-scale and per-round merge
 /// extra factor into the caller's accumulators. Pass-through when `t == 1`.
+// Mirrors the prover-side merge; the accumulators and transcript handle are all
+// distinct outputs, so bundling them into a struct would not aid readability.
+#[allow(clippy::too_many_arguments)]
 fn merge_active_verify<F, H>(
     schedule: &MergeSchedule<F>,
     round_idx: usize,
     active_commitments: Vec<IrsCommitment>,
-    sums: Vec<F>,
+    sums: &[F],
     carrier_existed: bool,
     joiner_bundle_indices: &[usize],
     bundle_pre_scales: &mut [F],
@@ -379,7 +383,7 @@ where
     let join_cfg = schedule
         .join_at(round_idx)
         .expect("round with t >= 2 must have a schedule entry");
-    let opening = join_cfg.selector.verify(vs, &sums)?;
+    let opening = join_cfg.selector.verify(vs, sums)?;
     let eta = opening.eta;
 
     if carrier_existed {

@@ -70,23 +70,21 @@ impl<F: Field + Default + Zeroize> BatchedProtocolConfig<Identity<F>> {
 
         let mut bundle_blocks: Vec<Option<ProverBlock<F>>> = bundles
             .iter()
-            .zip(committed.into_iter())
+            .zip(committed)
             .enumerate()
             .map(|(i, (bundle, cw))| Some(intro_bundle(self, i, bundle, cw)))
             .collect();
 
-        for i in 0..bundle_blocks.len() {
+        for (i, slot) in bundle_blocks.iter_mut().enumerate() {
             let bcfg = &self.bundle_configs()[i];
             if bcfg.pre_merge_rounds.is_empty() {
                 continue;
             }
-            let mut block = bundle_blocks[i]
-                .take()
-                .expect("bundle present before pre-merge loop");
+            let mut block = slot.take().expect("bundle present before pre-merge loop");
             for round in &bcfg.pre_merge_rounds {
                 block = prove_whir_round(round, block, ps);
             }
-            bundle_blocks[i] = Some(block);
+            *slot = Some(block);
         }
 
         let mut carrier: Option<ProverBlock<F>> = None;
@@ -234,5 +232,10 @@ fn intro_bundle<F: Field>(
     debug_assert_eq!(message.len(), reduced_claim.covector.len());
     debug_assert_eq!(dot(&message, &reduced_claim.covector), reduced_claim.sum);
 
-    ProverBlock::single_source(message, reduced_claim.covector, reduced_claim.sum, irs_witness)
+    ProverBlock::single_source(
+        message,
+        reduced_claim.covector,
+        reduced_claim.sum,
+        irs_witness,
+    )
 }

@@ -183,7 +183,7 @@ mod tests {
         label: &str,
     ) {
         let ds = DomainSeparator::protocol(&"zook-batched-test")
-            .session(&format!("{label}"))
+            .session(&label.to_string())
             .instance(&Empty);
 
         // Prover.
@@ -542,10 +542,10 @@ mod tests {
         }];
         let cfg = BatchedProtocolConfig::<Emb>::derive(
             test_spec(Mode::ZeroKnowledge),
-            batched_tuning(specs.clone()),
+            batched_tuning(specs),
         )
         .unwrap();
-        let mut bundles_data = vec![random_bundle(1, 8, 1, 100)];
+        let mut bundles_data = [random_bundle(1, 8, 1, 100)];
 
         // Build proof against TRUE claims.
         let ds = DomainSeparator::protocol(&"zook-batched-test")
@@ -564,7 +564,7 @@ mod tests {
 
         let mut vs = VerifierState::new_std(&ds, &proof);
         let commitments = vec![cfg.receive_bundle_commitment(&mut vs, 0).unwrap()];
-        let descriptors = vec![bundle_descriptor(&bundles_data[0], 1, 1 << 8)];
+        let descriptors = [bundle_descriptor(&bundles_data[0], 1, 1 << 8)];
         let descriptor_refs: Vec<&BundleDescriptor<F>> = descriptors.iter().collect();
 
         let verify_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -585,10 +585,10 @@ mod tests {
         }];
         let cfg = BatchedProtocolConfig::<Emb>::derive(
             test_spec(Mode::ZeroKnowledge),
-            batched_tuning(specs.clone()),
+            batched_tuning(specs),
         )
         .unwrap();
-        let bundles_data = vec![random_bundle(1, 8, 1, 101)];
+        let bundles_data = [random_bundle(1, 8, 1, 101)];
 
         let ds = DomainSeparator::protocol(&"zook-batched-test")
             .session(&"malformed_descriptor".to_string())
@@ -603,7 +603,7 @@ mod tests {
 
         let mut vs = VerifierState::new_std(&ds, &proof);
         let commitments = vec![cfg.receive_bundle_commitment(&mut vs, 0).unwrap()];
-        let mut descriptors = vec![bundle_descriptor(&bundles_data[0], 1, 1 << 8)];
+        let mut descriptors = [bundle_descriptor(&bundles_data[0], 1, 1 << 8)];
         descriptors[0].per_poly_claims.push(Vec::new());
         let descriptor_refs: Vec<&BundleDescriptor<F>> = descriptors.iter().collect();
 
@@ -611,8 +611,10 @@ mod tests {
             cfg.verify(&mut vs, commitments, &descriptor_refs)
         }));
         match verify_result {
-            Ok(Err(_)) => {}
-            Err(_) => panic!("malformed descriptor should reject without panicking"),
+            // Rejected either by returning `Err` (normal build) or by the
+            // `verify!` check panicking (verifier_panics feature). Both are
+            // correct rejections; only silent acceptance is a bug.
+            Err(_) | Ok(Err(_)) => {}
             Ok(Ok(_)) => panic!("expected malformed descriptor to be rejected"),
         }
     }

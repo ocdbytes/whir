@@ -268,7 +268,10 @@ impl<F: Field> Config<F> {
                 // combined = blinding.masks + γ · merged_irs_randomness (the
                 // θ-weighted merge of the active witnesses' masks).
                 let mut combined_irs_randomness = blinding_witness.masks.to_slice().to_vec();
-                for (acc, &m) in combined_irs_randomness.iter_mut().zip(merged_irs_randomness) {
+                for (acc, &m) in combined_irs_randomness
+                    .iter_mut()
+                    .zip(merged_irs_randomness)
+                {
                     *acc += combination_randomness * m;
                 }
                 prover_state.prover_messages(&combined_irs_randomness);
