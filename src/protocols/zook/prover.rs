@@ -40,7 +40,7 @@
 //! After all rounds: commit the final folded message via `basecase.commit`
 //! and run `basecase.prove`. Basecase-only plans skip the loop.
 
-use ark_ff::Field;
+use ark_ff::{AdditiveGroup, Field};
 use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, RngCore};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -48,13 +48,16 @@ use zeroize::Zeroize;
 
 use crate::{
     algebra::{
-        dot, embedding::Identity, geometric_sequence, linear_form::LinearForm, random_vector,
-        univariate_evaluate,
+        dot,
+        embedding::{Embedding, Identity},
+        geometric_sequence,
+        linear_form::LinearForm,
+        random_vector, univariate_evaluate,
     },
     buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
-        code_switch::{self, fold_chunks},
+        code_switch::{self, mixed_fold_chunks},
         irs_commit::Witness as IrsWitness,
         mask_proximity,
         mask_proximity::Config as MaskProximityConfig,
@@ -68,21 +71,25 @@ use crate::{
     },
 };
 
-impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
+impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Prove `f(witness) == evaluations[j]` for every linear_form `f = linear_forms[j]` against
     /// the committed witness. Consumes `committed`.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::prove", fields(vector_size = self.tuning().vector_size, num_rounds = self.rounds().len(), num_claims = linear_forms.len())))]
+    ///
+    /// Round 0's code-switch folds the base witness (`IrsWitness<M::Source>`)
+    /// into an ext IRS, so only it is embedding-aware; later rounds are ext→ext.
+    /// Message, covector, and sum are in `M::Target` throughout.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::prove", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds(), num_claims = linear_forms.len())))]
     pub fn prove<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
-        committed: CommittedWitness<Identity<F>>,
-        linear_forms: &[&dyn LinearForm<F>],
-        evaluations: &[F],
+        committed: CommittedWitness<M>,
+        linear_forms: &[&dyn LinearForm<M::Target>],
+        evaluations: &[M::Target],
     ) where
-        Standard: Distribution<F>,
+        M::Target: Field + Default + Zeroize + Codec<[H::U]>,
+        Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
-        F: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
         [u8; 32]: Decoding<[H::U]>,
         U64: Codec<[H::U]>,
@@ -99,15 +106,16 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
         );
 
         // RLC challenge binds the form/value set to the commitment.
-        let batching_challenge: F = ps.verifier_message();
-        let claim_weights = geometric_sequence(F::ONE, batching_challenge, linear_forms.len());
+        let batching_challenge: M::Target = ps.verifier_message();
+        let claim_weights =
+            geometric_sequence(M::Target::ONE, batching_challenge, linear_forms.len());
 
         // Materialize the combined covector = Σ γ^j · form_j and combined value.
-        let mut covector = vec![F::ZERO; self.tuning().vector_size];
+        let mut covector = vec![M::Target::ZERO; self.tuning().vector_size];
         for (form, &weight) in linear_forms.iter().zip(&claim_weights) {
             form.accumulate(&mut covector, weight);
         }
-        let batched_evaluation: F = evaluations
+        let batched_evaluation: M::Target = evaluations
             .iter()
             .zip(&claim_weights)
             .map(|(v, weight)| *v * weight)
@@ -125,14 +133,18 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
                 message,
                 irs_witness,
             } => {
-                let mut state = ProverRoundState {
+                let entry = ProverRoundState::<M> {
                     message,
                     irs_witness,
                     covector,
                     sum: batched_evaluation,
                 };
-                for round in self.rounds() {
-                    state = prove_round(round, state, ps);
+                let first = self
+                    .first_round()
+                    .expect("CommittedState::Round implies at least one round");
+                let mut state = prove_round::<M, _, _>(first, entry, ps);
+                for round in self.tail_rounds() {
+                    state = prove_round::<Identity<M::Target>, _, _>(round, state, ps);
                 }
                 // After per-round reconciliation, state.sum is bound to
                 // dot(state.message, state.covector) — no extra transcript
@@ -154,24 +166,27 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
     }
 }
 
-/// Per-round transient state. `irs_witness` is `IrsWitness<F>` throughout
-/// because we restrict to `Identity<F>` embeddings (M::Source = M::Target = F).
-struct ProverRoundState<F: Field> {
-    message: Vec<F>,
-    irs_witness: IrsWitness<F>,
-    covector: Vec<F>,
-    sum: F,
+/// Per-round transient state: `message`/`covector`/`sum` in `M::Target`, the
+/// witness in `M::Source`. The code-switch turns the source witness into an
+/// `M::Target` one, so [`prove_round`] maps `ProverRoundState<M>` to
+/// `ProverRoundState<Identity<M::Target>>`.
+struct ProverRoundState<M: Embedding> {
+    message: Vec<M::Target>,
+    irs_witness: IrsWitness<M::Source>,
+    covector: Vec<M::Target>,
+    sum: M::Target,
 }
 
 #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::prove_round", fields(msg_len = round.code_switch().source().message_length(), message_len = state.message.len())))]
-fn prove_round<F, H, R>(
-    round: &RoundConfig<Identity<F>>,
-    mut state: ProverRoundState<F>,
+fn prove_round<M, H, R>(
+    round: &RoundConfig<M>,
+    state: ProverRoundState<M>,
     ps: &mut ProverState<H, R>,
-) -> ProverRoundState<F>
+) -> ProverRoundState<Identity<M::Target>>
 where
-    F: Field + Default + Zeroize + Codec<[H::U]>,
-    Standard: Distribution<F>,
+    M: Embedding,
+    M::Target: Field + Default + Zeroize + Codec<[H::U]>,
+    Standard: Distribution<M::Target>,
     H: DuplexSpongeInterface,
     R: RngCore + CryptoRng,
     u8: Decoding<[H::U]>,
@@ -181,9 +196,18 @@ where
 {
     let msg_len = round.code_switch().source().message_length();
 
+    // The witness type changes across the code-switch (`M::Source` → `M::Target`),
+    // so we consume the state into owned locals and build a fresh return value.
+    let ProverRoundState {
+        message,
+        irs_witness,
+        covector,
+        mut sum,
+    } = state;
+
     debug_assert_eq!(
-        dot(&state.message, &state.covector),
-        state.sum,
+        dot(&message, &covector),
+        sum,
         "prove_round entry: dot(message, covector) must equal sum"
     );
 
@@ -195,39 +219,43 @@ where
     // buffers, fold, and move the folded result back into the `Vec` state
     // (which downstream steps resize/truncate/index directly). Both hops are
     // zero-copy on the CPU backend.
-    let mut message_buf = Buffer::from(std::mem::take(&mut state.message));
-    let mut covector_buf = Buffer::from(std::mem::take(&mut state.covector));
+    let mut message_buf = Buffer::from(message);
+    let mut covector_buf = Buffer::from(covector);
     let opening = round.sumcheck().prove(
         ps,
         &mut message_buf,
         &mut covector_buf,
-        &mut state.sum,
+        &mut sum,
         masker.sumcheck_blinding(),
     );
-    state.message = message_buf.into_vec();
-    state.covector = covector_buf.into_vec();
+    let message = message_buf.into_vec();
+    let mut covector = covector_buf.into_vec();
 
     // Build cs_mask = (folded_irs_masks ‖ cs_fresh_padding), commit its tree,
     // send mask_eval_sum cleartext, reconcile sum to the unmasked dot.
-    masker.bind_code_switch_mask(&state.irs_witness, &opening, &mut state.sum, ps);
+    masker.bind_code_switch_mask(
+        round.code_switch().source().embedding(),
+        &irs_witness,
+        &opening,
+        &mut sum,
+        ps,
+    );
 
     debug_assert_eq!(
-        dot(&state.message, &state.covector),
-        state.sum,
+        dot(&message, &covector),
+        sum,
         "post-reconcile: dot(message, covector) must equal sum"
     );
 
     // Extend covector for ZK mask region; +0 in Standard mode.
-    state
-        .covector
-        .resize(msg_len + masker.covector_extension(), F::ZERO);
+    covector.resize(msg_len + masker.covector_extension(), M::Target::ZERO);
     let cs_witness = round.code_switch().prove(
         ps,
-        state.message,
-        std::mem::take(&mut state.irs_witness),
+        message,
+        irs_witness,
         code_switch::Claim {
-            covector: &mut state.covector,
-            sum: &mut state.sum,
+            covector: &mut covector,
+            sum: &mut sum,
         },
         &opening.round_challenges,
         masker.code_switch_blinding(),
@@ -236,23 +264,27 @@ where
     // Prove both mask trees; subtract cs_mask contribution to project sum to f-only.
     masker.finish(
         &opening.round_challenges,
-        &state.covector[msg_len..],
-        &mut state.sum,
+        &covector[msg_len..],
+        &mut sum,
         ps,
     );
     drop(opening);
 
-    state.message = cs_witness.message;
-    state.irs_witness = cs_witness.target_witness;
-    state.covector.truncate(state.message.len());
+    let message = cs_witness.message;
+    covector.truncate(message.len());
 
     debug_assert_eq!(
-        dot(&state.message, &state.covector),
-        state.sum,
+        dot(&message, &covector),
+        sum,
         "prove_round exit: dot(message, covector) must equal sum"
     );
 
-    state
+    ProverRoundState {
+        message,
+        irs_witness: cs_witness.target_witness,
+        covector,
+        sum,
+    }
 }
 
 /// The committed mask tree for the sumcheck sub-protocol.
@@ -444,8 +476,9 @@ enum RoundMaskOracle<'a, F: Field> {
 impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
     /// Construct the oracle for this round: Disabled if no mask oracle, otherwise
     /// sample and commit the sumcheck-masks tree (BeforeCodeSwitch).
-    fn begin<H, R>(round: &'a RoundConfig<Identity<F>>, ps: &mut ProverState<H, R>) -> Self
+    fn begin<M, H, R>(round: &'a RoundConfig<M>, ps: &mut ProverState<H, R>) -> Self
     where
+        M: Embedding<Target = F>,
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -484,13 +517,15 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
     /// Build and commit the cs_mask tree, send δ cleartext, reconcile *sum.
     /// Transitions BeforeCodeSwitch → AfterCodeSwitch in place.
     /// No-op for Disabled.
-    fn bind_code_switch_mask<H, R>(
+    fn bind_code_switch_mask<M, H, R>(
         &mut self,
-        irs_witness: &IrsWitness<F>,
+        embedding: &M,
+        irs_witness: &IrsWitness<M::Source>,
         opening: &SumcheckOpening<F>,
         sum: &mut F,
         ps: &mut ProverState<H, R>,
     ) where
+        M: Embedding<Target = F>,
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
         R: RngCore + CryptoRng,
@@ -513,9 +548,11 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
         // Blinding coefficients are no longer needed after sumcheck.
         sc_tree.wipe_blinding();
 
-        // cs_mask = (r_folded ‖ s): r folds the source IRS randomness by the sumcheck challenges.
+        // cs_mask = (r_folded ‖ s): r folds the source IRS randomness by the
+        // sumcheck challenges (embedding-aware — see `mixed_fold_chunks`).
         let source_mask_len = mask_oracle.l_zk().get() - cs_fresh_padding.len();
-        let r_folded = fold_chunks(
+        let r_folded = mixed_fold_chunks(
+            embedding,
             irs_witness.masks.to_slice(),
             source_mask_len,
             &opening.round_challenges,

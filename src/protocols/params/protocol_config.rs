@@ -4,7 +4,10 @@ use ark_ff::Field;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    algebra::{embedding::Embedding, fields::FieldWithSize},
+    algebra::{
+        embedding::{Embedding, Identity},
+        fields::FieldWithSize,
+    },
     bits::Bits,
     protocols::{
         basecase::Config as BasecaseConfig,
@@ -30,7 +33,10 @@ use crate::{
 pub struct ProtocolConfig<M: Embedding> {
     security: SecuritySpec,
     tuning: TuningSpec,
-    rounds: Vec<RoundConfig<M>>,
+    /// The base→ext first round: its source IRS is over `M::Source`.
+    first_round: Option<RoundConfig<M>>,
+    /// Later rounds, all ext→ext on the code-switch output (`Identity<M::Target>`).
+    tail_rounds: Vec<RoundConfig<Identity<M::Target>>>,
     basecase: BasecasePlan<M::Target>,
 }
 
@@ -38,13 +44,15 @@ impl<M: Embedding> ProtocolConfig<M> {
     pub(crate) const fn new(
         security: SecuritySpec,
         tuning: TuningSpec,
-        rounds: Vec<RoundConfig<M>>,
+        first_round: Option<RoundConfig<M>>,
+        tail_rounds: Vec<RoundConfig<Identity<M::Target>>>,
         basecase: BasecasePlan<M::Target>,
     ) -> Self {
         Self {
             security,
             tuning,
-            rounds,
+            first_round,
+            tail_rounds,
             basecase,
         }
     }
@@ -57,8 +65,34 @@ impl<M: Embedding> ProtocolConfig<M> {
         &self.tuning
     }
 
-    pub fn rounds(&self) -> &[RoundConfig<M>] {
-        &self.rounds
+    /// The base→ext first round, if the plan has any rounds.
+    pub const fn first_round(&self) -> Option<&RoundConfig<M>> {
+        self.first_round.as_ref()
+    }
+
+    /// The ext→ext rounds following the first.
+    pub fn tail_rounds(&self) -> &[RoundConfig<Identity<M::Target>>] {
+        &self.tail_rounds
+    }
+
+    /// `true` if the plan has at least one code-switch round.
+    pub const fn has_rounds(&self) -> bool {
+        self.first_round.is_some()
+    }
+
+    /// Total number of code-switch rounds (`first_round` + `tail_rounds`).
+    pub fn num_rounds(&self) -> usize {
+        usize::from(self.first_round.is_some()) + self.tail_rounds.len()
+    }
+
+    /// Every round, head then tail, as one `&dyn RoundMetrics` stream — the sole
+    /// place the `first_round`/`tail_rounds` type split is bridged for the
+    /// aggregators. Lazy; see [`RoundMetrics`] for the safe-before-validation set.
+    fn round_views(&self) -> impl Iterator<Item = &dyn RoundMetrics> + '_ {
+        self.first_round
+            .iter()
+            .map(|r| r as &dyn RoundMetrics)
+            .chain(self.tail_rounds.iter().map(|r| r as &dyn RoundMetrics))
     }
 
     pub const fn basecase(&self) -> &BasecaseConfig<M::Target> {
@@ -96,47 +130,7 @@ impl<M: Embedding> ProtocolConfig<M> {
     /// target validation, and the per-slot test assertions all iterate this.
     /// A sub-protocol added here is automatically covered by every check.
     pub(crate) fn pow_slots(&self) -> impl Iterator<Item = PowSlot> + '_ {
-        let round_slots = self.rounds.iter().flat_map(|r| {
-            let mask_info = r.mask_oracle_info();
-            let index = r.round_index;
-            let cs = r.code_switch.config();
-            let sumcheck = PowSlot {
-                kind: Pow::RoundSumcheck { index },
-                pow: r.sumcheck.round_pow(),
-                recorded: r.sumcheck.analytic(),
-                recompute: sumcheck_params::analytic_error_bits(cs.source(), mask_info),
-            };
-            let code_switch = PowSlot {
-                kind: Pow::RoundCodeSwitch { index },
-                pow: cs.pow(),
-                recorded: r.code_switch.analytic(),
-                recompute: code_switch_params::analytic_error_bits(
-                    cs.source(),
-                    cs.target(),
-                    cs.out_domain_samples(),
-                    mask_info,
-                ),
-            };
-            let mask_slots = r
-                .mask_oracle()
-                .map(|mo| {
-                    [mo.sumcheck_masks(), mo.cs_mask()].map(|mp| PowSlot {
-                        kind: Pow::RoundMaskProximity { index },
-                        pow: mp.pow(),
-                        recorded: mp.analytic(),
-                        recompute: mask_proximity_params::analytic_error_bits(
-                            mp.c_zk_commit(),
-                            mp.num_masks(),
-                        ),
-                    })
-                })
-                .into_iter()
-                .flatten();
-            [Some(sumcheck), Some(code_switch)]
-                .into_iter()
-                .flatten()
-                .chain(mask_slots)
-        });
+        let round_slots = self.round_views().flat_map(RoundMetrics::pow_slots);
 
         let basecase = self.basecase.config();
         let basecase_sumcheck = PowSlot {
@@ -212,30 +206,29 @@ impl<M: Embedding> ProtocolConfig<M> {
     /// - last round → basecase: `basecase.commit.vector_size == last.target.vector_size`
     /// - no rounds: `basecase.commit.vector_size == tuning.vector_size`
     pub fn validate_round_chaining(&self) -> Result<(), DeriveError> {
-        for window in self.rounds.windows(2) {
-            let prev = &window[0];
-            let next = &window[1];
-            let expected = prev.code_switch.target().vector_size();
-            let found = next.code_switch.source().vector_size();
-            if expected != found {
+        let views: Vec<&dyn RoundMetrics> = self.round_views().collect();
+
+        for window in views.windows(2) {
+            let prev = window[0];
+            let next = window[1];
+            if prev.target_vector_size() != next.source_vector_size() {
                 return Err(DeriveError::RoundChainBroken {
-                    from: ChainSource::Round(prev.round_index),
-                    to: ChainTarget::NextRound(next.round_index),
-                    expected,
-                    found,
+                    from: ChainSource::Round(prev.round_index()),
+                    to: ChainTarget::NextRound(next.round_index()),
+                    expected: prev.target_vector_size(),
+                    found: next.source_vector_size(),
                 });
             }
         }
 
         let basecase_vector_size = self.basecase.commit().vector_size();
-        let expected = self.rounds.last().map_or(self.tuning.vector_size, |last| {
-            last.code_switch.target().vector_size()
-        });
+        let expected = views
+            .last()
+            .map_or(self.tuning.vector_size, |last| last.target_vector_size());
         if expected != basecase_vector_size {
-            let from = self
-                .rounds
+            let from = views
                 .last()
-                .map_or(ChainSource::Tuning, |r| ChainSource::Round(r.round_index));
+                .map_or(ChainSource::Tuning, |r| ChainSource::Round(r.round_index()));
             return Err(DeriveError::RoundChainBroken {
                 from,
                 to: ChainTarget::Basecase,
@@ -252,12 +245,10 @@ impl<M: Embedding> ProtocolConfig<M> {
     pub fn privacy_error_bits(&self) -> Bits {
         let field_bits = <M::Target as FieldWithSize>::field_size_bits();
         let mut total_error = 0.0_f64;
-        for r in &self.rounds {
-            if let RoundMode::ZeroKnowledge { t_ood, .. } = &r.mode {
-                let t = usize_to_f64(t_ood.get());
-                let log_err = f64::midpoint(t * t, t).log2() - field_bits;
-                total_error += 2_f64.powf(log_err);
-            }
+        for t_ood in self.round_views().filter_map(RoundMetrics::t_ood) {
+            let t = usize_to_f64(t_ood);
+            let log_err = f64::midpoint(t * t, t).log2() - field_bits;
+            total_error += 2_f64.powf(log_err);
         }
         if total_error == 0.0 {
             return Bits::new(f64::from(self.security.target_security_bits));
@@ -270,10 +261,19 @@ impl<M: Embedding> ProtocolConfig<M> {
     /// Analytic soundness bits (excluding PoW).
     pub fn analytic_bits(&self) -> Bits {
         let mut min_bits = f64::from(self.basecase.config().analytic_bits());
-        for round in &self.rounds {
-            min_bits = min_bits.min(f64::from(round.analytic_bits()));
+        for v in self.round_views() {
+            min_bits = min_bits.min(f64::from(v.analytic()));
         }
         Bits::new(min_bits.max(0.0))
+    }
+}
+
+#[cfg(test)]
+impl<F: Field> ProtocolConfig<Identity<F>> {
+    /// All rounds as one sequence — test-only, and only for `Identity<F>` where
+    /// head and tail share a type. Generic code uses `first_round`/`tail_rounds`.
+    pub(crate) fn rounds(&self) -> Vec<&RoundConfig<Identity<F>>> {
+        self.first_round.iter().chain(&self.tail_rounds).collect()
     }
 }
 
@@ -342,7 +342,12 @@ impl<M: Embedding> ProtocolConfig<M> {
     }
 
     pub(crate) fn truncate_rounds_for_test(&mut self, len: usize) {
-        self.rounds.truncate(len);
+        if len == 0 {
+            self.first_round = None;
+            self.tail_rounds.clear();
+        } else {
+            self.tail_rounds.truncate(len - 1);
+        }
     }
 
     pub(crate) fn corrupt_round_target_vector_size_for_test(
@@ -350,11 +355,23 @@ impl<M: Embedding> ProtocolConfig<M> {
         round_idx: usize,
         new_size: usize,
     ) {
-        self.rounds[round_idx]
-            .code_switch
-            .config_mut_for_test()
-            .target_mut_for_test()
-            .set_vector_size_for_test(new_size);
+        // Target IRS is `Identity<M::Target>` in both the head and tail; only
+        // the owning `code_switch` type differs, so the mutation is branched.
+        if round_idx == 0 {
+            self.first_round
+                .as_mut()
+                .expect("round 0 must exist")
+                .code_switch
+                .config_mut_for_test()
+                .target_mut_for_test()
+                .set_vector_size_for_test(new_size);
+        } else {
+            self.tail_rounds[round_idx - 1]
+                .code_switch
+                .config_mut_for_test()
+                .target_mut_for_test()
+                .set_vector_size_for_test(new_size);
+        }
     }
 
     pub(crate) fn corrupt_round_sumcheck_analytic_for_test(
@@ -362,9 +379,17 @@ impl<M: Embedding> ProtocolConfig<M> {
         round_idx: usize,
         new_value: Bits,
     ) {
-        self.rounds[round_idx]
-            .sumcheck
-            .set_analytic_for_test(new_value);
+        if round_idx == 0 {
+            self.first_round
+                .as_mut()
+                .expect("round 0 must exist")
+                .sumcheck
+                .set_analytic_for_test(new_value);
+        } else {
+            self.tail_rounds[round_idx - 1]
+                .sumcheck
+                .set_analytic_for_test(new_value);
+        }
     }
 }
 
@@ -419,6 +444,92 @@ impl<M: Embedding> RoundConfig<M> {
     /// Slim mask-oracle view derived from `mask_oracle()`.
     pub fn mask_oracle_info(&self) -> Option<MaskOracleInfo> {
         self.mask_oracle().map(MaskOracleConfig::info)
+    }
+}
+
+/// Field-free view of one round, bridging `first_round` (`M`) and `tail_rounds`
+/// (`Identity<M::Target>`) into one `&dyn` stream for the aggregators.
+///
+/// The shape accessors are always safe; `analytic`/`pow_slots` recompute and
+/// assume shape invariants hold, so call them only after
+/// `validate_round_chaining` (see [`ProtocolConfig::validate`]).
+trait RoundMetrics {
+    fn round_index(&self) -> usize;
+    fn source_vector_size(&self) -> usize;
+    fn target_vector_size(&self) -> usize;
+    /// `t_ood` when the round is ZK, else `None`.
+    fn t_ood(&self) -> Option<usize>;
+    /// Analytic soundness floor (recompute).
+    fn analytic(&self) -> Bits;
+    /// PoW slots: sumcheck, code-switch, and masks when ZK (recompute).
+    fn pow_slots(&self) -> Vec<PowSlot>;
+}
+
+impl<M: Embedding> RoundMetrics for RoundConfig<M> {
+    fn round_index(&self) -> usize {
+        self.round_index
+    }
+
+    fn source_vector_size(&self) -> usize {
+        self.code_switch.source().vector_size()
+    }
+
+    fn target_vector_size(&self) -> usize {
+        self.code_switch.target().vector_size()
+    }
+
+    fn t_ood(&self) -> Option<usize> {
+        match &self.mode {
+            RoundMode::ZeroKnowledge { t_ood, .. } => Some(t_ood.get()),
+            RoundMode::Standard => None,
+        }
+    }
+
+    fn analytic(&self) -> Bits {
+        self.analytic_bits()
+    }
+
+    fn pow_slots(&self) -> Vec<PowSlot> {
+        let mask_info = self.mask_oracle_info();
+        let index = self.round_index;
+        let cs = self.code_switch.config();
+        let sumcheck = PowSlot {
+            kind: Pow::RoundSumcheck { index },
+            pow: self.sumcheck.round_pow(),
+            recorded: self.sumcheck.analytic(),
+            recompute: sumcheck_params::analytic_error_bits(cs.source(), mask_info),
+        };
+        let code_switch = PowSlot {
+            kind: Pow::RoundCodeSwitch { index },
+            pow: cs.pow(),
+            recorded: self.code_switch.analytic(),
+            recompute: code_switch_params::analytic_error_bits(
+                cs.source(),
+                cs.target(),
+                cs.out_domain_samples(),
+                mask_info,
+            ),
+        };
+        let mask_slots = self
+            .mask_oracle()
+            .map(|mo| {
+                [mo.sumcheck_masks(), mo.cs_mask()].map(|mp| PowSlot {
+                    kind: Pow::RoundMaskProximity { index },
+                    pow: mp.pow(),
+                    recorded: mp.analytic(),
+                    recompute: mask_proximity_params::analytic_error_bits(
+                        mp.c_zk_commit(),
+                        mp.num_masks(),
+                    ),
+                })
+            })
+            .into_iter()
+            .flatten();
+        [Some(sumcheck), Some(code_switch)]
+            .into_iter()
+            .flatten()
+            .chain(mask_slots)
+            .collect()
     }
 }
 

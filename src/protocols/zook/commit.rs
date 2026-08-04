@@ -51,7 +51,7 @@ pub struct Commitment {
 
 impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Commit the initial witness to the protocol's first IRS codeword.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::commit", fields(vector_size = self.tuning().vector_size, num_rounds = self.rounds().len())))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::commit", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds())))]
     pub fn commit<H, R>(
         &self,
         ps: &mut ProverState<H, R>,
@@ -70,7 +70,7 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
             "zook witness length",
         );
 
-        let state = if let Some(round) = self.rounds().first() {
+        let state = if let Some(round) = self.first_round() {
             let witness_buffer = Buffer::from(witness);
             let irs_witness = round.code_switch().source().commit(ps, &[&witness_buffer]);
             let message = lift(round.code_switch().source().embedding(), witness);
@@ -93,14 +93,14 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     }
 
     /// Verifier mirror of [`Self::commit`].
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::receive_commitment", fields(vector_size = self.tuning().vector_size, num_rounds = self.rounds().len())))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::receive_commitment", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds())))]
     pub fn receive_commitment<H>(&self, vs: &mut VerifierState<H>) -> VerificationResult<Commitment>
     where
         H: DuplexSpongeInterface,
         M::Target: Codec<[H::U]>,
         Hash: ProverMessage<[H::U]>,
     {
-        let irs_commitment = match self.rounds().first() {
+        let irs_commitment = match self.first_round() {
             Some(round) => round.code_switch().source().receive_commitment(vs)?,
             None => self.basecase().commit().receive_commitment(vs)?,
         };

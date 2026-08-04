@@ -29,7 +29,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{
-        embedding::Identity,
+        embedding::{Embedding, Identity},
         geometric_sequence,
         linear_form::{LinearForm, UnivariateEvaluation},
     },
@@ -49,21 +49,24 @@ use crate::{
     verify,
 };
 
-impl<F: Field + Default> ProtocolConfig<Identity<F>> {
+impl<M: Embedding + Default> ProtocolConfig<M> {
     /// Verify `f(witness) == evaluations[j]` for every linear_form `f = linear_forms[j]` against
     /// the received commitment.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify", fields(vector_size = self.tuning().vector_size, num_rounds = self.rounds().len(), num_claims = linear_forms.len())))]
+    ///
+    /// The verifier holds no base-field state — all arithmetic is in `M::Target`
+    /// — so only round 0's dispatch (over embedding `M`) is embedding-aware.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify", fields(vector_size = self.tuning().vector_size, num_rounds = self.num_rounds(), num_claims = linear_forms.len())))]
     pub fn verify<H>(
         &self,
         vs: &mut VerifierState<H>,
         commitment: Commitment,
-        linear_forms: &[&dyn LinearForm<F>],
-        evaluations: &[F],
-    ) -> VerificationResult<FinalClaim<F>>
+        linear_forms: &[&dyn LinearForm<M::Target>],
+        evaluations: &[M::Target],
+    ) -> VerificationResult<FinalClaim<M::Target>>
     where
-        Standard: Distribution<F>,
+        M::Target: Default + Codec<[H::U]>,
+        Standard: Distribution<M::Target>,
         H: DuplexSpongeInterface,
-        F: Codec<[H::U]>,
         u8: Decoding<[H::U]>,
         [u8; 32]: Decoding<[H::U]>,
         U64: Codec<[H::U]>,
@@ -79,26 +82,28 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
             "zook requires ≥ 1 (form, value) pair"
         );
 
+        let one = <M::Target as Field>::ONE;
+
         // RLC challenge binds the form/value set to the commitment.
-        let batching_challenge: F = vs.verifier_message();
-        let claim_weights = geometric_sequence(F::ONE, batching_challenge, linear_forms.len());
-        let batched_evaluation: F = evaluations
+        let batching_challenge: M::Target = vs.verifier_message();
+        let claim_weights = geometric_sequence(one, batching_challenge, linear_forms.len());
+        let batched_evaluation: M::Target = evaluations
             .iter()
             .zip(&claim_weights)
             .map(|(v, weight)| *v * weight)
             .sum();
 
         // Basecase-only path: no rounds, evaluate directly.
-        if self.rounds().is_empty() {
+        if !self.has_rounds() {
             let opening =
                 self.basecase()
                     .verify(vs, &commitment.irs_commitment, batched_evaluation)?;
             // No constraint terms, no round scalings: linear_forms_contribution = opening.linear_form_evaluation,
-            // initial_claim_scale = F::ONE. The caller checks:
-            // F::ONE × Σ_j claim_weight_j × form_j.mle_at(evaluation_point) == linear_forms_contribution
+            // initial_claim_scale = ONE. The caller checks:
+            // ONE × Σ_j claim_weight_j × form_j.mle_at(evaluation_point) == linear_forms_contribution
             return Ok(FinalClaim {
                 evaluation_point: opening.evaluation_points,
-                initial_claim_scale: F::ONE,
+                initial_claim_scale: one,
                 linear_forms_contribution: opening.linear_form_evaluation,
                 rlc_coefficients: claim_weights,
             });
@@ -114,8 +119,11 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
             current_msg_len: self.tuning().vector_size,
             sum: batched_evaluation,
         };
-        for round in self.rounds() {
-            state = verify_round(round, state, vs)?;
+        if let Some(first) = self.first_round() {
+            state = verify_round::<M, H>(first, state, vs)?;
+        }
+        for round in self.tail_rounds() {
+            state = verify_round::<Identity<M::Target>, H>(round, state, vs)?;
         }
 
         let opening = self
@@ -123,7 +131,7 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
             .verify(vs, &state.irs_commitment, state.sum)?;
 
         // full_eval_point = all round challenges ++ basecase evaluation points.
-        let full_eval_point: Vec<F> = state
+        let full_eval_point: Vec<M::Target> = state
             .all_round_challenges
             .iter()
             .chain(opening.evaluation_points.iter())
@@ -137,7 +145,7 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
 
         // Compute scale_suffixes[round_idx] = Π_{r'=round_idx..num_completed_rounds-1} round_scale_factors[r'].
         let num_completed_rounds = state.round_scale_factors.len();
-        let mut scale_suffixes = vec![F::ONE; num_completed_rounds + 1];
+        let mut scale_suffixes = vec![one; num_completed_rounds + 1];
         for round_idx in (0..num_completed_rounds).rev() {
             scale_suffixes[round_idx] =
                 state.round_scale_factors[round_idx] * scale_suffixes[round_idx + 1];
@@ -145,7 +153,7 @@ impl<F: Field + Default> ProtocolConfig<Identity<F>> {
 
         // Compute constraint contributions (O(num_constraints × log N)).
         // constraint_sum = Σ_c c.batching_weight × scale_suffixes[c.round+1] × mle_of_geom(c.eval_point, z_suffix)
-        let constraint_sum: F = state
+        let constraint_sum: M::Target = state
             .constraints
             .iter()
             .map(|c| {
@@ -229,11 +237,12 @@ enum RoundMaskOracleCheck<'a, F: Field> {
 
 impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
     /// Receive the sumcheck-masks commitment (ZK) or construct Disabled (Standard).
-    fn begin<H>(
-        round: &'a RoundConfig<Identity<F>>,
+    fn begin<M, H>(
+        round: &'a RoundConfig<M>,
         vs: &mut VerifierState<H>,
     ) -> VerificationResult<Self>
     where
+        M: Embedding<Target = F>,
         F: Codec<[H::U]>,
         H: DuplexSpongeInterface,
         Hash: ProverMessage<[H::U]>,
@@ -403,14 +412,15 @@ impl<'a, F: Field + Default> RoundMaskOracleCheck<'a, F> {
 }
 
 #[cfg_attr(feature = "tracing", instrument(skip_all, name = "zook::verify_round", fields(msg_len = round.code_switch().source().message_length())))]
-fn verify_round<F, H>(
-    round: &RoundConfig<Identity<F>>,
-    mut state: VerifierRoundState<F>,
+fn verify_round<M, H>(
+    round: &RoundConfig<M>,
+    mut state: VerifierRoundState<M::Target>,
     vs: &mut VerifierState<H>,
-) -> VerificationResult<VerifierRoundState<F>>
+) -> VerificationResult<VerifierRoundState<M::Target>>
 where
-    F: Field + Default + Codec<[H::U]>,
-    Standard: Distribution<F>,
+    M: Embedding,
+    M::Target: Field + Default + Codec<[H::U]>,
+    Standard: Distribution<M::Target>,
     H: DuplexSpongeInterface,
     u8: Decoding<[H::U]>,
     [u8; 32]: Decoding<[H::U]>,

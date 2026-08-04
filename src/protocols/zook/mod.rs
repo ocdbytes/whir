@@ -66,8 +66,8 @@ mod tests {
     use super::ProtocolConfig;
     use crate::{
         algebra::{
-            embedding::Identity,
-            fields::{Field256, Field64},
+            embedding::{Basefield, Embedding, Identity},
+            fields::{Field256, Field64, Field64_2},
             linear_form::{Evaluate, LinearForm, MultilinearExtension},
             random_vector,
         },
@@ -186,6 +186,54 @@ mod tests {
         vs.check_eof().unwrap();
     }
 
+    // ── Base-field embedding (witness over base prime field, claims over ext) ──
+
+    /// `Basefield<Field64_2>`: base prime field `Field64` → degree-2 extension.
+    /// Exercises round 0's base→ext code-switch end to end.
+    type MixedField = Field64_2;
+    type MixedEmbed = Basefield<MixedField>;
+    type MixedSource = <MixedEmbed as Embedding>::Source;
+
+    /// `full_roundtrip` with the witness over `M::Source` (base) and forms/values
+    /// over `M::Target` (ext).
+    fn full_roundtrip_mixed(
+        config: &ProtocolConfig<MixedEmbed>,
+        num_claims: usize,
+        seed: u64,
+        label: &str,
+    ) {
+        let embedding = <MixedEmbed as Default>::default();
+        let mut rng = StdRng::seed_from_u64(seed);
+        let witness: Vec<MixedSource> = random_vector(&mut rng, config.tuning().vector_size);
+        let mu = config.tuning().vector_size.trailing_zeros() as usize;
+
+        let forms: Vec<MultilinearExtension<MixedField>> = (0..num_claims)
+            .map(|_| MultilinearExtension {
+                point: random_vector::<MixedField>(&mut rng, mu),
+            })
+            .collect();
+        let values: Vec<MixedField> = forms
+            .iter()
+            .map(|f| f.evaluate(&embedding, &witness))
+            .collect();
+        let form_refs: Vec<&dyn LinearForm<MixedField>> =
+            forms.iter().map(|f| f as &dyn LinearForm<MixedField>).collect();
+
+        let ds = make_ds(label);
+        let mut ps = ProverState::new_std(&ds);
+        let committed = config.commit(&mut ps, &witness);
+        config.prove(&mut ps, committed, &form_refs, &values);
+        let proof = ps.proof();
+
+        let mut vs = VerifierState::new_std(&ds, &proof);
+        let commitment = config.receive_commitment(&mut vs).unwrap();
+        let claim = config
+            .verify(&mut vs, commitment, &form_refs, &values)
+            .unwrap();
+        claim.verify(&form_refs).expect("FinalClaim::verify failed");
+        vs.check_eof().unwrap();
+    }
+
     /// Expect verification to fail (handles both `verifier_panics` and normal builds).
     fn assert_verify_rejected(verify: impl FnOnce() -> crate::transcript::VerificationResult<()>) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(verify));
@@ -215,6 +263,26 @@ mod tests {
                 .unwrap();
         assert!(!config.rounds().is_empty(), "expected at least one round");
         full_roundtrip(&config, 1, 1, "roundtrip_standard_with_rounds");
+    }
+
+    #[test]
+    fn roundtrip_standard_with_rounds_basefield() {
+        let config =
+            ProtocolConfig::<MixedEmbed>::derive(small_spec(Mode::Standard), multi_round_tuning())
+                .unwrap();
+        assert!(config.has_rounds(), "expected at least one round");
+        full_roundtrip_mixed(&config, 1, 10, "roundtrip_standard_with_rounds_basefield");
+    }
+
+    #[test]
+    fn roundtrip_zk_with_rounds_basefield() {
+        let config = ProtocolConfig::<MixedEmbed>::derive(
+            small_spec(Mode::ZeroKnowledge),
+            multi_round_tuning(),
+        )
+        .unwrap();
+        assert!(config.has_rounds(), "expected at least one round");
+        full_roundtrip_mixed(&config, 3, 11, "roundtrip_zk_with_rounds_basefield");
     }
 
     #[test]
