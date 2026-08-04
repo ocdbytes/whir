@@ -215,15 +215,17 @@ where
     // cs_fresh_padding is pre-sampled here because it does not depend on folding randomness.
     let mut masker = RoundMaskOracle::begin(round, ps);
 
-    // Sumcheck folds its buffers in place. Move the host-side round state into
-    // buffers, fold, and move the folded result back into the `Vec` state
-    // (which downstream steps resize/truncate/index directly). Both hops are
-    // zero-copy on the CPU backend.
-    let mut message_buf = Buffer::from(message);
+    // Sumcheck returns the folded message buffer (and folds the covector in
+    // place). Move the host-side round state into buffers, fold, and move the
+    // folded result back into the `Vec` state (which downstream steps
+    // resize/truncate/index directly). The hops are zero-copy on the CPU
+    // backend.
+    let message_buf = Buffer::from(message);
     let mut covector_buf = Buffer::from(covector);
-    let opening = round.sumcheck().prove(
+    let (message_buf, opening) = round.sumcheck().prove(
         ps,
-        &mut message_buf,
+        &Identity::new(),
+        &message_buf,
         &mut covector_buf,
         &mut sum,
         masker.sumcheck_blinding(),
