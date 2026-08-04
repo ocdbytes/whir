@@ -11,6 +11,7 @@ use tracing::instrument;
 
 use crate::{
     algebra::{embedding::Embedding, lift},
+    buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
         irs_commit::Commitment as IrsCommitment,
@@ -75,9 +76,10 @@ impl<M: Embedding + Default> BatchedProtocolConfig<M> {
         for p in &bundle.polys {
             flat.extend_from_slice(p);
         }
+        let flat = Buffer::from(flat);
 
         let irs_witness = bundle_cfg.irs_config.commit(ps, &[&flat]);
-        let message = lift(bundle_cfg.irs_config.embedding(), &flat);
+        let message = lift(bundle_cfg.irs_config.embedding(), flat.to_slice());
         let batching_challenge: M::Target = ps.verifier_message();
 
         BundleCommittedWitness {

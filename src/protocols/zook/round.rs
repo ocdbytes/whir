@@ -13,6 +13,7 @@ use zeroize::Zeroize;
 
 use crate::{
     algebra::{dot, embedding::Identity},
+    buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
         code_switch::{self, CovectorUpdateParams},
@@ -48,8 +49,8 @@ where
     Hash: ProverMessage<[H::U]>,
 {
     let ProverBlock {
-        mut message,
-        mut covector,
+        message,
+        covector,
         mut sum,
         witnesses,
         theta,
@@ -67,13 +68,21 @@ where
 
     let mut masker = RoundMaskOracle::begin(round, ps);
 
+    // Sumcheck folds its buffers in place. Move the host-side `Vec` round state
+    // into buffers, fold, and move the folded result back into `Vec` (downstream
+    // steps resize/truncate/index directly, and code-switch takes `Vec`
+    // message). Both hops are zero-copy on the CPU backend.
+    let mut message_buf = Buffer::from(message);
+    let mut covector_buf = Buffer::from(covector);
     let opening = round.sumcheck().prove(
         ps,
-        &mut message,
-        &mut covector,
+        &mut message_buf,
+        &mut covector_buf,
         &mut sum,
         masker.sumcheck_blinding(),
     );
+    let message = message_buf.into_vec();
+    let mut covector = covector_buf.into_vec();
 
     let witness_refs: Vec<&IrsWitness<F>> = witnesses.iter().collect();
     masker.bind_code_switch_mask_multi_source(&witness_refs, &theta, &opening, &mut sum, ps);

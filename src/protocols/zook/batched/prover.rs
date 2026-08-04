@@ -16,6 +16,7 @@ use zeroize::Zeroize;
 
 use crate::{
     algebra::{dot, embedding::Identity},
+    buffer::Buffer,
     hash::Hash,
     protocols::{
         irs_commit::Witness as IrsWitness,
@@ -134,10 +135,13 @@ impl<F: Field + Default + Zeroize> BatchedProtocolConfig<Identity<F>> {
             mut witnesses,
             ..
         } = final_block;
-        let _ = self
-            .inner()
-            .basecase()
-            .prove(ps, message, &witnesses.remove(0), covector, sum);
+        let _ = self.inner().basecase().prove(
+            ps,
+            Buffer::from(message),
+            &witnesses.remove(0),
+            Buffer::from(covector),
+            sum,
+        );
     }
 }
 

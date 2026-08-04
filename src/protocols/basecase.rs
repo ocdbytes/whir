@@ -6,10 +6,8 @@ use serde::{Deserialize, Serialize};
 use spongefish::{Decoding, VerificationResult};
 
 use crate::{
-    algebra::{
-        dot, embedding::Identity, multilinear_extend, random_vector, scalar_mul_add_new,
-        univariate_evaluate,
-    },
+    algebra::{embedding::Identity, multilinear_extend, univariate_evaluate},
+    buffer::{Buffer, BufferMath, BufferOps},
     hash::Hash,
     protocols::{irs_commit, proof_of_work, sumcheck},
     transcript::{
@@ -104,9 +102,9 @@ impl<F: Field> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vector: Vec<F>,
+        vector: Buffer<F>,
         witness: &irs_commit::Witness<F>,
-        covector: Vec<F>,
+        covector: Buffer<F>,
         sum: F,
     ) -> Opening<F>
     where
@@ -139,10 +137,10 @@ impl<F: Field> Config<F> {
     pub fn prove_virtual<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        mut vector: Vec<F>,
+        mut vector: Buffer<F>,
         witnesses: &[&irs_commit::Witness<F>],
         block_weights: &[F],
-        mut covector: Vec<F>,
+        mut covector: Buffer<F>,
         mut sum: F,
     ) -> Opening<F>
     where
@@ -165,7 +163,7 @@ impl<F: Field> Config<F> {
             "block_weights must have one entry per active witness"
         );
         assert!(!witnesses.is_empty());
-        debug_assert_eq!(dot(&vector, &covector), sum);
+        debug_assert_eq!(vector.dot(&covector), sum);
         if self.size() == 0 {
             return Opening {
                 evaluation_points: Vec::new(),
@@ -180,7 +178,7 @@ impl<F: Field> Config<F> {
         let mut merged_irs_randomness = vec![F::ZERO; mask_len];
         for (w, &theta) in witnesses.iter().zip(block_weights) {
             debug_assert_eq!(w.masks.len(), mask_len);
-            for (acc, &m) in merged_irs_randomness.iter_mut().zip(&w.masks) {
+            for (acc, &m) in merged_irs_randomness.iter_mut().zip(w.masks.to_slice()) {
                 *acc += theta * m;
             }
         }
@@ -210,11 +208,14 @@ impl<F: Field> Config<F> {
 
         // Negligible event over a challenge-sized field; without it the verifier
         // cannot derive `l(r) = sum / vector_mle(r)`.
-        assert!(!vector[0].is_zero(), "Proof failed");
+        assert!(
+            !vector.to_slice().first().expect("Proof failed").is_zero(),
+            "Proof failed"
+        );
 
         Opening {
             evaluation_points: point,
-            linear_form_evaluation: covector[0],
+            linear_form_evaluation: *covector.to_slice().first().expect("Proof failed"),
         }
     }
 
@@ -224,9 +225,9 @@ impl<F: Field> Config<F> {
     fn maybe_blind_prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        vector: &mut Vec<F>,
+        vector: &mut Buffer<F>,
         merged_irs_randomness: &[F],
-        covector: &[F],
+        covector: &Buffer<F>,
         sum: &mut F,
     ) -> Option<irs_commit::Witness<F>>
     where
@@ -240,14 +241,14 @@ impl<F: Field> Config<F> {
     {
         match self.mode {
             BasecaseMode::Standard => {
-                prover_state.prover_messages(vector);
+                prover_state.prover_messages(vector.to_slice());
                 prover_state.prover_messages(merged_irs_randomness);
                 None
             }
             BasecaseMode::ZeroKnowledge => {
-                let blinding_vector = random_vector(prover_state.rng(), vector.len());
+                let mut blinding_vector = Buffer::random(prover_state.rng(), vector.len());
                 let blinding_witness = self.commit.commit(prover_state, &[&blinding_vector]);
-                let blinding_inner_product = dot(&blinding_vector, covector);
+                let blinding_inner_product = blinding_vector.dot(covector);
                 prover_state.prover_message(&blinding_inner_product);
 
                 // Grind the Theorem 7.1 γ-combination gap before γ is sampled.
@@ -256,14 +257,20 @@ impl<F: Field> Config<F> {
                 let combination_randomness = prover_state.verifier_message::<F>();
                 assert!(!combination_randomness.is_zero(), "Proof failed");
 
-                *vector = scalar_mul_add_new(&blinding_vector, combination_randomness, vector);
-                prover_state.prover_messages(vector);
-
-                let combined_irs_randomness = scalar_mul_add_new(
-                    &blinding_witness.masks,
+                vector.mixed_scalar_mul_add_to(
+                    &Identity::<F>::new(),
+                    &mut blinding_vector,
                     combination_randomness,
-                    merged_irs_randomness,
                 );
+                *vector = blinding_vector;
+                prover_state.prover_messages(vector.to_slice());
+
+                // combined = blinding.masks + γ · merged_irs_randomness (the
+                // θ-weighted merge of the active witnesses' masks).
+                let mut combined_irs_randomness = blinding_witness.masks.to_slice().to_vec();
+                for (acc, &m) in combined_irs_randomness.iter_mut().zip(merged_irs_randomness) {
+                    *acc += combination_randomness * m;
+                }
                 prover_state.prover_messages(&combined_irs_randomness);
 
                 *sum = blinding_inner_product + combination_randomness * *sum;
@@ -450,9 +457,9 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut rng = StdRng::seed_from_u64(seed);
-        let vector = random_vector(&mut rng, config.size());
-        let covector = random_vector(&mut rng, config.size());
-        let sum = dot(&vector, &covector);
+        let vector = Buffer::random(&mut rng, config.size());
+        let covector = Buffer::random(&mut rng, config.size());
+        let sum = vector.dot(&covector);
 
         let mut prover_state = ProverState::new_std(&ds);
         let witness = config.commit.commit(&mut prover_state, &[&vector]);
@@ -464,7 +471,7 @@ mod tests {
             sum,
         );
         assert_eq!(
-            multilinear_extend(&covector, &prover_result.evaluation_points),
+            multilinear_extend(covector.to_slice(), &prover_result.evaluation_points),
             prover_result.linear_form_evaluation
         );
         let proof = prover_state.proof();

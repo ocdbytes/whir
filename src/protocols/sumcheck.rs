@@ -21,11 +21,8 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
-    algebra::{
-        dot,
-        sumcheck::{compute_sumcheck_polynomial, fold, fold_and_compute_polynomial},
-        univariate_evaluate,
-    },
+    algebra::univariate_evaluate,
+    buffer::{Buffer, BufferMath, BufferOps},
     protocols::proof_of_work,
     transcript::{
         codecs::U64, Codec, Decoding, DuplexSpongeInterface, ProverState, VerificationResult,
@@ -202,8 +199,8 @@ impl<F: Field> Config<F> {
     pub fn prove<H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        a: &mut Vec<F>,
-        b: &mut Vec<F>,
+        a: &mut Buffer<F>,
+        b: &mut Buffer<F>,
         sum: &mut F,
         masks: &[F],
     ) -> SumcheckOpening<F>
@@ -221,7 +218,7 @@ impl<F: Field> Config<F> {
         );
         assert_eq!(a.len(), self.initial_size);
         assert_eq!(b.len(), self.initial_size);
-        debug_assert_eq!(dot(a, b), *sum);
+        debug_assert_eq!(a.dot(b), *sum);
 
         self.prove_with_oracle(prover_state, sum, masks, DotProductOracle { a, b })
     }
@@ -453,11 +450,12 @@ fn eval_01<F: Field>(coefficients: &[F]) -> F {
 
 /// Degree-2 dot-product oracle for [`Config::prove_with_oracle`]: reduces
 /// `⟨a, b⟩ = sum` via the legacy quadratic sumcheck. Folds `a` and `b` in
-/// place using [`fold_and_compute_polynomial`] to fuse the previous-round
-/// fold with the current-round polynomial computation in a single pass.
+/// place using [`BufferMath::fold_pair_sumcheck_polynomial`] to fuse the
+/// previous-round fold with the current-round polynomial computation in a
+/// single pass.
 struct DotProductOracle<'a, F: Field> {
-    a: &'a mut Vec<F>,
-    b: &'a mut Vec<F>,
+    a: &'a mut Buffer<F>,
+    b: &'a mut Buffer<F>,
 }
 
 impl<F: Field> RoundPolyOracle<F> for DotProductOracle<'_, F> {
@@ -467,15 +465,14 @@ impl<F: Field> RoundPolyOracle<F> for DotProductOracle<'_, F> {
 
     fn fold_and_compute(&mut self, prev_challenge: Option<F>) -> Vec<F> {
         let (c0, c2) = match prev_challenge {
-            Some(w) => fold_and_compute_polynomial(self.a, self.b, w),
-            None => compute_sumcheck_polynomial(self.a, self.b),
+            Some(w) => self.a.fold_pair_sumcheck_polynomial(self.b, w),
+            None => self.a.sumcheck_polynomial(self.b),
         };
         vec![c0, c2]
     }
 
     fn finalize(&mut self, final_challenge: F) {
-        fold(self.a, final_challenge);
-        fold(self.b, final_challenge);
+        self.a.fold_pair(self.b, final_challenge);
     }
 }
 
@@ -493,9 +490,11 @@ mod tests {
     use super::*;
     use crate::{
         algebra::{
+            dot,
             fields::{self, Field64},
             multilinear_extend, random_vector,
         },
+        buffer::Buffer,
         transcript::DomainSeparator,
     };
 
@@ -544,8 +543,8 @@ mod tests {
         let masks = random_vector(&mut rng, config.mask_length() * config.num_rounds);
 
         // Prover
-        let mut vector = initial_vector.clone();
-        let mut covector = initial_covector.clone();
+        let mut vector = Buffer::from(initial_vector.as_slice());
+        let mut covector = Buffer::from(initial_covector.as_slice());
         let mut sum = initial_sum;
         let mut prover_state = ProverState::new_std(&ds);
         let SumcheckOpening {
@@ -561,8 +560,14 @@ mod tests {
         assert_eq!(vector.len(), config.final_size());
         assert_eq!(covector.len(), config.final_size());
         if config.final_size() == 1 {
-            assert_eq!(multilinear_extend(&initial_vector, &point), vector[0]);
-            assert_eq!(multilinear_extend(&initial_covector, &point), covector[0]);
+            assert_eq!(
+                multilinear_extend(&initial_vector, &point),
+                vector.to_slice()[0]
+            );
+            assert_eq!(
+                multilinear_extend(&initial_covector, &point),
+                covector.to_slice()[0]
+            );
         } else {
             // TODO: Check correct folding.
         }
@@ -572,7 +577,10 @@ mod tests {
                 .zip(&point)
                 .map(|(m, x)| univariate_evaluate(m, *x))
                 .sum();
-        assert_eq!(sum, expected_mask_sum + mask_rlc * dot(&vector, &covector));
+        assert_eq!(
+            sum,
+            expected_mask_sum + mask_rlc * dot(vector.to_slice(), covector.to_slice())
+        );
 
         let proof = prover_state.proof();
 

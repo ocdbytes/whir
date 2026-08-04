@@ -17,6 +17,7 @@ use crate::{
         embedding::{Embedding, Identity},
         eq_weights, geometric_accumulate, lift, mixed_dot, scalar_mul, univariate_evaluate,
     },
+    buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
         geometric_challenge::geometric_challenge,
@@ -342,7 +343,8 @@ impl<M: Embedding> Config<M> {
         );
 
         // Step 1: g := Enc_{C'}(f, r') — Construction 9.7 Step 1, p.55
-        let target_witness = self.target.commit(prover_state, &[&message]);
+        let message_buffer = Buffer::from(message.as_slice());
+        let target_witness = self.target.commit(prover_state, &[&message_buffer]);
 
         // Grind Lemma 9.9 OOD gap before α is sampled.
         self.pow.prove(prover_state);
@@ -358,6 +360,7 @@ impl<M: Embedding> Config<M> {
         } else {
             source_evaluations
                 .matrix
+                .to_slice()
                 .chunks_exact(stride)
                 .map(|row| mixed_dot(self.source.embedding(), slot_weights, row))
                 .collect()
@@ -529,6 +532,7 @@ impl<M: Embedding> Config<M> {
         } else {
             source_evaluations
                 .matrix
+                .to_slice()
                 .chunks_exact(stride)
                 .map(|row| mixed_dot(self.source.embedding(), slot_weights, row))
                 .collect()
@@ -825,7 +829,7 @@ mod tests {
         // Lift ι parallel masks (total length source.mask_length × ι) and fold
         // chunks of length source.mask_length down to a single chunk. Masks
         // are stored in whir's canonical per-poly contiguous layout.
-        let raw = lift(config.source.embedding(), &source_witness.masks);
+        let raw = lift(config.source.embedding(), source_witness.masks.to_slice());
         let mut mask = fold_chunks(&raw, config.source.mask_length(), folding_randomness);
         // Append fresh padding s of length message_mask_length - source.mask_length.
         mask.extend(random_vector::<F>(
@@ -856,7 +860,8 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut prover_state = ProverState::new_std(&ds);
-        let source_witness = config.source.commit(&mut prover_state, &[&f_full]);
+        let f_full_buffer = Buffer::from(f_full.as_slice());
+        let source_witness = config.source.commit(&mut prover_state, &[&f_full_buffer]);
 
         // Sample γ for sumcheck folding (length log2(ι)).
         let folding_randomness = sample_folding_randomness(config, &mut rng);
@@ -950,7 +955,8 @@ mod tests {
             .session(&format!("Test at {}:{}", file!(), line!()))
             .instance(&instance);
         let mut prover_state = ProverState::new_std(&ds);
-        let source_witness = config.source.commit(&mut prover_state, &[&f_full]);
+        let f_full_buffer = Buffer::from(f_full.as_slice());
+        let source_witness = config.source.commit(&mut prover_state, &[&f_full_buffer]);
 
         let folding_randomness = sample_folding_randomness(config, &mut rng);
         let folded_message =
@@ -1025,7 +1031,8 @@ mod tests {
 
         // Commit honest f_full, fold to get the honest post-fold message.
         let mut prover_state = ProverState::new_std(&ds);
-        let source_witness = config.source.commit(&mut prover_state, &[&f_full]);
+        let f_full_buffer = Buffer::from(f_full.as_slice());
+        let source_witness = config.source.commit(&mut prover_state, &[&f_full_buffer]);
         let folding_randomness = sample_folding_randomness(config, &mut rng);
         let folded_message =
             fold_chunks(&f_full, config.source.message_length(), &folding_randomness);

@@ -51,6 +51,7 @@ use crate::{
         dot, embedding::Identity, geometric_sequence, linear_form::LinearForm, random_vector,
         univariate_evaluate,
     },
+    buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
         code_switch::fold_chunks,
@@ -103,7 +104,7 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
 
         // RLC challenge binds the form/value set to the commitment.
         let batching_challenge: F = ps.verifier_message();
-        let claim_weights = geometric_sequence(batching_challenge, linear_forms.len());
+        let claim_weights = geometric_sequence(F::ONE, batching_challenge, linear_forms.len());
 
         // Materialize the combined covector = Σ γ^j · form_j and combined value.
         let mut covector = vec![F::ZERO; self.tuning().vector_size];
@@ -144,9 +145,13 @@ impl<F: Field + Default + Zeroize> ProtocolConfig<Identity<F>> {
         // Standard mode (BasecaseMode::Standard) sends the full witness vector
         // and IRS randomness cleartext. Only call with Mode::ZeroKnowledge if
         // end-to-end hiding is required.
-        let _ = self
-            .basecase()
-            .prove(ps, message, &basecase_witness, covector, sum);
+        let _ = self.basecase().prove(
+            ps,
+            Buffer::from(message),
+            &basecase_witness,
+            Buffer::from(covector),
+            sum,
+        );
     }
 }
 
@@ -230,7 +235,7 @@ impl<'a, F: Field + Zeroize> SumcheckMaskTree<'a, F> {
     {
         let evaluation_covectors: Vec<Vec<F>> = round_challenges
             .iter()
-            .map(|&c| geometric_sequence(c, self.padded_vec_size))
+            .map(|&c| geometric_sequence(F::ONE, c, self.padded_vec_size))
             .collect();
         let covector_refs: Vec<&[F]> = evaluation_covectors.iter().map(Vec::as_slice).collect();
         let padded_mask_refs: Vec<&[F]> = self.padded_masks.iter().map(Vec::as_slice).collect();
@@ -423,7 +428,7 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
         // θ-combine per-block source-IRS masks before fold_chunks; t = 1 collapses to a copy.
         let mask_len = witnesses[0].masks.len();
         let virtual_source_masks: Vec<F> = if witnesses.len() == 1 && theta[0] == F::ONE {
-            witnesses[0].masks.clone()
+            witnesses[0].masks.to_slice().to_vec()
         } else {
             let mut combined = vec![F::ZERO; mask_len];
             for (w, &t) in witnesses.iter().zip(theta) {
@@ -432,7 +437,7 @@ impl<'a, F: Field + Default + Zeroize> RoundMaskOracle<'a, F> {
                     mask_len,
                     "all active blocks must share IrsConfig (hence mask length)"
                 );
-                for (acc, &m) in combined.iter_mut().zip(&w.masks) {
+                for (acc, &m) in combined.iter_mut().zip(w.masks.to_slice()) {
                     *acc += t * m;
                 }
             }

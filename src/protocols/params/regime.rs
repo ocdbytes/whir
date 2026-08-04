@@ -110,15 +110,23 @@ impl DecodingRegimeParams {
         let error = match self {
             Self::Unique => log_k + log_inv_rate,
             Self::Johnson { slack } => {
-                debug_assert!(
-                    slack.into_inner().log2() >= -(0.5 * log_inv_rate + LOG2_10 + 1.0) - 1e-6
+                assert!(
+                    slack.into_inner().log2() >= -(0.5 * log_inv_rate + LOG2_10 + 1.0) - 1e-6,
+                    "Johnson slack η below BCSS25 lower bound; ε_mca would be over-optimistic",
                 );
                 // BCSS25 with m = 10: log_2(2·10.5⁵/3) + log n + 1.5·log ρ⁻¹.
+                // Substituting n = k/ρ (codeword length) gives the `log_k`
+                // (message length) + 2.5·log ρ⁻¹ form below.
                 let bcss25_const = (2.0 * 10.5_f64.powi(5) / 3.0).log2();
                 bcss25_const + log_k + 2.5 * log_inv_rate
             }
             Self::Capacity { slack } => {
-                debug_assert!(slack.into_inner().log2() >= -(log_inv_rate + LOG2_10 + 1.0) - 1e-6);
+                // η lower bound from STIR Conj 5.6; see the Johnson arm for why
+                // this is a hard assert rather than debug_assert.
+                assert!(
+                    slack.into_inner().log2() >= -(log_inv_rate + LOG2_10 + 1.0) - 1e-6,
+                    "Capacity slack η below STIR Conj 5.6 lower bound; ε_mca would be over-optimistic",
+                );
                 // d / (η · ρ²) at canonical η = ρ/20: log d + log 20 + 3·log ρ⁻¹.
                 log_k + 3.0 * log_inv_rate + LOG2_10 + 1.0
             }
@@ -337,6 +345,47 @@ mod tests {
         let expected = (MCA_MESSAGE_LENGTH as f64).log2() + 3.0 * MCA_LOG_INV_RATE + LOG2_10 + 1.0
             - MCA_FIELD_BITS;
         assert_close(got, expected);
+    }
+
+    /// Unique: ε ≈ k/|F| · ρ⁻¹ ⇒ log₂ε = log₂16 + 2 − 64 = 4 + 2 − 64 = −58.
+    #[test]
+    fn eps_mca_log2_unique_theorem_anchor() {
+        let got = DecodingRegimeParams::Unique.eps_mca_log2(
+            MCA_LOG_INV_RATE,
+            MCA_MESSAGE_LENGTH,
+            MCA_FIELD_BITS,
+        );
+        assert_close(got, -58.0);
+    }
+
+    /// Johnson (BCSS25 Thm 1.5, η = √ρ/20, m = 10):
+    /// `ε = (2·10.5⁵/3) · n · ρ^{−3/2} / |F|` with codeword length n = k/ρ = 64.
+    /// log₂ε = log₂(2·10.5⁵/3) + log₂64 + log₂(ρ^{−3/2}) − 64
+    ///       = 16.376624613… + 6 + 3 − 64 = −38.623375386…
+    #[test]
+    fn eps_mca_log2_johnson_theorem_anchor() {
+        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE).sqrt() / 20.0;
+        let got = johnson(canonical_slack).eps_mca_log2(
+            MCA_LOG_INV_RATE,
+            MCA_MESSAGE_LENGTH,
+            MCA_FIELD_BITS,
+        );
+        assert_close(got, -38.623_375_386_827_36);
+    }
+
+    /// Capacity (STIR Conj 5.6, η = ρ/20): `ε = d / (η · ρ²) / |F|` with d = k = 16,
+    /// η = ρ/20 = 1/80, ρ² = 1/16.
+    /// log₂ε = log₂(16 / ((1/80)·(1/16))) − 64 = log₂(16·1280) − 64
+    ///       = log₂20480 − 64 = 14.321928094… − 64 = −49.678071905…
+    #[test]
+    fn eps_mca_log2_capacity_theorem_anchor() {
+        let canonical_slack = 2_f64.powf(-MCA_LOG_INV_RATE) / 20.0;
+        let got = capacity(canonical_slack).eps_mca_log2(
+            MCA_LOG_INV_RATE,
+            MCA_MESSAGE_LENGTH,
+            MCA_FIELD_BITS,
+        );
+        assert_close(got, -49.678_071_905_112_64);
     }
 
     /// `from_policy` dispatches to the canonical constructor for each regime.

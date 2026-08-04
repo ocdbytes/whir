@@ -76,7 +76,7 @@ impl<F: ark_ff::Field> FinalClaim<F> {
     {
         verify!(self.groups.len() == 1);
         self.check_groups(1, |g, _| {
-            let rlc = geometric_sequence(g.batching_challenge, linear_forms.len());
+            let rlc = geometric_sequence(F::ONE, g.batching_challenge, linear_forms.len());
             let form_mle_sum: F = linear_forms
                 .iter()
                 .zip(&rlc)
@@ -102,7 +102,7 @@ impl<F: ark_ff::Field> FinalClaim<F> {
             let eq_high = eq_weights(k_pt);
 
             let total_claims = bundle.total_claims();
-            let claim_weights = geometric_sequence(group.batching_challenge, total_claims);
+            let claim_weights = geometric_sequence(F::ONE, group.batching_challenge, total_claims);
 
             let mut idx = 0;
             let mut form_sum = F::ZERO;
