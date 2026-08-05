@@ -227,7 +227,7 @@ where
     let (message_buf, opening) = round.sumcheck().prove(
         ps,
         embedding,
-        &message_buf,
+        message_buf,
         &mut covector_buf,
         &mut sum,
         masker.sumcheck_blinding(),

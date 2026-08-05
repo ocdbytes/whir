@@ -1,6 +1,6 @@
 //! Quadratic sumcheck protocol.
 
-use std::fmt;
+use std::{any::Any, fmt};
 
 use ark_ff::Field;
 use ark_std::rand::{CryptoRng, RngCore};
@@ -144,8 +144,9 @@ impl<F: Field> Config<F> {
     /// its target field `F`; pass `&Identity::new()` when both coincide. `a`
     /// stays in the source field until the first fold lifts it into the target
     /// field, so the first round's polynomial and fold run as source × target
-    /// products. The transcript is bit-identical to lifting `a` up front (the
-    /// embedding is a ring homomorphism).
+    /// products. When the fields coincide the first fold happens in place, so
+    /// no second buffer is held alongside `a`. The transcript is bit-identical
+    /// to lifting `a` up front (the embedding is a ring homomorphism).
     ///
     /// This function:
     /// - Samples random values to progressively reduce the polynomial.
@@ -156,7 +157,7 @@ impl<F: Field> Config<F> {
         &self,
         prover_state: &mut ProverState<H, R>,
         embedding: &M,
-        a: &Buffer<M::Source>,
+        a: Buffer<M::Source>,
         b: &mut Buffer<F>,
         sum: &mut F,
         masks: &[F],
@@ -179,13 +180,28 @@ impl<F: Field> Config<F> {
         let half = F::from(2).inverse().unwrap();
         let polynomial_len = self.mask_length().max(3);
 
+        // First fold: `a` crosses from the source to the target field. When
+        // the fields coincide (`Identity`) fold in place; only a genuine
+        // base → ext crossing allocates the target buffer while the source
+        // one is still alive.
+        let first_fold = |a: Buffer<M::Source>, w: F| -> Buffer<F> {
+            match same_field_buffer::<M>(a) {
+                Ok(mut same_field) => {
+                    same_field.fold(w);
+                    same_field
+                }
+                Err(a) => a.mixed_fold(embedding, w),
+            }
+        };
+
         let (mut mask_sum, mask_rlc) = self.maybe_send_initial_mask_sum(prover_state, masks);
 
         let mut univariate = Vec::with_capacity(polynomial_len);
         let mut round_challenges = Vec::with_capacity(self.num_rounds);
         let mut prev_round_challenge = None;
-        // `a` remains in the source field until the first fold; `a_folded`
-        // holds the target-field buffer from then on.
+        // `a` remains in the source field until the first fold consumes it;
+        // `a_folded` holds the target-field buffer from then on.
+        let mut a = Some(a);
         let mut a_folded: Option<Buffer<F>> = None;
         for (round, mask) in
             chunks_exact_or_empty(masks, self.mask_length(), self.num_rounds).enumerate()
@@ -195,13 +211,15 @@ impl<F: Field> Config<F> {
                 let w = prev_round_challenge.expect("folded buffer implies a prior challenge");
                 folded.fold_pair_sumcheck_polynomial(b, w)
             } else if let Some(w) = prev_round_challenge {
-                // First fold: `a` crosses from the source to the target field.
-                let folded = a.mixed_fold(embedding, w);
+                let folded = first_fold(a.take().expect("source buffer consumed once"), w);
                 b.fold(w);
                 let coefficients = folded.sumcheck_polynomial(b);
                 a_folded = Some(folded);
                 coefficients
             } else {
+                let a = a
+                    .as_ref()
+                    .expect("source buffer available before the first fold");
                 a.mixed_sumcheck_polynomial(embedding, b)
             };
             let c1 = *sum - c0.double() - c2;
@@ -239,13 +257,16 @@ impl<F: Field> Config<F> {
             }
             (None, Some(w)) => {
                 // Single-round case: the only fold is the source → target one.
-                let folded = a.mixed_fold(embedding, w);
+                let folded = first_fold(a.take().expect("source buffer consumed once"), w);
                 b.fold(w);
                 folded
             }
             // No rounds: nothing folds, but the caller still expects a
-            // target-field buffer.
-            (None, None) => Buffer::from(lift(embedding, a.to_slice())),
+            // target-field buffer. Cold path; a plain lift is fine.
+            (None, None) => {
+                let a = a.take().expect("source buffer consumed once");
+                Buffer::from(lift(embedding, a.to_slice()))
+            }
             (Some(_), None) => unreachable!("folded buffer implies a prior challenge"),
         };
 
@@ -378,6 +399,18 @@ impl<F: Field> fmt::Display for Config<F> {
 }
 
 // Evaluated a univariate as p(0) + p(1)
+/// If the embedding's source and target fields coincide (e.g. `Identity`),
+/// recover the source buffer as a target-field buffer without copying;
+/// otherwise hand the buffer back.
+fn same_field_buffer<M: Embedding>(
+    a: Buffer<M::Source>,
+) -> Result<Buffer<M::Target>, Buffer<M::Source>> {
+    match (Box::new(a) as Box<dyn Any>).downcast::<Buffer<M::Target>>() {
+        Ok(same_field) => Ok(*same_field),
+        Err(a) => Err(*a.downcast::<Buffer<M::Source>>().expect("roundtrip")),
+    }
+}
+
 fn eval_01<F: Field>(coefficients: &[F]) -> F {
     if coefficients.is_empty() {
         return F::ZERO;
@@ -465,7 +498,7 @@ mod tests {
         ) = config.prove(
             &mut prover_state,
             &Identity::new(),
-            &vector,
+            vector,
             &mut covector,
             &mut sum,
             &masks,
@@ -556,7 +589,7 @@ mod tests {
                     config.prove(
                         &mut prover_state,
                         &embedding,
-                        &Buffer::from(a_source.as_slice()),
+                        Buffer::from(a_source.as_slice()),
                         &mut b,
                         &mut sum,
                         &masks,
@@ -565,7 +598,7 @@ mod tests {
                     config.prove(
                         &mut prover_state,
                         &Identity::new(),
-                        &Buffer::from(a_lifted.as_slice()),
+                        Buffer::from(a_lifted.as_slice()),
                         &mut b,
                         &mut sum,
                         &masks,

@@ -185,7 +185,7 @@ impl<M: Embedding> Config<M> {
             let (folded, opening) = self.initial_sumcheck.prove(
                 prover_state,
                 &Identity::new(),
-                &vector,
+                vector,
                 &mut covector,
                 &mut the_sum,
                 &[],
@@ -261,7 +261,7 @@ impl<M: Embedding> Config<M> {
             let (folded, opening) = round_config.sumcheck.prove(
                 prover_state,
                 &Identity::new(),
-                &vector,
+                vector,
                 &mut covector,
                 &mut the_sum,
                 &[],
@@ -303,7 +303,7 @@ impl<M: Embedding> Config<M> {
         let (_, opening) = self.final_sumcheck.prove(
             prover_state,
             &Identity::new(),
-            &vector,
+            vector,
             &mut covector,
             &mut the_sum,
             &[],

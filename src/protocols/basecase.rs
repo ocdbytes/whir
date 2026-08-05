@@ -135,7 +135,7 @@ impl<F: Field> Config<F> {
         let (vector, opening) = self.sumcheck.prove(
             prover_state,
             &Identity::new(),
-            &vector,
+            vector,
             &mut covector,
             &mut sum,
             &[],
