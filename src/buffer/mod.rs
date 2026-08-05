@@ -173,6 +173,29 @@ pub trait BufferMath<F: Field>: Clone {
         other: &Self::TargetBuffer<M::Target>,
     ) -> M::Target;
 
+    /// Sumcheck round coefficients `(c0, c2)` for the mixed inner product of
+    /// source-field `self` against a target-field covector.
+    ///
+    /// Embedding-aware [`Self::sumcheck_polynomial`]: same result as lifting
+    /// `self` first, without materializing the lift.
+    fn mixed_sumcheck_polynomial<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        other: &Self::TargetBuffer<M::Target>,
+    ) -> (M::Target, M::Target);
+
+    /// Fold source-field `self` at a target-field weight, lifting the result
+    /// into the target field.
+    ///
+    /// Embedding-aware [`Self::fold`]: same result as lifting `self` first,
+    /// without materializing the lift.
+    #[must_use]
+    fn mixed_fold<M: Embedding<Source = F>>(
+        &self,
+        embedding: &M,
+        weight: M::Target,
+    ) -> Self::TargetBuffer<M::Target>;
+
     /// `accumulator += weight * self`, lifted into the target field.
     fn mixed_scalar_mul_add_to<M: Embedding<Source = F>>(
         &self,

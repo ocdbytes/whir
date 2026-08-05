@@ -52,7 +52,7 @@ use crate::{
         embedding::{Embedding, Identity},
         geometric_sequence,
         linear_form::LinearForm,
-        random_vector, univariate_evaluate,
+        mixed_dot, random_vector, univariate_evaluate,
     },
     buffer::{Buffer, BufferOps},
     hash::Hash,
@@ -166,12 +166,13 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
     }
 }
 
-/// Per-round transient state: `message`/`covector`/`sum` in `M::Target`, the
-/// witness in `M::Source`. The code-switch turns the source witness into an
-/// `M::Target` one, so [`prove_round`] maps `ProverRoundState<M>` to
+/// Per-round transient state: `covector`/`sum` in `M::Target`, the message and
+/// witness in `M::Source`. The round's sumcheck lifts the message into
+/// `M::Target` at its first fold and the code-switch turns the source witness
+/// into an `M::Target` one, so [`prove_round`] maps `ProverRoundState<M>` to
 /// `ProverRoundState<Identity<M::Target>>`.
 struct ProverRoundState<M: Embedding> {
-    message: Vec<M::Target>,
+    message: Vec<M::Source>,
     irs_witness: IrsWitness<M::Source>,
     covector: Vec<M::Target>,
     sum: M::Target,
@@ -205,8 +206,9 @@ where
         mut sum,
     } = state;
 
+    let embedding = round.code_switch().source().embedding();
     debug_assert_eq!(
-        dot(&message, &covector),
+        mixed_dot(embedding, &covector, &message),
         sum,
         "prove_round entry: dot(message, covector) must equal sum"
     );
@@ -215,15 +217,17 @@ where
     // cs_fresh_padding is pre-sampled here because it does not depend on folding randomness.
     let mut masker = RoundMaskOracle::begin(round, ps);
 
-    // Sumcheck folds its buffers in place. Move the host-side round state into
-    // buffers, fold, and move the folded result back into the `Vec` state
-    // (which downstream steps resize/truncate/index directly). Both hops are
-    // zero-copy on the CPU backend.
-    let mut message_buf = Buffer::from(message);
+    // Sumcheck lifts the source-field message into `M::Target` at its first
+    // fold and returns the folded buffer (the covector folds in place). Move
+    // the host-side round state into buffers, fold, and move the folded result
+    // back into the `Vec` state (which downstream steps resize/truncate/index
+    // directly). The hops are zero-copy on the CPU backend.
+    let message_buf = Buffer::from(message);
     let mut covector_buf = Buffer::from(covector);
-    let opening = round.sumcheck().prove(
+    let (message_buf, opening) = round.sumcheck().prove(
         ps,
-        &mut message_buf,
+        embedding,
+        message_buf,
         &mut covector_buf,
         &mut sum,
         masker.sumcheck_blinding(),
