@@ -15,10 +15,11 @@ use crate::{
 
 /// Prover-side round state.
 ///
-/// The `(message, covector, sum, theta)` scalars live in the target field
-/// `M::Target`; the source IRS `witnesses` live in `M::Source`. For round 0 the
-/// source is the base field; every later round runs over `Identity<M::Target>`
-/// (source = target). A round's code-switch consumes the `M::Source` witnesses
+/// The `(covector, sum, theta)` scalars live in the target field `M::Target`;
+/// the `message` and the source IRS `witnesses` live in `M::Source` (the
+/// round's sumcheck lifts the message into `M::Target` at its first fold).
+/// For round 0 the source is the base field; every later round runs over
+/// `Identity<M::Target>` (source = target). A round's code-switch consumes the `M::Source` witnesses
 /// and yields an `M::Target` one, so a round maps `ProverBlock<M>` to
 /// `ProverBlock<Identity<M::Target>>`.
 ///
@@ -26,7 +27,7 @@ use crate::{
 /// pre-merge rounds it has length 1 with `theta = [ONE]`. After a selector
 /// merge it has length `t` with `theta` from the merge opening.
 pub struct ProverBlock<M: Embedding> {
-    pub(crate) message: Vec<M::Target>,
+    pub(crate) message: Vec<M::Source>,
     pub(crate) covector: Vec<M::Target>,
     pub(crate) sum: M::Target,
     pub(crate) witnesses: Vec<IrsWitness<M::Source>>,
@@ -35,7 +36,7 @@ pub struct ProverBlock<M: Embedding> {
 
 impl<M: Embedding> ProverBlock<M> {
     pub(crate) fn single_source(
-        message: Vec<M::Target>,
+        message: Vec<M::Source>,
         covector: Vec<M::Target>,
         sum: M::Target,
         witness: IrsWitness<M::Source>,

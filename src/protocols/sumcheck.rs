@@ -12,7 +12,7 @@
 //! degree-`d` round polynomial whose `d` non-`c_1` coefficients the prover
 //! sends.
 
-use std::{fmt, num::NonZeroUsize};
+use std::{any::Any, fmt, num::NonZeroUsize};
 
 use ark_ff::Field;
 use ark_std::rand::{CryptoRng, RngCore};
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
-    algebra::univariate_evaluate,
+    algebra::{embedding::Embedding, lift, univariate_evaluate},
     buffer::{Buffer, BufferMath, BufferOps},
     protocols::proof_of_work,
     transcript::{
@@ -94,6 +94,20 @@ pub trait RoundPolyOracle<F: Field> {
     /// Apply the final round's challenge so the oracle's internal state
     /// reflects the fully folded representation when the loop exits.
     fn finalize(&mut self, final_challenge: F);
+}
+
+impl<F: Field, O: RoundPolyOracle<F>> RoundPolyOracle<F> for &mut O {
+    fn degree(&self) -> usize {
+        O::degree(self)
+    }
+
+    fn fold_and_compute(&mut self, prev_challenge: Option<F>) -> Vec<F> {
+        O::fold_and_compute(self, prev_challenge)
+    }
+
+    fn finalize(&mut self, final_challenge: F) {
+        O::finalize(self, final_challenge);
+    }
 }
 
 #[must_use]
@@ -188,23 +202,33 @@ impl<F: Field> Config<F> {
     /// Reduce a claim `dot(a, b) == sum` via the degree-2 dot-product sumcheck.
     ///
     /// Thin wrapper around [`Self::prove_with_oracle`] that builds a
-    /// dot-product oracle. The oracle folds `a` and `b` in place; on return
-    /// they contain the post-loop folded values.
+    /// dot-product oracle, returning the folded `a'` (with `b` folded in
+    /// place).
+    ///
+    /// `a` lives in the embedding's source field, `b` (and the transcript) in
+    /// its target field `F`; pass `&Identity::new()` when both coincide. `a`
+    /// stays in the source field until the first fold lifts it into the target
+    /// field, so the first round's polynomial and fold run as source × target
+    /// products. When the fields coincide the first fold happens in place, so
+    /// no second buffer is held alongside `a`. The transcript is bit-identical
+    /// to lifting `a` up front (the embedding is a ring homomorphism).
     ///
     /// # Panics
     ///
     /// Panics if `self.degree() != 2`. Use [`Self::prove_with_oracle`]
     /// directly for higher-degree sumchecks.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn prove<H, R>(
+    pub fn prove<M, H, R>(
         &self,
         prover_state: &mut ProverState<H, R>,
-        a: &mut Buffer<F>,
+        embedding: &M,
+        a: Buffer<M::Source>,
         b: &mut Buffer<F>,
         sum: &mut F,
         masks: &[F],
-    ) -> SumcheckOpening<F>
+    ) -> (Buffer<F>, SumcheckOpening<F>)
     where
+        M: Embedding<Target = F>,
         H: DuplexSpongeInterface,
         R: CryptoRng + RngCore,
         F: Codec<[H::U]>,
@@ -218,9 +242,23 @@ impl<F: Field> Config<F> {
         );
         assert_eq!(a.len(), self.initial_size);
         assert_eq!(b.len(), self.initial_size);
-        debug_assert_eq!(a.dot(b), *sum);
+        debug_assert_eq!(a.mixed_dot(embedding, b), *sum);
 
-        self.prove_with_oracle(prover_state, sum, masks, DotProductOracle { a, b })
+        let mut oracle = DotProductOracle {
+            embedding,
+            a_source: Some(a),
+            a: None,
+            b,
+        };
+        let opening = self.prove_with_oracle(prover_state, sum, masks, &mut oracle);
+        let a_folded = match (oracle.a, oracle.a_source) {
+            (Some(folded), _) => folded,
+            // No rounds: nothing folds, but the caller still expects a
+            // target-field buffer. Cold path; a plain lift is fine.
+            (None, Some(a)) => Buffer::from(lift(embedding, a.to_slice())),
+            (None, None) => unreachable!("oracle consumed the source buffer without folding"),
+        };
+        (a_folded, opening)
     }
 
     /// Generic sumcheck prover. Drives the transcript / mask / challenge /
@@ -441,6 +479,18 @@ impl<F: Field> fmt::Display for Config<F> {
 }
 
 // Evaluated a univariate as p(0) + p(1)
+/// If the embedding's source and target fields coincide (e.g. `Identity`),
+/// recover the source buffer as a target-field buffer without copying;
+/// otherwise hand the buffer back.
+fn same_field_buffer<M: Embedding>(
+    a: Buffer<M::Source>,
+) -> Result<Buffer<M::Target>, Buffer<M::Source>> {
+    match (Box::new(a) as Box<dyn Any>).downcast::<Buffer<M::Target>>() {
+        Ok(same_field) => Ok(*same_field),
+        Err(a) => Err(*a.downcast::<Buffer<M::Source>>().expect("roundtrip")),
+    }
+}
+
 fn eval_01<F: Field>(coefficients: &[F]) -> F {
     if coefficients.is_empty() {
         return F::ZERO;
@@ -453,26 +503,65 @@ fn eval_01<F: Field>(coefficients: &[F]) -> F {
 /// place using [`BufferMath::fold_pair_sumcheck_polynomial`] to fuse the
 /// previous-round fold with the current-round polynomial computation in a
 /// single pass.
-struct DotProductOracle<'a, F: Field> {
-    a: &'a mut Buffer<F>,
-    b: &'a mut Buffer<F>,
+struct DotProductOracle<'a, M: Embedding> {
+    embedding: &'a M,
+    /// `a` before the first fold, in the source field.
+    a_source: Option<Buffer<M::Source>>,
+    /// `a` from the first fold on, in the target field.
+    a: Option<Buffer<M::Target>>,
+    b: &'a mut Buffer<M::Target>,
 }
 
-impl<F: Field> RoundPolyOracle<F> for DotProductOracle<'_, F> {
+impl<M: Embedding> DotProductOracle<'_, M> {
+    /// First fold: `a` crosses from the source to the target field. When the
+    /// fields coincide (`Identity`) fold in place; only a genuine base → ext
+    /// crossing allocates the target buffer while the source one is alive.
+    /// Folds `b` alongside.
+    fn first_fold(&mut self, w: M::Target) -> Buffer<M::Target> {
+        let a = self.a_source.take().expect("source buffer consumed once");
+        let folded = match same_field_buffer::<M>(a) {
+            Ok(mut same_field) => {
+                same_field.fold(w);
+                same_field
+            }
+            Err(a) => a.mixed_fold(self.embedding, w),
+        };
+        self.b.fold(w);
+        folded
+    }
+}
+
+impl<M: Embedding> RoundPolyOracle<M::Target> for DotProductOracle<'_, M> {
     fn degree(&self) -> usize {
         2
     }
 
-    fn fold_and_compute(&mut self, prev_challenge: Option<F>) -> Vec<F> {
-        let (c0, c2) = match prev_challenge {
-            Some(w) => self.a.fold_pair_sumcheck_polynomial(self.b, w),
-            None => self.a.sumcheck_polynomial(self.b),
+    fn fold_and_compute(&mut self, prev_challenge: Option<M::Target>) -> Vec<M::Target> {
+        let (c0, c2) = if let Some(folded) = self.a.as_mut() {
+            let w = prev_challenge.expect("folded buffer implies a prior challenge");
+            folded.fold_pair_sumcheck_polynomial(self.b, w)
+        } else if let Some(w) = prev_challenge {
+            let folded = self.first_fold(w);
+            let coefficients = folded.sumcheck_polynomial(self.b);
+            self.a = Some(folded);
+            coefficients
+        } else {
+            let a = self
+                .a_source
+                .as_ref()
+                .expect("source buffer available before the first fold");
+            a.mixed_sumcheck_polynomial(self.embedding, self.b)
         };
         vec![c0, c2]
     }
 
-    fn finalize(&mut self, final_challenge: F) {
-        self.a.fold_pair(self.b, final_challenge);
+    fn finalize(&mut self, final_challenge: M::Target) {
+        if let Some(folded) = self.a.as_mut() {
+            folded.fold_pair(self.b, final_challenge);
+        } else {
+            let folded = self.first_fold(final_challenge);
+            self.a = Some(folded);
+        }
     }
 }
 
@@ -491,6 +580,7 @@ mod tests {
     use crate::{
         algebra::{
             dot,
+            embedding::Identity,
             fields::{self, Field64},
             multilinear_extend, random_vector,
         },
@@ -543,16 +633,20 @@ mod tests {
         let masks = random_vector(&mut rng, config.mask_length() * config.num_rounds);
 
         // Prover
-        let mut vector = Buffer::from(initial_vector.as_slice());
+        let vector = Buffer::from(initial_vector.as_slice());
         let mut covector = Buffer::from(initial_covector.as_slice());
         let mut sum = initial_sum;
         let mut prover_state = ProverState::new_std(&ds);
-        let SumcheckOpening {
-            round_challenges: point,
-            mask_rlc,
-        } = config.prove(
+        let (
+            vector,
+            SumcheckOpening {
+                round_challenges: point,
+                mask_rlc,
+            },
+        ) = config.prove(
             &mut prover_state,
-            &mut vector,
+            &Identity::new(),
+            vector,
             &mut covector,
             &mut sum,
             &masks,
@@ -611,6 +705,63 @@ mod tests {
         crate::tests::init();
         proptest!(|(seed: u64, config in Config::arbitrary())| {
             test_config(seed, &config);
+        });
+    }
+
+    /// The delayed lift's core claim: proving with a source-field `a` through
+    /// a real embedding is byte-identical (proof and outputs) to lifting `a`
+    /// up front and proving through `Identity`.
+    #[test]
+    fn mixed_prove_matches_lifted_transcript() {
+        use crate::algebra::{embedding::Basefield, fields::Field64_3, lift};
+        crate::tests::init();
+        let embedding = Basefield::<Field64_3>::new();
+        proptest!(|(seed: u64, config in Config::<Field64_3>::arbitrary())| {
+            let instance = U64(seed);
+            let ds = DomainSeparator::protocol(&config)
+                .session(&format!("Mixed vs lifted at {}:{}", file!(), line!()))
+                .instance(&instance);
+            let mut rng = StdRng::seed_from_u64(seed);
+            let a_source: Vec<Field64> = random_vector(&mut rng, config.initial_size);
+            let covector: Vec<Field64_3> = random_vector(&mut rng, config.initial_size);
+            let masks: Vec<Field64_3> =
+                random_vector(&mut rng, config.mask_length() * config.num_rounds);
+            let a_lifted = lift(&embedding, &a_source);
+            let initial_sum = dot(&a_lifted, &covector);
+
+            let run = |mixed: bool| {
+                let mut b = Buffer::from(covector.as_slice());
+                let mut sum = initial_sum;
+                let mut prover_state = ProverState::new_std(&ds);
+                let (folded, opening) = if mixed {
+                    config.prove(
+                        &mut prover_state,
+                        &embedding,
+                        Buffer::from(a_source.as_slice()),
+                        &mut b,
+                        &mut sum,
+                        &masks,
+                    )
+                } else {
+                    config.prove(
+                        &mut prover_state,
+                        &Identity::new(),
+                        Buffer::from(a_lifted.as_slice()),
+                        &mut b,
+                        &mut sum,
+                        &masks,
+                    )
+                };
+                (
+                    prover_state.proof(),
+                    folded.into_vec(),
+                    b.into_vec(),
+                    sum,
+                    opening.round_challenges,
+                    opening.mask_rlc,
+                )
+            };
+            assert_eq!(run(true), run(false));
         });
     }
 

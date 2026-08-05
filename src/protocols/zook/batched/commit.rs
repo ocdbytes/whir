@@ -10,7 +10,7 @@ use ark_std::rand::{distributions::Standard, prelude::Distribution, CryptoRng, R
 use tracing::instrument;
 
 use crate::{
-    algebra::{embedding::Embedding, lift},
+    algebra::embedding::Embedding,
     buffer::{Buffer, BufferOps},
     hash::Hash,
     protocols::{
@@ -79,12 +79,11 @@ impl<M: Embedding + Default> BatchedProtocolConfig<M> {
         let flat = Buffer::from(flat);
 
         let irs_witness = bundle_cfg.irs_config.commit(ps, &[&flat]);
-        let message = lift(bundle_cfg.irs_config.embedding(), flat.to_slice());
         let batching_challenge: M::Target = ps.verifier_message();
 
         BundleCommittedWitness {
             state: CommittedState::Round {
-                message,
+                message: flat.into_vec(),
                 irs_witness,
             },
             batching_challenge,

@@ -15,6 +15,7 @@ use crate::{
     algebra::{
         dot,
         embedding::{Embedding, Identity},
+        mixed_dot,
     },
     buffer::{Buffer, BufferOps},
     hash::Hash,
@@ -63,10 +64,11 @@ where
         theta,
     } = block;
 
+    let embedding = round.code_switch().source().embedding();
     debug_assert_eq!(witnesses.len(), theta.len());
     debug_assert!(!witnesses.is_empty());
     debug_assert_eq!(
-        dot(&message, &covector),
+        mixed_dot(embedding, &covector, &message),
         sum,
         "prove_whir_round entry: dot(message, covector) must equal sum"
     );
@@ -75,15 +77,18 @@ where
 
     let mut masker = RoundMaskOracle::begin(round, ps);
 
-    // Sumcheck folds its buffers in place. Move the host-side `Vec` round state
-    // into buffers, fold, and move the folded result back into `Vec` (downstream
-    // steps resize/truncate/index directly, and code-switch takes `Vec`
-    // message). Both hops are zero-copy on the CPU backend.
-    let mut message_buf = Buffer::from(message);
+    // Sumcheck lifts the source-field message into `M::Target` at its first
+    // fold and returns the folded buffer (the covector folds in place). Move
+    // the host-side `Vec` round state into buffers, fold, and move the folded
+    // result back into `Vec` (downstream steps resize/truncate/index directly,
+    // and code-switch takes `Vec` message). The hops are zero-copy on the CPU
+    // backend.
+    let message_buf = Buffer::from(message);
     let mut covector_buf = Buffer::from(covector);
-    let opening = round.sumcheck().prove(
+    let (message_buf, opening) = round.sumcheck().prove(
         ps,
-        &mut message_buf,
+        embedding,
+        message_buf,
         &mut covector_buf,
         &mut sum,
         masker.sumcheck_blinding(),
@@ -95,7 +100,7 @@ where
     // them into `M::Target` via the embedding before folding.
     let witness_refs: Vec<&IrsWitness<M::Source>> = witnesses.iter().collect();
     masker.bind_code_switch_mask_multi_source(
-        round.code_switch().source().embedding(),
+        embedding,
         &witness_refs,
         &theta,
         &opening,

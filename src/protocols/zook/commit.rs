@@ -32,8 +32,10 @@ pub struct CommittedWitness<M: Embedding> {
 #[derive(Clone, Debug)]
 pub(crate) enum CommittedState<M: Embedding> {
     /// Plan has ≥ 1 round; committed through `rounds[0].code_switch.source`.
+    /// The message stays in `M::Source`: the first round's sumcheck lifts it
+    /// into `M::Target` at its first fold.
     Round {
-        message: Vec<M::Target>,
+        message: Vec<M::Source>,
         irs_witness: IrsWitness<M::Source>,
     },
     /// Basecase-only plan; witness was lifted into `M::Target` first.
@@ -74,9 +76,8 @@ impl<M: Embedding + Default> ProtocolConfig<M> {
         let state = if let Some(round) = self.first_round() {
             let witness_buffer = Buffer::from(witness);
             let irs_witness = round.code_switch().source().commit(ps, &[&witness_buffer]);
-            let message = lift(round.code_switch().source().embedding(), witness);
             CommittedState::Round {
-                message,
+                message: witness.to_vec(),
                 irs_witness,
             }
         } else {
